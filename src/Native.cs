@@ -62,6 +62,10 @@ namespace WeatherWallpaper
         [DllImport("dwmapi")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
         [DllImport("dwmapi")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT val, int size);
         [DllImport("shell32")] public static extern IntPtr SHAppBarMessage(uint msg, ref APPBARDATA d);
+        [DllImport("dwmapi")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+        [StructLayout(LayoutKind.Sequential)] public struct MARGINS { public int L, R, T, B; }
+        [DllImport("dwmapi")] public static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref MARGINS m);
+        [DllImport("user32")] public static extern bool SetForegroundWindow(IntPtr h);
 
         [DllImport("user32")] public static extern bool UpdateLayeredWindow(IntPtr h, IntPtr hdcDst, ref POINT dst, ref SIZE size,
             IntPtr hdcSrc, ref POINT src, uint key, ref BLENDFUNCTION blend, uint flags);

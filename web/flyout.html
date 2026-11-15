@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Weather Flyout</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  /* 托盘弹出面板：窗口本身是系统亚克力背景，页面透明，只叠一层淡色 */
+  html, body { background: transparent; }
+  #panel {
+    position: static; width: 100%; border: none; border-radius: 0; box-shadow: none; backdrop-filter: none;
+    background: rgba(30, 38, 56, .35); padding: 18px 20px 12px; text-shadow: none; transition: none;
+  }
+  .actions { display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.12); }
+  .actions button {
+    flex: 1; height: 32px; border: none; border-radius: 6px; color: #fff; font: inherit; font-size: 12.5px;
+    background: rgba(255,255,255,.09); cursor: pointer;
+  }
+  .actions button:hover { background: rgba(255,255,255,.16); }
+  .actions button:active { background: rgba(255,255,255,.06); }
+  .update {
+    display: flex; align-items: center; gap: 8px; margin: 10px 0 0; padding: 8px 10px; border-radius: 6px;
+    background: rgba(76, 154, 255, .22); font-size: 12.5px; cursor: pointer;
+  }
+  .update:hover { background: rgba(76, 154, 255, .32); }
+  .update b { font-weight: 600; }
+  .update span { margin-left: auto; opacity: .85; }
+  .empty { padding: 40px 0; text-align: center; opacity: .7; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="panel"><div class="empty">正在获取天气…</div></div>
+<script src="icons.js"></script>
+<script src="weather.js"></script>
+<script>
+(() => {
+  const host = window.chrome && window.chrome.webview;
+  const post = m => host && host.postMessage(m);
+  const panel = document.getElementById('panel');
+  let weather = null, label = '', update = null;
+  const PREV = { clear: '晴天', sunrise: '日出', sunset: '日落', night: '晴夜', partly: '多云', cloudy: '阴天', fog: '雾',
+    drizzle: '毛毛雨', rain: '中雨', heavy: '暴雨', thunder: '雷阵雨', snow: '雪' };
+
+  function render() {
+    if (weather) {
+      try { panel.innerHTML = WX.panelHtml(weather, Date.now() + weather.fc.utc_offset_seconds * 1000, label); }
+      catch (e) { post('log:flyout ' + e.message); }
+    }
+    if (update && update.tag) {
+      const u = document.createElement('div');
+      u.className = 'update';
+      u.innerHTML = '<b>发现新版本 ' + update.tag + '</b><span>当前 ' + update.cur + ' · 点击更新 ›</span>';
+      u.onclick = () => post('cmd:update');
+      panel.appendChild(u);
+    }
+    const bar = document.createElement('div');
+    bar.className = 'actions';
+    bar.innerHTML = '<button data-c="refresh">刷新天气</button><button data-c="city">设置城市</button><button data-c="menu">更多设置</button>';
+    bar.onclick = e => { const c = e.target.dataset && e.target.dataset.c; if (c) post('cmd:' + c); };
+    panel.appendChild(bar);
+    // 告诉宿主内容高度，窗口按内容大小调整
+    requestAnimationFrame(() => post('size:' + Math.ceil(document.body.scrollWidth) + ',' + Math.ceil(panel.getBoundingClientRect().height)));
+  }
+
+  if (host) host.addEventListener('message', ev => {
+    const m = ev.data;
+    if (!m || !m.t) return;
+    if (m.t === 'weather') { weather = m; render(); }
+    else if (m.t === 'preview') { label = [PREV[m.mode] || '', m.day ? '一天快进' : ''].filter(Boolean).join(' · '); render(); }
+    else if (m.t === 'update') { update = m; render(); }
+    else if (m.t === 'show') render();   // 每次弹出时刷新"x 时"等相对时间
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') post('cmd:hide'); });
+  document.addEventListener('contextmenu', e => e.preventDefault());
+  render();
+  post('ready');
+})();
+</script>
+</body>
+</html>

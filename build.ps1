@@ -44,7 +44,7 @@ using System.Reflection;
 "@ | Set-Content $ai -Encoding UTF8
 
 $refs = 'System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Net.Http.dll',
-        'System.Device.dll', 'System.Web.Extensions.dll' | ForEach-Object { "/r:$fw\$_" }
+        'System.Device.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll' | ForEach-Object { "/r:$fw\$_" }
 $refs += "/r:$wvLib\Microsoft.Web.WebView2.Core.dll", "/r:$wvLib\Microsoft.Web.WebView2.WinForms.dll"
 
 $sources = @((Get-ChildItem "$root\src\*.cs").FullName) + $ai

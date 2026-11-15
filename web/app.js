@@ -16,11 +16,60 @@
   const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
   const hex = s => [parseInt(s.slice(1, 3), 16), parseInt(s.slice(3, 5), 16), parseInt(s.slice(5, 7), 16)];
   const mix = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
-  const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  // 颜色和透明度量化：背景每帧都会新建渐变，Chromium 的渐变缓存按颜色去重，不量化的话缓存会随时间不断增长（实测每分钟约 13 MB）
+  const css = (c, a = 1) => L.lowmem
+    ? `rgba(${(c[0] >> 2) << 2},${(c[1] >> 2) << 2},${(c[2] >> 2) << 2},${Math.round(a * 50) / 50})`
+    : `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  // 渐变缓存：背景每帧要建十几个渐变，Blink 的垃圾堆积得很快（实测每分钟 +11 MB，手动 GC 后才掉回来）。
+  // createXGradient 只返回"记录单"，赋给 fillStyle 时才按（几何参数 + 颜色）查缓存、命中就复用同一个真渐变。
+  (() => {
+    const P = CanvasRenderingContext2D.prototype, pool = new Map();
+    class Spec {
+      constructor(k, a) { this.k = k; this.a = L.lowmem ? a.map(v => Math.round(v)) : a; this.s = []; }
+      addColorStop(p, c) { this.s.push(p, c); }
+      real(g) {
+        if (!L.lowmem) {   // 省内存模式关闭：每次新建，行为与原来一致
+          const r = g[this.k](...this.a);
+          for (let i = 0; i < this.s.length; i += 2) r.addColorStop(this.s[i], this.s[i + 1]);
+          return r;
+        }
+        const key = this.k + this.a + '|' + this.s;
+        let r = pool.get(key);
+        if (!r) {
+          if (pool.size > 400) pool.clear();
+          r = g[this.k](...this.a);
+          for (let i = 0; i < this.s.length; i += 2) r.addColorStop(this.s[i], this.s[i + 1]);
+          pool.set(key, r);
+        }
+        return r;
+      }
+    }
+    const gl = document.createElement('canvas').getContext('2d');
+    const lin = gl.createLinearGradient.bind(gl), rad = gl.createRadialGradient.bind(gl);   // 先取原版，再替换
+    P.createLinearGradient = function (...a) { return new Spec('createLinearGradient0', a); };
+    P.createRadialGradient = function (...a) { return new Spec('createRadialGradient0', a); };
+    for (const prop of ['fillStyle', 'strokeStyle']) {
+      const d = Object.getOwnPropertyDescriptor(P, prop);
+      Object.defineProperty(P, prop, {
+        configurable: true, enumerable: true, get: d.get,
+        set(v) { d.set.call(this, v instanceof Spec ? v.real({ createLinearGradient0: lin, createRadialGradient0: rad }) : v); },
+      });
+    }
+  })();
   const rand = Math.random;
   function prng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30 };
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, pos: 'tr', mx: 28, my: 28 };
+
+  // 卡片位置：tr / tl / tc / br / bl；底部时让开任务栏
+  function placePanel() {
+    const s = panel.style, p = L.pos || 'tr', bottom = p[0] === 'b';
+    s.top = bottom ? 'auto' : L.my + 'px';
+    s.bottom = bottom ? Math.round(L.ground * H + L.my) + 'px' : 'auto';
+    s.left = p[1] === 'l' ? L.mx + 'px' : p[1] === 'c' ? '50%' : 'auto';
+    s.right = p[1] === 'r' ? L.mx + 'px' : 'auto';
+    s.transform = p[1] === 'c' ? 'translateX(-50%)' : '';
+  }
   let W = 0, H = 0, DPR = 1;
   let weather = null, preview = 'live', demo = null, paused = false;
 
@@ -354,8 +403,16 @@
 
   // ------------------------------------------------------------------ 绘制
   function draw() { drawBg(); drawFx(); }
+  // 背景画布分辨率自适应：有星星 / 月亮 / 清晰的太阳时用全分辨率；阴天、雨雪、雾等画面本来就柔和，用半分辨率省显存
+  let bgK = 1, wantK = 1, wantSince = 0;
+  function bgAlloc(k) {
+    bgK = k;
+    cvs.width = Math.round(W * DPR * k); cvs.height = Math.round(H * DPR * k);
+    bctx.setTransform(DPR * k, 0, 0, DPR * k, 0, 0);
+  }
   function drawBg() {
     ctx = bctx;
+    if (wantK !== bgK && performance.now() - wantSince > 3000) bgAlloc(wantK);   // 持续 3 秒才切换，避免临界处来回抖
     const li = locInfo(), t = now();
     const sp = sunPos(t, li), e = sp.e;
     const hz = horizonY();
@@ -403,7 +460,10 @@
 
     const vis = (1 - smooth(0.45, 1, cur.cloud) * 0.93) * (1 - cur.fog * 0.6);
     // 月亮
-    if (e < -2) drawMoon(t, li, sp.di, (1 - smooth(-6, -2, e)) * (1 - smooth(0.55, 1, cur.cloud) * 0.9) * (1 - cur.fog * 0.6));
+    const moonV = e < -2 ? (1 - smooth(-6, -2, e)) * (1 - smooth(0.55, 1, cur.cloud) * 0.9) * (1 - cur.fog * 0.6) : 0;
+    if (moonV > 0) drawMoon(t, li, sp.di, moonV);
+    const k = !L.lowmem || starA > 0.01 || moonV > 0.05 || vis * smooth(-4, 0.5, e) > 0.25 ? 1 : 0.5;
+    if (k !== wantK) { wantK = k; wantSince = performance.now(); }
     // 太阳
     if (e > -4) drawSun(sp, vis);
 
@@ -660,6 +720,7 @@
   // ------------------------------------------------------------------ 天气卡片
   function renderPanel() {
     if (!(L.panel && L.primary) || !weather) { panel.classList.add('hidden'); return; }
+    placePanel();
     try {
       panel.innerHTML = WX.panelHtml(weather, Date.now() + weather.fc.utc_offset_seconds * 1000, previewLabel());
       panel.classList.remove('hidden');
@@ -680,17 +741,24 @@
     const dt = Math.min(0.1, (ts - last) / 1000);
     last = ts;
     update(dt);
-    if (fxActive) { drawFx(); fxDirty = true; }
-    else if (fxDirty) { fctx.clearRect(0, 0, W, H); fxDirty = false; }
+    if (fxActive) { fxAlloc(true); drawFx(); fxDirty = true; }
+    else if (fxDirty) { fxAlloc(false); fxDirty = false; }
     if (ts - lastBg >= 1000 / bgFps - 3) { lastBg = ts; drawBg(); }
+  }
+  // 前景画布只在有雨雪 / 闪电时才分配整屏大小；晴天、多云时缩成 1×1 并隐藏，省下一整屏的显存和合成开销
+  let fxOn = false;
+  function fxAlloc(on) {
+    if (on === fxOn) return;
+    fxOn = on;
+    fxCvs.width = on ? Math.round(W * DPR) : 1; fxCvs.height = on ? Math.round(H * DPR) : 1;
+    fxCvs.style.display = on ? '' : 'none';
+    if (on) fctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   }
   function resize() {
     DPR = window.devicePixelRatio || 1;
     W = window.innerWidth; H = window.innerHeight;
-    for (const [c, g] of [[cvs, bctx], [fxCvs, fctx]]) {
-      c.width = Math.round(W * DPR); c.height = Math.round(H * DPR);
-      g.setTransform(DPR, 0, 0, DPR, 0, 0);
-    }
+    bgAlloc(bgK);
+    { const was = fxOn; fxOn = !was; fxAlloc(was); }   // 按新尺寸重新分配（或确保初始为 1×1）
     lastBg = -1e9; fxDirty = true;
     initStars();
     drops.length = 0; flakes.length = 0; firstFill = true;
@@ -717,10 +785,23 @@
     });
     post('ready');
   } else {
-    // 浏览器里直接打开调试：?mode=rain 等
-    L.panel = true; L.primary = true; L.ground = 0.0444;
+    // 浏览器里直接打开调试：?mode=rain&day=1&data=sample.json&panel=0
     const q = new URLSearchParams(location.search);
-    if (q.get('mode')) setPreview(q.get('mode'));
+    L.panel = q.get('panel') !== '0'; L.primary = true; L.ground = 0.0444;
+    if (q.get('manual') === '1') {
+      // 录制用：停掉 rAF，由外部按固定步长推进虚拟时钟逐帧绘制（截图慢也不影响动画流畅度）
+      let vt = performance.now();
+      performance.now = () => vt;
+      paused = true;
+      window.__step = (dt) => { vt += dt * 1000; update(dt); draw(); };
+    }
+    const apply = () => {
+      setPreview(q.get('mode') || 'live', q.get('day') === '1');
+      const at = /^(\d+):(\d+)$/.exec(q.get('at') || '');   // ?at=13:00 固定当地时间
+      if (at && !dayDemo) demo = { base: dayInfo(Date.now(), locInfo()).mid + (at[1] * 60 + +at[2]) * 60000, start: performance.now(), speed: 1 };
+    };
+    if (q.get('data')) fetch(q.get('data')).then(r => r.json()).then(m => { weather = m; dayCache.clear(); apply(); firstScene = true; window.__ready = true; });
+    else { apply(); window.__ready = true; }
   }
   setInterval(() => { if (paused) { firstScene = true; update(0.016); draw(); } }, 60000);
   raf = requestAnimationFrame(frame);

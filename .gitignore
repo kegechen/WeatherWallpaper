@@ -3,3 +3,6 @@ obj/
 dist/
 shots/
 *.wixpdb
+node_modules/
+tools/readme/.frames/
+package-lock.json

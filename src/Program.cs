@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -98,6 +98,8 @@ namespace WeatherWallpaper
             {
                 if (e.Mode == PowerModes.Resume) { weatherTimer.Stop(); weatherTimer.Interval = 15000; weatherTimer.Start(); }
             };
+            StartUpdateTimer();
+            WatchSettings();
             Init();
         }
 
@@ -197,7 +199,8 @@ namespace WeatherWallpaper
             bool main = w == MainWall;
             return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)
                 + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel && main)
-                + ",\"fps\":" + w.Fps + "}";
+                + ",\"fps\":" + w.Fps + ",\"pos\":" + WeatherService.JsonStr(settings.PanelPos ?? "tr")
+                + ",\"lowmem\":" + B(settings.LowMemory) + ",\"mx\":" + settings.PanelMarginX + ",\"my\":" + settings.PanelMarginY + "}";
         }
         static string B(bool b) => b ? "true" : "false";
 
@@ -232,7 +235,37 @@ namespace WeatherWallpaper
             catch (Exception ex) { Log.Write("scene parse: " + ex.Message); }
         }
 
-        void Broadcast(string json) { foreach (var w in walls) w.Post(json); }
+        void Broadcast(string json) { foreach (var w in walls) w.Post(json); flyout?.Post(json); }
+
+        FlyoutWindow flyout;
+        void ToggleFlyout()
+        {
+            if (env == null) return;
+            if (flyout == null)
+            {
+                flyout = new FlyoutWindow(env) { OnCommand = FlyoutCommand };
+                if (payload != null) flyout.Post(payload);
+                flyout.Post(PreviewJson());
+                flyout.Post(UpdateJson());
+            }
+            flyout.Toggle();
+        }
+
+        void FlyoutCommand(string c)
+        {
+            switch (c)
+            {
+                case "refresh": Refresh(true); break;
+                case "city": flyout.HideFlyout(); PickCity(); break;
+                case "hide": flyout.HideFlyout(); break;
+                case "update": flyout.HideFlyout(); if (newer != null) PromptUpdate(newer); break;
+                case "menu":
+                    flyout.HideFlyout();
+                    // NotifyIcon 没有公开的弹菜单方法，用它内部的 ShowContextMenu（和右键效果一致）
+                    typeof(NotifyIcon).GetMethod("ShowContextMenu", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.Invoke(tray, null);
+                    break;
+            }
+        }
 
         // ---------------------------------------------------------------- 遮挡 / 全屏检测
         void Watch()
@@ -387,6 +420,12 @@ namespace WeatherWallpaper
                 case "refresh": Refresh(true); break;
                 case "rebuild": BuildWalls(); break;
                 case "quit": Quit(); break;
+                case "checkupdate": CheckUpdate(arg == "manual"); break;
+                case "update-now":   // 不弹确认直接更新（脚本 / 测试用）
+                    try { var ui = await Updater.Check(); if (ui.Version > Updater.Current || arg == "force") await InstallUpdate(ui); }
+                    catch (Exception ex) { Log.Write("update-now: " + ex.Message); }
+                    break;
+                case "flyout": ToggleFlyout(); break;
                 case "capture":
                     var dir = arg == "" ? Settings.LocalDir : arg;
                     Directory.CreateDirectory(dir);
@@ -465,6 +504,8 @@ namespace WeatherWallpaper
 
             var fx = new ToolStripMenuItem("任务栏雨雪效果") { CheckOnClick = true };
             fx.Click += (s, e) => { settings.TaskbarFx = fx.Checked; settings.Save(); ConfigureOverlay(); };
+            var lowMem = new ToolStripMenuItem("省内存模式（约少 40 MB，画面略软）") { CheckOnClick = true };
+            lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); };
             var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
             wfx.Click += (s, e) => { settings.WindowFx = wfx.Checked; settings.Save(); Watch(); };
             var card = new ToolStripMenuItem("显示天气卡片") { CheckOnClick = true };
@@ -490,28 +531,49 @@ namespace WeatherWallpaper
                 }
             };
             mon.DropDownItems.Add("…");
+            var pos = new ToolStripMenuItem("卡片位置");
+            foreach (var p in new[] { new[] { "tr", "右上角" }, new[] { "tl", "左上角" }, new[] { "tc", "顶部居中" }, new[] { "br", "右下角" }, new[] { "bl", "左下角" } })
+            {
+                var key = p[0];
+                var it = new ToolStripMenuItem(p[1]) { Tag = key };
+                it.Click += (s, e) => { settings.PanelPos = key; settings.Save(); ConfigureOverlay(); };
+                pos.DropDownItems.Add(it);
+            }
+            pos.DropDownItems.Add(new ToolStripSeparator());
+            pos.DropDownItems.Add(new ToolStripMenuItem("调整边距…（编辑 PanelMarginX / PanelMarginY，保存即生效）", null, (s, e) => OpenSettingsFile()));
+            pos.DropDownOpening += (s, e) => { foreach (var o in pos.DropDownItems.OfType<ToolStripMenuItem>()) if (o.Tag is string) o.Checked = (string)o.Tag == (settings.PanelPos ?? "tr"); };
             var status = new ToolStripMenuItem("状态") { Enabled = false };
             var fps60 = new ToolStripMenuItem("高帧率（60 FPS）") { CheckOnClick = true };
             fps60.Click += (s, e) => { settings.Fps = fps60.Checked ? 60 : 30; settings.Save(); overlay.SetFps(settings.Fps); ConfigureOverlay(); };
             var startup = new ToolStripMenuItem("开机自启") { CheckOnClick = true };
             startup.Click += (s, e) => SetAutoStart(startup.Checked);
-            menu.Items.Add(fx); menu.Items.Add(wfx); menu.Items.Add(card); menu.Items.Add(mon); menu.Items.Add(fps60); menu.Items.Add(startup);
+            menu.Items.Add(fx); menu.Items.Add(wfx); menu.Items.Add(card); menu.Items.Add(pos); menu.Items.Add(mon); menu.Items.Add(fps60); menu.Items.Add(lowMem); menu.Items.Add(startup);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(status);
             menu.Items.Add(new ToolStripSeparator());
+            updateItem = new ToolStripMenuItem("检查更新", null, (s, e) => { if (newer != null) PromptUpdate(newer); else CheckUpdate(true); });
+            var autoUpd = new ToolStripMenuItem("自动检查更新") { CheckOnClick = true };
+            autoUpd.Click += (s, e) => { settings.AutoUpdate = autoUpd.Checked; settings.Save(); };
+            menu.Items.Add(updateItem); menu.Items.Add(autoUpd);
+            menu.Items.Add("编辑设置文件…", null, (s, e) => OpenSettingsFile());
             menu.Items.Add("打开日志目录", null, (s, e) => System.Diagnostics.Process.Start("explorer.exe", Settings.LocalDir));
+            menu.Opening += (s, e) =>
+            {
+                autoUpd.Checked = settings.AutoUpdate;
+                if (newer == null) updateItem.Text = "检查更新（当前 v" + Updater.Current + "）";
+            };
             menu.Items.Add("退出", null, (s, e) => Quit());
 
             menu.Opening += (s, e) =>
             {
-                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx; card.Checked = settings.ShowPanel;
+                fx.Checked = settings.TaskbarFx; lowMem.Checked = settings.LowMemory; wfx.Checked = settings.WindowFx; card.Checked = settings.ShowPanel;
                 status.Text = "当前：" + (perfText == "" ? "启动中" : perfText);
                 fps60.Checked = settings.Fps >= 60; startup.Checked = IsAutoStart();
                 auto.Checked = !settings.Lat.HasValue;
                 city.Text = settings.Lat.HasValue ? "设置城市…（当前：" + settings.City + "）" : "设置城市…";
             };
             tray.ContextMenuStrip = menu;
-            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) Refresh(false); };
+            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ToggleFlyout(); };
         }
 
         static Icon MakeIcon()
@@ -562,14 +624,137 @@ namespace WeatherWallpaper
             Refresh(true);
         }
 
+        // ---------------------------------------------------------------- 设置文件
+        FileSystemWatcher settingsWatcher;
+        readonly WinTimer settingsReload = new WinTimer { Interval = 400 };
+
+        /// <summary>用记事本打开 settings.json（格式化成多行便于编辑），保存后自动重新加载。</summary>
+        void OpenSettingsFile()
+        {
+            settings.Save();
+            OpenUrl("notepad.exe", "\"" + Settings.FilePath + "\"");
+        }
+
+        void WatchSettings()
+        {
+            settingsWatcher = new FileSystemWatcher(Settings.AppDataDir, "settings.json") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName };
+            var ui = SynchronizationContext.Current;
+            FileSystemEventHandler h = (s, e) => ui?.Post(_ => { settingsReload.Stop(); settingsReload.Start(); }, null);
+            settingsWatcher.Changed += h; settingsWatcher.Created += h;
+            settingsWatcher.Renamed += (s, e) => h(s, e);
+            settingsReload.Tick += (s, e) => { settingsReload.Stop(); ReloadSettings(); };
+            settingsWatcher.EnableRaisingEvents = true;
+        }
+
+        void ReloadSettings()
+        {
+            var n = Settings.TryLoad();
+            if (n == null) { Log.Write("settings reload: parse failed, ignored"); return; }
+            if (n.Same(settings)) return;   // 自己保存触发的
+            bool walls = n.Monitors != settings.Monitors || n.Layered != settings.Layered || n.DevTools != settings.DevTools;
+            bool loc = n.Lat != settings.Lat || n.Lon != settings.Lon;
+            settings.CopyFrom(n);
+            Log.Write("settings reloaded");
+            overlay.SetFps(settings.Fps);
+            if (walls) BuildWalls(); else ConfigureOverlay();
+            Watch();
+            if (loc) Refresh(true);
+        }
+
+        // ---------------------------------------------------------------- 检查更新
+        UpdateInfo newer;
+        ToolStripMenuItem updateItem;
+        bool checking, installing;
+        readonly WinTimer updateTimer = new WinTimer();
+
+        void StartUpdateTimer()
+        {
+            updateTimer.Interval = 60 * 1000;   // 启动 1 分钟后查一次，之后每 12 小时
+            updateTimer.Tick += (s, e) =>
+            {
+                updateTimer.Interval = 12 * 3600 * 1000;
+                if (settings.AutoUpdate && !Updater.IsDevBuild) CheckUpdate(false);
+            };
+            updateTimer.Start();
+        }
+
+        string UpdateJson() => newer == null || settings.SkipVersion == newer.Version.ToString() ? "{\"t\":\"update\",\"tag\":null}"
+            : "{\"t\":\"update\",\"tag\":" + WeatherService.JsonStr(newer.Tag) + ",\"cur\":" + WeatherService.JsonStr("v" + Updater.Current) + "}";
+
+        async void CheckUpdate(bool manual)
+        {
+            if (checking) return;
+            checking = true;
+            try
+            {
+                var info = await Updater.Check();
+                Log.Write("update: latest " + info.Tag + ", current " + Updater.Current);
+                if (info.Version <= Updater.Current)
+                {
+                    if (manual) MessageBox.Show("已经是最新版本（v" + Updater.Current + "）。", "天气壁纸", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                // 不弹托盘通知，只在右键菜单（加粗）和左键弹出面板里提示
+                newer = info;
+                updateItem.Text = "发现新版本 " + info.Tag + "，点击更新（当前 v" + Updater.Current + "）";
+                updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
+                flyout?.Post(UpdateJson());
+                if (manual) PromptUpdate(info);
+            }
+            catch (Exception ex)
+            {
+                Log.Write("update check: " + ex.Message);
+                if (manual) MessageBox.Show("检查更新失败：" + ex.Message + "\n\n可以稍后再试，或直接打开发布页：\n" + Updater.ReleasePage, "天气壁纸", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally { checking = false; }
+        }
+
+        async void PromptUpdate(UpdateInfo info)
+        {
+            if (installing) return;
+            var res = MessageBox.Show("发现新版本 " + info.Tag + "（当前 v" + Updater.Current + "）。\n\n是否现在下载并更新？完成后会自动重新启动。\n选\"否\"跳过此版本，\"取消\"下次再说。",
+                "天气壁纸 · 更新", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information);
+            if (res == DialogResult.No) { settings.SkipVersion = info.Version.ToString(); settings.Save(); flyout?.Post(UpdateJson()); return; }
+            if (res != DialogResult.Yes) return;
+            await InstallUpdate(info);
+        }
+
+        async Task InstallUpdate(UpdateInfo info)
+        {
+            if (installing) return;
+            if (Updater.IsDevBuild) { MessageBox.Show("开发版本不支持自动更新。", "天气壁纸"); return; }
+            installing = true;
+            try
+            {
+                var progress = new Progress<string>(t => { updateItem.Text = t; tray.Text = "天气壁纸 · " + t; });
+                await Updater.Install(info, progress);
+                Quit();   // 让出文件给安装程序；装完由安装包重新拉起
+            }
+            catch (Exception ex)
+            {
+                installing = false;
+                updateItem.Text = "更新到 " + info.Tag + "（当前 v" + Updater.Current + "）";
+                Log.Write("update install: " + ex);
+                if (MessageBox.Show("自动更新失败：" + ex.Message + "\n\n是否打开下载页手动安装？", "天气壁纸 · 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                    OpenUrl(info.MsiUrl ?? Updater.ReleasePage);
+            }
+        }
+
+        static void OpenUrl(string url, string args = null)
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url, args ?? "") { UseShellExecute = true }); }
+            catch (Exception ex) { Log.Write("open url: " + ex.Message); }
+        }
+
         void Quit()
         {
-            watchTimer.Stop(); weatherTimer.Stop();
+            watchTimer.Stop(); weatherTimer.Stop(); updateTimer.Stop(); settingsWatcher?.Dispose();
             tray.Visible = false;
             foreach (var w in walls) w.Dispose();
             walls.Clear();
             overlay.Dispose();
             eaves.Dispose();
+            flyout?.Dispose();
             shell.DestroyHandle();
             DesktopHost.RestoreSystemWallpaper();
             ExitThread();
