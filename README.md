@@ -2,19 +2,23 @@
 
 Windows 11 动态天气桌面：按当前定位和当地时间实时渲染天空和天气，桌面上显示一张半透明天气卡片。下雨时雨点还会砸在任务栏和窗口顶边上。
 
-<p align="center"><img src="docs/day.webp" width="720" alt="一天快进演示"><br><sub>一天快进演示（48 秒走完日出 → 正午 → 日落 → 夜晚）</sub></p>
+<p align="center"><img src="docs/day.webp" width="100%" alt="一天快进演示"><br><sub>一天快进演示（48 秒走完日出 → 正午 → 日落 → 夜晚）</sub></p>
 
 ## 效果预览
 
-| 晴天 | 多云 | 日落 |
-|:---:|:---:|:---:|
-| <img src="docs/clear.webp" width="260"> | <img src="docs/partly.webp" width="260"> | <img src="docs/sunset.webp" width="260"> |
-| **晴夜** | **毛毛雨** | **暴雨** |
-| <img src="docs/night.webp" width="260"> | <img src="docs/drizzle.webp" width="260"> | <img src="docs/heavy.webp" width="260"> |
-| **雷阵雨** | **雪** | **天气卡片** |
-| <img src="docs/thunder.webp" width="260"> | <img src="docs/snow.webp" width="260"> | <img src="docs/card.png" width="200"> |
+| 晴天 | 多云 |
+|:---:|:---:|
+| <img src="docs/clear.webp" width="420"> | <img src="docs/partly.webp" width="420"> |
+| **日落** | **晴夜** |
+| <img src="docs/sunset.webp" width="420"> | <img src="docs/night.webp" width="420"> |
+| **毛毛雨** | **暴雨** |
+| <img src="docs/drizzle.webp" width="420"> | <img src="docs/heavy.webp" width="420"> |
+| **雷阵雨** | **雪** |
+| <img src="docs/thunder.webp" width="420"> | <img src="docs/snow.webp" width="420"> |
 
-> 动图为缩小录制，实际是全屏、按显示器分辨率渲染。所有天气都可以在托盘菜单「效果预览」里随时看。
+<p align="center"><img src="docs/card.png" width="384" alt="天气卡片"><br><sub>天气卡片（100% 缩放下的原尺寸截图）</sub></p>
+
+> 动图按 1280×720 录制（点开可看大图），实际是全屏、按显示器分辨率渲染。所有天气都可以在托盘菜单「效果预览」里随时看。
 
 ## 功能
 
@@ -40,7 +44,7 @@ Windows 11 动态天气桌面：按当前定位和当地时间实时渲染天空
 
 CPU 按桌面完全露出时测的；桌面被其它窗口大面积遮挡时会自动降帧，实际更低。
 
-内存里约 **120 MB 是 WebView2（Edge 内核）的固定开销**（浏览器、GPU、网络等进程，空白页也要这么多），程序本体约 20 MB，其余是画面渲染。托盘菜单的「省内存模式」（`LowMemory`，默认关）可以再少约 40 MB（约 200 MB）：背景改为半分辨率、渐变复用并量化颜色。代价是背景略软，暗色天空下半部可能出现极淡的横向色带，所以默认不开。
+内存里约 **120 MB 是 WebView2（Edge 内核）的固定开销**（浏览器、GPU、网络等进程，空白页也要这么多），程序本体约 20 MB，托盘弹出面板常驻约 15 MB（为了点开即显示），其余是画面渲染。托盘菜单的「省内存模式」（`LowMemory`，默认关）可以再少 30–50 MB（视天气而定，约 200–215 MB）：背景改为半分辨率、渐变复用并量化颜色，弹出面板用时再建、收起 1 分钟后释放。代价是背景略软，暗色天空下半部可能出现极淡的横向色带，面板每次重新打开要等约 1 秒，所以默认不开。
 
 省电措施：
 
@@ -48,7 +52,6 @@ CPU 按桌面完全露出时测的；桌面被其它窗口大面积遮挡时会�
 - 锁屏、全屏游戏或全屏视频时暂停。
 - 用电池或系统繁忙（CPU > 80% 或内存 ≥ 92%）时自动降帧。
 - 背景层最多 15 FPS，降水层只在有雨雪时才分配和绘制。
-- 左键弹出的天气面板收起 1 分钟后释放，不常驻。
 - 「高帧率（60 FPS）」默认关闭；觉得占用高可以关掉任务栏效果和窗口屋檐。
 
 ## 安装
@@ -64,7 +67,7 @@ CPU 按桌面完全露出时测的；桌面被其它窗口大面积遮挡时会�
 
 ## 使用
 
-- **左键**托盘图标：弹出天气面板（刷新、设置城市、更多设置）。
+- **左键**托盘图标：弹出天气面板（刷新、设置城市、更多设置）。程序已在运行时，再从开始菜单打开一次也会弹出这个面板。
 - **右键**托盘图标：全部设置——
   - 设置城市 / 使用自动定位、刷新天气。
   - 效果预览：可以选任意天气；「一天快进演示」按所选天气用 48 秒走完一天。预览 1 分钟后自动恢复实时天气。
@@ -102,6 +105,7 @@ WeatherWallpaper.exe refresh | flyout | checkupdate | quit
 ## 常见问题
 
 - **桌面图标还在吗？** 在。壁纸画在桌面图标后面，图标、右键菜单都不受影响。
+- **托盘图标找不到？** Windows 11 会把新程序的托盘图标默认收进任务栏的「^」里。本程序首次运行时会自动把自己设为显示；如果你之后手动隐藏过，可以在「设置 → 个性化 → 任务栏 → 其他系统托盘图标」里打开「天气壁纸」。也可以从开始菜单再打开一次，会直接弹出天气面板。
 - **定位不准？** 右键托盘 →「设置城市…」手动指定；Windows 定位服务关闭时会退回 IP 定位，可能只精确到城市。
 - **和 Wallpaper Engine 等壁纸软件冲突吗？** 会互相覆盖，同时只开一个。
 - **怎么彻底卸载？** 安装版在「设置 → 应用」里卸载（会去掉开机自启）；便携版退出后删除文件夹，再删掉 `%APPDATA%\WeatherWallpaper` 和 `%LOCALAPPDATA%\WeatherWallpaper`。
@@ -121,4 +125,4 @@ WeatherWallpaper.exe refresh | flyout | checkupdate | quit
 .\build.ps1 -Version 1.2.3 -Msi     # 另外生成 dist\ 下的 MSI 和 zip（需要：dotnet tool install -g wix --version 5.0.2）
 ```
 
-发布一个 GitHub Release（tag 形如 `v1.2.3`）后，Actions 会自动构建 MSI 和便携版 zip，并上传到这个 Release。README 里的动图用 `tools/readme`（puppeteer + ffmpeg）录制。
+发布一个 GitHub Release（tag 形如 `v1.2.3`）后，Actions 会自动构建 MSI 和便携版 zip，并上传到这个 Release。README 里的动图用 `tools/readme`（puppeteer + ffmpeg）录制；程序图标 `app.ico` 由 `tools/make-icon.ps1` 生成。

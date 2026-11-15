@@ -10,6 +10,9 @@
     <MajorUpgrade DowngradeErrorMessage="已安装了更新版本的天气壁纸。" />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- "设置 → 应用"列表里的图标：取 exe 内嵌的 app.ico（开始菜单快捷方式直接指向 exe，自然用 exe 图标） -->
+    <Icon Id="AppIcon.exe" SourceFile="!(bindpath.bin)\WeatherWallpaper.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.exe" />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/kegechen/WeatherWallpaper" />
 

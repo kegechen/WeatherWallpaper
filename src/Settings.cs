@@ -73,7 +73,7 @@ namespace WeatherWallpaper
                 string.Join("、", System.Windows.Forms.Screen.AllScreens.Select(s => s.DeviceName + (s.Primary ? "（主屏）" : ""))),
             ["Layered"] = "兼容选项，一般不用改：auto / on / off",
             ["DevTools"] = "开发调试用：true 允许打开 WebView2 开发者工具",
-            ["LowMemory"] = "省内存模式：true 开 / false 关。开启后约少 40–50 MB，代价是背景画面略软、渐变可能有极细微色带",
+            ["LowMemory"] = "省内存模式：true 开 / false 关。开启后约少 30–50 MB，代价是背景画面略软、渐变可能有极细微色带，托盘面板每次打开要等约 1 秒",
             ["AutoUpdate"] = "自动检查更新：true / false",
             ["SkipVersion"] = "已选择跳过的版本号，null = 不跳过",
         };

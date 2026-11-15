@@ -402,7 +402,8 @@
   let firstFill = true;
 
   // ------------------------------------------------------------------ 绘制
-  function draw() { drawBg(); drawFx(); }
+  // 暂停时的静态帧 / 录制逐帧：前景画布也要按需分配，否则雨雪画在 1×1 的隐藏画布上
+  function draw() { drawBg(); const on = fxNeeded(); fxAlloc(on); fxDirty = on; if (on) drawFx(); }
   // 背景画布分辨率自适应：有星星 / 月亮 / 清晰的太阳时用全分辨率；阴天、雨雪、雾等画面本来就柔和，用半分辨率省显存
   let bgK = 1, wantK = 1, wantSince = 0;
   function bgAlloc(k) {
@@ -734,7 +735,7 @@
     raf = 0;
     if (paused) return;
     raf = requestAnimationFrame(frame);
-    const fxActive = drops.length > 0 || flakes.length > 0 || splash.length > 0 || ripples.length > 0 || !!flash || tgt.rain > 0 || tgt.snow > 0;
+    const fxActive = fxNeeded();
     const bgFps = demo && demo.speed > 1 ? L.fps : Math.min(L.fps, 15);
     const interval = 1000 / (fxActive ? L.fps : bgFps);
     if (ts - last < interval - 3) return;
@@ -746,6 +747,7 @@
     if (ts - lastBg >= 1000 / bgFps - 3) { lastBg = ts; drawBg(); }
   }
   // 前景画布只在有雨雪 / 闪电时才分配整屏大小；晴天、多云时缩成 1×1 并隐藏，省下一整屏的显存和合成开销
+  function fxNeeded() { return drops.length > 0 || flakes.length > 0 || splash.length > 0 || ripples.length > 0 || !!flash || tgt.rain > 0 || tgt.snow > 0; }
   let fxOn = false;
   function fxAlloc(on) {
     if (on === fxOn) return;

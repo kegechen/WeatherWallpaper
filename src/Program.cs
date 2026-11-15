@@ -29,8 +29,11 @@ namespace WeatherWallpaper
                 if (!created)
                 {
                     // 已在运行：把命令行转发给运行中的实例，如 WeatherWallpaper.exe preview rain / capture D:\tmp / refresh / quit
+                    // 本进程是用户刚启动的、持有前台权限，允许运行中的实例把天气面板切到前台
+                    Native.AllowSetForegroundWindow(-1 /*ASFW_ANY*/);
                     if (first == "uninstall") ShellWatcher.Send("quit");
                     else if (args.Length > 0) ShellWatcher.Send(string.Join(" ", args));
+                    else ShellWatcher.Send("show");   // 再次从开始菜单启动：弹出天气面板，表示程序已在运行
                     if (first == "quit" || first == "uninstall")
                     {
                         var me = System.Diagnostics.Process.GetCurrentProcess();
@@ -48,6 +51,23 @@ namespace WeatherWallpaper
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("fatal: " + e.ExceptionObject);
                 Log.Write("start");
                 Application.Run(new App());
+            }
+        }
+
+        static Icon appIcon;
+        /// <summary>内嵌的 app.ico（与 exe 图标同一个文件，含 16–256 各尺寸）。窗口直接用；托盘用 new Icon(AppIcon, 尺寸) 取合适的一帧。</summary>
+        public static Icon AppIcon
+        {
+            get
+            {
+                if (appIcon != null) return appIcon;
+                try
+                {
+                    using (var s = typeof(Program).Assembly.GetManifestResourceStream("WeatherWallpaper.app.ico"))
+                        if (s != null) return appIcon = new Icon(s);
+                }
+                catch (Exception ex) { Log.Write("app icon: " + ex.Message); }
+                return appIcon = SystemIcons.Application;
             }
         }
     }
@@ -122,6 +142,10 @@ namespace WeatherWallpaper
             BuildWalls();
             watchTimer.Start();
             Refresh(true);
+            // 壁纸起来后再在后台预热托盘面板，不和壁纸抢启动时间
+            var warm = new WinTimer { Interval = 4000 };
+            warm.Tick += (s, e) => { warm.Stop(); warm.Dispose(); ApplyFlyoutMode(); };
+            warm.Start();
         }
 
         // ---------------------------------------------------------------- 壁纸窗口
@@ -238,9 +262,9 @@ namespace WeatherWallpaper
         void Broadcast(string json) { foreach (var w in walls) w.Post(json); flyout?.Post(json); }
 
         FlyoutWindow flyout;
-        void ToggleFlyout()
+        FlyoutWindow Flyout()
         {
-            if (env == null) return;
+            if (env == null) return null;
             if (flyout == null)
             {
                 flyout = new FlyoutWindow(env) { OnCommand = FlyoutCommand };
@@ -248,7 +272,17 @@ namespace WeatherWallpaper
                 flyout.Post(PreviewJson());
                 flyout.Post(UpdateJson());
             }
-            flyout.Toggle();
+            flyout.KeepAlive = !settings.LowMemory;
+            return flyout;
+        }
+
+        void ToggleFlyout() => Flyout()?.Toggle();
+
+        /// <summary>默认模式下面板常驻并在启动后预热（点托盘立刻弹出）；省内存模式下用时再建、收起 1 分钟后释放。</summary>
+        void ApplyFlyoutMode()
+        {
+            if (settings.LowMemory) { if (flyout != null) flyout.KeepAlive = false; }
+            else Flyout()?.Warm();
         }
 
         void FlyoutCommand(string c)
@@ -426,6 +460,7 @@ namespace WeatherWallpaper
                     catch (Exception ex) { Log.Write("update-now: " + ex.Message); }
                     break;
                 case "flyout": ToggleFlyout(); break;
+                case "show": if (flyout == null || !flyout.Visible) ToggleFlyout(); break;
                 case "capture":
                     var dir = arg == "" ? Settings.LocalDir : arg;
                     Directory.CreateDirectory(dir);
@@ -457,9 +492,10 @@ namespace WeatherWallpaper
         // ---------------------------------------------------------------- 托盘
         void BuildTray()
         {
-            tray.Icon = MakeIcon();
+            tray.Icon = new Icon(Program.AppIcon, SystemInformation.SmallIconSize);
             tray.Text = "天气壁纸";
             tray.Visible = true;
+            PromoteTrayIconSoon();
             var menu = new ContextMenuStrip();
 
             menu.Items.Add("立即刷新天气", null, (s, e) => Refresh(true));
@@ -504,8 +540,8 @@ namespace WeatherWallpaper
 
             var fx = new ToolStripMenuItem("任务栏雨雪效果") { CheckOnClick = true };
             fx.Click += (s, e) => { settings.TaskbarFx = fx.Checked; settings.Save(); ConfigureOverlay(); };
-            var lowMem = new ToolStripMenuItem("省内存模式（约少 40 MB，画面略软）") { CheckOnClick = true };
-            lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); };
+            var lowMem = new ToolStripMenuItem("省内存模式（约少 30–50 MB，画面略软）") { CheckOnClick = true };
+            lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); ApplyFlyoutMode(); };
             var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
             wfx.Click += (s, e) => { settings.WindowFx = wfx.Checked; settings.Save(); Watch(); };
             var card = new ToolStripMenuItem("显示天气卡片") { CheckOnClick = true };
@@ -560,7 +596,7 @@ namespace WeatherWallpaper
             menu.Opening += (s, e) =>
             {
                 autoUpd.Checked = settings.AutoUpdate;
-                if (newer == null) updateItem.Text = "检查更新（当前 v" + Updater.Current + "）";
+                if (newer == null) updateItem.Text = "检查更新（当前 " + Updater.CurrentText + "）";
             };
             menu.Items.Add("退出", null, (s, e) => Quit());
 
@@ -576,24 +612,48 @@ namespace WeatherWallpaper
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ToggleFlyout(); };
         }
 
-        static Icon MakeIcon()
+        // Win11 会把第一次出现的托盘图标（按 exe 路径区分）默认收进"^"溢出区，看起来就像图标没了。
+        // 图标登记后，若用户还没对它做过选择（IsPromoted 不存在）就设为在任务栏显示；每个登记项只做一次，
+        // 之后用户在"设置 → 个性化 → 任务栏"里关掉就不再干预。
+        void PromoteTrayIconSoon()
         {
-            using (var bmp = new Bitmap(32, 32))
+            int tries = 0;
+            var t = new WinTimer { Interval = 2000 };
+            t.Tick += (s, e) =>
             {
-                using (var g = Graphics.FromImage(bmp))
+                if (PromoteTrayIcon() || ++tries >= 5) { t.Stop(); t.Dispose(); }
+                else t.Interval = 6000;
+            };
+            t.Start();
+        }
+
+        static bool PromoteTrayIcon()
+        {
+            try
+            {
+                using (var root = Registry.CurrentUser.OpenSubKey(@"Control Panel\NotifyIconSettings"))
                 {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    using (var b = new SolidBrush(Color.FromArgb(255, 255, 196, 60))) g.FillEllipse(b, 3, 3, 18, 18);
-                    using (var b = new SolidBrush(Color.FromArgb(250, 245, 248, 252)))
+                    if (root == null) return true;   // 旧系统没有这套机制
+                    foreach (var id in root.GetSubKeyNames())
                     {
-                        g.FillEllipse(b, 9, 14, 14, 12); g.FillEllipse(b, 16, 10, 14, 15); g.FillRectangle(b, 15, 19, 12, 7);
+                        using (var k = root.OpenSubKey(id))
+                            if (k == null || !string.Equals(k.GetValue("ExecutablePath") as string, Application.ExecutablePath, StringComparison.OrdinalIgnoreCase)) continue;
+                        using (var mine = Registry.CurrentUser.CreateSubKey(@"Software\WeatherWallpaper"))
+                        using (var k = root.OpenSubKey(id, true))
+                        {
+                            var done = ((mine.GetValue("TrayPromoted") as string) ?? "").Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+                            if (done.Contains(id) || k.GetValue("IsPromoted") != null) return true;
+                            k.SetValue("IsPromoted", 1, RegistryValueKind.DWord);
+                            done.Add(id);
+                            mine.SetValue("TrayPromoted", string.Join(";", done.Skip(Math.Max(0, done.Count - 20))));
+                            Log.Write("tray icon promoted: " + id);
+                            return true;
+                        }
                     }
                 }
-                IntPtr h = bmp.GetHicon();
-                var icon = (Icon)Icon.FromHandle(h).Clone();
-                Native.DestroyIcon(h);
-                return icon;
             }
+            catch (Exception ex) { Log.Write("tray promote: " + ex.Message); return true; }
+            return false;
         }
 
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -657,6 +717,7 @@ namespace WeatherWallpaper
             Log.Write("settings reloaded");
             overlay.SetFps(settings.Fps);
             if (walls) BuildWalls(); else ConfigureOverlay();
+            ApplyFlyoutMode();
             Watch();
             if (loc) Refresh(true);
         }
@@ -679,7 +740,7 @@ namespace WeatherWallpaper
         }
 
         string UpdateJson() => newer == null || settings.SkipVersion == newer.Version.ToString() ? "{\"t\":\"update\",\"tag\":null}"
-            : "{\"t\":\"update\",\"tag\":" + WeatherService.JsonStr(newer.Tag) + ",\"cur\":" + WeatherService.JsonStr("v" + Updater.Current) + "}";
+            : "{\"t\":\"update\",\"tag\":" + WeatherService.JsonStr(newer.Tag) + ",\"cur\":" + WeatherService.JsonStr(Updater.CurrentText) + "}";
 
         async void CheckUpdate(bool manual)
         {
@@ -696,7 +757,7 @@ namespace WeatherWallpaper
                 }
                 // 不弹托盘通知，只在右键菜单（加粗）和左键弹出面板里提示
                 newer = info;
-                updateItem.Text = "发现新版本 " + info.Tag + "，点击更新（当前 v" + Updater.Current + "）";
+                updateItem.Text = "发现新版本 " + info.Tag + "，点击更新（当前 " + Updater.CurrentText + "）";
                 updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
                 flyout?.Post(UpdateJson());
                 if (manual) PromptUpdate(info);
@@ -712,6 +773,14 @@ namespace WeatherWallpaper
         async void PromptUpdate(UpdateInfo info)
         {
             if (installing) return;
+            if (Updater.IsDevBuild)
+            {
+                // 源码构建的版本不自动覆盖（会改掉构建输出目录），只引导去下载页
+                if (MessageBox.Show("发现新版本 " + info.Tag + "。\n\n当前运行的是从源码构建的开发版，不会自动更新。\n是否打开下载页？", "天气壁纸 · 更新",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                    OpenUrl(Updater.ReleasePage);
+                return;
+            }
             var res = MessageBox.Show("发现新版本 " + info.Tag + "（当前 v" + Updater.Current + "）。\n\n是否现在下载并更新？完成后会自动重新启动。\n选\"否\"跳过此版本，\"取消\"下次再说。",
                 "天气壁纸 · 更新", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information);
             if (res == DialogResult.No) { settings.SkipVersion = info.Version.ToString(); settings.Save(); flyout?.Post(UpdateJson()); return; }
@@ -722,7 +791,7 @@ namespace WeatherWallpaper
         async Task InstallUpdate(UpdateInfo info)
         {
             if (installing) return;
-            if (Updater.IsDevBuild) { MessageBox.Show("开发版本不支持自动更新。", "天气壁纸"); return; }
+            if (Updater.IsDevBuild) { Log.Write("update: dev build, skipped"); return; }
             installing = true;
             try
             {
@@ -733,7 +802,7 @@ namespace WeatherWallpaper
             catch (Exception ex)
             {
                 installing = false;
-                updateItem.Text = "更新到 " + info.Tag + "（当前 v" + Updater.Current + "）";
+                updateItem.Text = "更新到 " + info.Tag + "（当前 " + Updater.CurrentText + "）";
                 Log.Write("update install: " + ex);
                 if (MessageBox.Show("自动更新失败：" + ex.Message + "\n\n是否打开下载页手动安装？", "天气壁纸 · 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                     OpenUrl(info.MsiUrl ?? Updater.ReleasePage);
@@ -835,6 +904,7 @@ namespace WeatherWallpaper
         {
             this.ws = ws;
             Text = "设置城市";
+            Icon = Program.AppIcon;
             Font = new Font("Microsoft YaHei UI", 10f);
             AutoScaleMode = AutoScaleMode.Dpi;
             FormBorderStyle = FormBorderStyle.FixedDialog;

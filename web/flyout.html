@@ -58,8 +58,8 @@
     bar.innerHTML = '<button data-c="refresh">刷新天气</button><button data-c="city">设置城市</button><button data-c="menu">更多设置</button>';
     bar.onclick = e => { const c = e.target.dataset && e.target.dataset.c; if (c) post('cmd:' + c); };
     panel.appendChild(bar);
-    // 告诉宿主内容高度，窗口按内容大小调整
-    requestAnimationFrame(() => post('size:' + Math.ceil(document.body.scrollWidth) + ',' + Math.ceil(panel.getBoundingClientRect().height)));
+    // 告诉宿主内容高度，窗口按内容大小调整（同步量：窗口隐藏时 rAF 不会跑）
+    post('size:' + Math.ceil(document.body.scrollWidth) + ',' + Math.ceil(panel.getBoundingClientRect().height));
   }
 
   if (host) host.addEventListener('message', ev => {
@@ -68,7 +68,9 @@
     if (m.t === 'weather') { weather = m; render(); }
     else if (m.t === 'preview') { label = [PREV[m.mode] || '', m.day ? '一天快进' : ''].filter(Boolean).join(' · '); render(); }
     else if (m.t === 'update') { update = m; render(); }
-    else if (m.t === 'show') render();   // 每次弹出时刷新"x 时"等相对时间
+    else if (m.t === 'show') { render(); post('rendered'); }   // 每次弹出时刷新"x 时"等相对时间
+    // 宿主按新高度调好窗口后发 sync：再过两帧（确保新尺寸的画面已经出图）通知宿主现身
+    else if (m.t === 'sync') requestAnimationFrame(() => requestAnimationFrame(() => post('painted')));
   });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') post('cmd:hide'); });
   document.addEventListener('contextmenu', e => e.preventDefault());

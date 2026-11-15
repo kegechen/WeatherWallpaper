@@ -40,7 +40,10 @@ namespace WeatherWallpaper
             get { var v = Assembly.GetExecutingAssembly().GetName().Version; return new Version(v.Major, v.Minor, v.Build); }
         }
 
+        /// <summary>build.ps1 不带 -Version 构建出来的源码版本（0.0.0），不参与自动更新。</summary>
         public static bool IsDevBuild => Current == new Version(0, 0, 0);
+        /// <summary>给用户看的当前版本，如 "v0.2.0" / "开发版"。</summary>
+        public static string CurrentText => IsDevBuild ? "开发版" : "v" + Current;
 
         /// <summary>是不是通过 MSI 装的（装在 %LOCALAPPDATA%\Programs\WeatherWallpaper）。便携版只能引导手动下载。</summary>
         public static bool Installed

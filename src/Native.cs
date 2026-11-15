@@ -66,6 +66,7 @@ namespace WeatherWallpaper
         [StructLayout(LayoutKind.Sequential)] public struct MARGINS { public int L, R, T, B; }
         [DllImport("dwmapi")] public static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref MARGINS m);
         [DllImport("user32")] public static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32")] public static extern bool AllowSetForegroundWindow(int pid);
 
         [DllImport("user32")] public static extern bool UpdateLayeredWindow(IntPtr h, IntPtr hdcDst, ref POINT dst, ref SIZE size,
             IntPtr hdcSrc, ref POINT src, uint key, ref BLENDFUNCTION blend, uint flags);

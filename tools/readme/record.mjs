@@ -15,7 +15,7 @@ const tmp = path.join(here, '.frames');
 fs.mkdirSync(outDir, { recursive: true });
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-const W = 1920, H = 1080, SCALE = 0.4;   // 页面按 1920x1080 排版，输出 768x432
+const W = 1920, H = 1080, SCALE = 2 / 3;   // 页面按 1920x1080 排版，输出 1280x720
 
 // 示例数据：伦敦的真实天气（不带任何本机位置信息）
 const samplePath = path.join(outDir, 'sample-london.json');
@@ -74,7 +74,7 @@ for (const name of names.length ? names.filter(n => SCENES[n]) : Object.keys(SCE
   }
   const out = path.join(outDir, `${name}.webp`);
   execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', String(fps), '-i', path.join(tmp, 'f%04d.png'),
-    '-c:v', 'libwebp_anim', '-lossless', '0', '-quality', '72', '-compression_level', '6', '-loop', '0', out]);
+    '-c:v', 'libwebp_anim', '-lossless', '0', '-quality', '84', '-compression_level', '6', '-loop', '0', out]);
   console.log(`${name}: ${n} frames -> ${out} (${(fs.statSync(out).size / 1024).toFixed(0)} KB)`);
 }
 // 天气卡片清晰大图（实时数据，无预览标签）
