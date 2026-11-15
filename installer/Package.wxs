@@ -1,0 +1,56 @@
+<!--
+  Weather Wallpaper MSI (WiX Toolset v5).
+  Per-user install to %LOCALAPPDATA%\Programs\WeatherWallpaper, no admin rights needed.
+  build.ps1 -Msi:  wix build installer\Package.wxs -arch x64 -d Version=1.2.3 -bindpath bin=<bin dir>
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="天气壁纸 Weather Wallpaper" Manufacturer="WeatherWallpaper" Version="$(Version)"
+           UpgradeCode="2AC2636C-6EEF-4AD0-B1F3-97FF2BFB3CF0" Scope="perUser" Language="2052" Codepage="65001">
+    <SummaryInformation Description="天气壁纸：实时天气动态桌面" />
+    <MajorUpgrade DowngradeErrorMessage="已安装了更新版本的天气壁纸。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/kegechen/WeatherWallpaper" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="WeatherWallpaper" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="天气壁纸">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="!(bindpath.bin)\**" />
+      <Component Id="InstallDirCleanup" Guid="6F0F3B53-2B57-4D51-9C43-31C1E1E5D0A1">
+        <RegistryValue Root="HKCU" Key="Software\WeatherWallpaper" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenu" Guid="0B8E0C0D-7C9E-4E1B-9B0E-5C3E2C7A4F11">
+        <Shortcut Id="AppShortcut" Name="天气壁纸" Description="实时天气动态桌面"
+                  Target="[INSTALLFOLDER]WeatherWallpaper.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\WeatherWallpaper" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- 卸载 / 升级前先让运行中的实例退出；真正卸载时顺便去掉开机自启 -->
+    <CustomAction Id="QuitApp" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]WeatherWallpaper.exe&quot; quit" Return="ignore" />
+    <CustomAction Id="UninstallCleanup" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]WeatherWallpaper.exe&quot; uninstall" Return="ignore" />
+    <!-- 安装完成后启动 -->
+    <CustomAction Id="LaunchApp" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]WeatherWallpaper.exe&quot;" Return="asyncNoWait" />
+
+    <InstallExecuteSequence>
+      <Custom Action="UninstallCleanup" Before="InstallValidate" Condition="Installed AND REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="QuitApp" Before="InstallValidate" Condition="Installed AND REMOVE=&quot;ALL&quot; AND UPGRADINGPRODUCTCODE" />
+      <Custom Action="LaunchApp" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
