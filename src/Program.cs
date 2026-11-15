@@ -184,7 +184,8 @@ namespace WeatherWallpaper
             var prim = Screen.PrimaryScreen.Bounds;
             float scale = tbh != IntPtr.Zero ? Native.GetDpiForWindow(tbh) / 96f : 1f;
             if (scale <= 0) scale = 1;
-            overlay.Configure(tb, prim, scale, settings.TaskbarFx);
+            // 任务栏效果只画在主屏任务栏上：壁纸没显示在主屏（如设成仅副屏）就不画
+            overlay.Configure(tb, prim, scale, settings.TaskbarFx && walls.Any(w => w.Primary));
             foreach (var w in walls) w.Post(LayoutJson(w, tb));
         }
 
