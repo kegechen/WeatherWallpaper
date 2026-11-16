@@ -1,9 +1,11 @@
 'use strict';
 // 天气壁纸渲染器：天空 / 太阳 / 月亮 / 星空 / 云 / 雨 / 雪 / 雷电 / 雾
 (() => {
-  // 两层画布：背景（天空/日月/云，慢速重绘）+ 前景（雨雪闪电，按帧率重绘）
-  const cvs = document.getElementById('sky'), fxCvs = document.getElementById('fx');
-  const bctx = cvs.getContext('2d', { alpha: false }), fctx = fxCvs.getContext('2d');
+  // 分层（自下而上）：sky 天空（不透明；内容变了才重画）→ cloud 云（半分辨率，有云才存在）
+  // → veil 压暗 / 雾霾（CSS 渐变）→ fx 雨雪闪电（按设定帧率）
+  const cvs = document.getElementById('sky'), cldCvs = document.getElementById('cloud'), fxCvs = document.getElementById('fx');
+  const veil = document.getElementById('veil');
+  const bctx = cvs.getContext('2d', { alpha: false }), cctx = cldCvs.getContext('2d'), fctx = fxCvs.getContext('2d');
   let ctx = bctx;
   const panel = document.getElementById('panel');
   const host = window.chrome && window.chrome.webview;
@@ -170,9 +172,22 @@
     if (dayDemo) { if (!keepDemo) demo = { base: di.mid + 4 * 3600000, start: performance.now(), speed: 1800, end: 86400000 }; }
     else if (pv && pv.time === 'rise' && di.rise) demo = { base: di.rise - 12 * 60000, start: performance.now(), speed: 20 };
     else if (pv && pv.time === 'set' && di.set) demo = { base: di.set - 45 * 60000, start: performance.now(), speed: 20 };
-    else if (pv && pv.time === 'night') demo = { base: di.mid + 22.5 * 3600000, start: performance.now(), speed: 1 };
+    else if (pv && pv.time === 'night') demo = { base: nightAt(di, li), start: performance.now(), speed: 1 };
     tgt = targetScene();
     renderPanel();
+  }
+  // 晴夜预览默认看当晚 22:30；那时月亮已落下或还没升起，就换到当晚月亮最高的时刻，让预览里看得到今天的月相
+  // （初一前后整夜无月，仍是 22:30）
+  function nightAt(di, li) {
+    const def = di.mid + 22.5 * 3600000;
+    const alt = t => { const p = moonPos(t, li).p; return p > 0 && p < 1 ? Math.sin(Math.PI * p) : 0; };
+    if (alt(def) > 0.3) return def;
+    let best = def, bh = 0.3;
+    for (let t = di.mid + 18 * 3600000; t <= di.mid + 30 * 3600000; t += 900000) {
+      const h = alt(t);
+      if (h > bh && sunElev(t, li.lat, li.lon) < -10) { best = t; bh = h; }
+    }
+    return best;
   }
 
   // ------------------------------------------------------------------ 天空调色
@@ -402,24 +417,78 @@
   let firstFill = true;
 
   // ------------------------------------------------------------------ 绘制
-  // 暂停时的静态帧 / 录制逐帧：前景画布也要按需分配，否则雨雪画在 1×1 的隐藏画布上
-  function draw() { drawBg(); const on = fxNeeded(); fxAlloc(on); fxDirty = on; if (on) drawFx(); }
-  // 背景画布分辨率自适应：有星星 / 月亮 / 清晰的太阳时用全分辨率；阴天、雨雪、雾等画面本来就柔和，用半分辨率省显存
+  // 暂停时的静态帧 / 录制逐帧：每一层都强制画一遍；前景画布也要按需分配，否则雨雪画在 1×1 的隐藏画布上
+  function draw() {
+    const st = bgState();
+    updateBgRes(st, true);
+    drawSky(st); drawClouds(st); updateVeil();
+    const on = fxNeeded(); fxAlloc(on); fxDirty = on; if (on) drawFx();
+  }
+  // 天空画布分辨率自适应：有星星 / 月亮 / 清晰的太阳时用全分辨率；阴天、雨雪、雾等画面本来就柔和，用半分辨率省显存
   let bgK = 1, wantK = 1, wantSince = 0;
   function bgAlloc(k) {
     bgK = k;
     cvs.width = Math.round(W * DPR * k); cvs.height = Math.round(H * DPR * k);
     bctx.setTransform(DPR * k, 0, 0, DPR * k, 0, 0);
   }
-  function drawBg() {
-    ctx = bctx;
-    if (wantK !== bgK && performance.now() - wantSince > 3000) bgAlloc(wantK);   // 持续 3 秒才切换，避免临界处来回抖
+  // 返回 true 表示刚重新分配过：画布已被清空，调用方必须马上重画天空，否则会露出一帧黑底
+  function updateBgRes(st, force) {
+    const k = st.starA > 0.01 || st.moonV > 0.05 || st.sunV > 0.25 ? 1 : 0.5;
+    if (k !== wantK) { wantK = k; wantSince = performance.now(); }
+    if (wantK === bgK || !(force || performance.now() - wantSince > 3000)) return false;   // 持续 3 秒才切换，避免临界处来回抖
+    bgAlloc(wantK);
+    return true;
+  }
+  // 云画布固定半分辨率：云本来就是软边渐变，放大一倍肉眼看不出，显存只要 1/4；没有云时缩成 1×1 并隐藏
+  const CK = 0.5;
+  let cloudOn = false;
+  function cloudAlloc(on) {
+    if (on === cloudOn) return;
+    cloudOn = on;
+    cldCvs.width = on ? Math.round(W * DPR * CK) : 1; cldCvs.height = on ? Math.round(H * DPR * CK) : 1;
+    cldCvs.style.display = on ? '' : 'none';
+    if (on) cctx.setTransform(DPR * CK, 0, 0, DPR * CK, 0, 0);
+  }
+  function cloudsVisible() {
+    if (cur.fog > 0.01) return true;
+    for (const c of clouds) if (c.a >= 0.01) return true;
+    return false;
+  }
+
+  // 天空 / 云共用的派生量，每个循环周期算一次
+  function bgState() {
     const li = locInfo(), t = now();
     const sp = sunPos(t, li), e = sp.e;
     const hz = horizonY();
     const daylight = smooth(-6, 8, e);
     const golden = smooth(-5, 0, e) * (1 - smooth(5, 15, e));
     const storm = clamp(cur.rain * 0.7 + cur.thunder * 0.3 + cur.dark, 0, 1);
+    const vis = (1 - smooth(0.45, 1, cur.cloud) * 0.93) * (1 - cur.fog * 0.6);
+    const starA = (1 - smooth(-14, -5, e)) * (1 - smooth(0.25, 0.75, cur.cloud)) * (1 - cur.fog);
+    const mp = moonPos(t, li);
+    const moonV = e < -2 && mp.p > 0 && mp.p < 1
+      ? (1 - smooth(-6, -2, e)) * smooth(0, 0.04, mp.p) * (1 - smooth(0.96, 1, mp.p)) * (1 - smooth(0.55, 1, cur.cloud) * 0.9) * (1 - cur.fog * 0.6) : 0;
+    const sunV = vis * smooth(-4, 0.5, e);
+    const rays = sunV > 0.3 && (1 - smooth(1, 22, e)) < 0.97;   // 与 drawSun 画光芒的条件一致
+    lastDaylight = daylight;
+    return { li, t, sp, e, hz, daylight, golden, storm, vis, starA, mp, moonV, sunV, rays, cc: cloudColors(e, daylight, golden, storm) };
+  }
+
+  // 天空画面的"指纹"：只取肉眼分辨得出的精度。指纹没变就不重画，白天晴空一分钟也画不了几次。
+  // 星星闪烁、日芒缓慢转动是仅有的持续动画，按 0.3 / 0.5 秒一档计入指纹。
+  function skySig(st) {
+    const q = v => Math.round(v * 200);
+    return [bgK, W, H, Math.round(L.ground * 1000), L.lowmem ? 1 : 0, Math.round(st.e * 8),
+      q(cur.cloud), q(cur.fog), q(cur.dark), q(cur.rain), q(cur.thunder), Math.round(st.sp.x), Math.round(st.sp.y),
+      st.moonV > 0 ? q(st.moonV) + ':' + Math.floor(st.t / 30000) : 0,
+      st.rays ? Math.floor(simT / 0.5) : 0, st.starA > 0.01 ? Math.floor(simT / 0.3) : 0].join();
+  }
+
+  let skySigLast = '';
+  function drawSky(st) {
+    ctx = bctx;
+    const { li, t, sp, e, hz, daylight, golden, storm, vis, starA, moonV } = st;
+    skySigLast = skySig(st);
 
     // 天空
     let [top, mid, bot] = skyAt(e);
@@ -447,55 +516,52 @@
       ctx.restore();
     }
 
-    // 星星
-    const starA = (1 - smooth(-14, -5, e)) * (1 - smooth(0.25, 0.75, cur.cloud)) * (1 - cur.fog);
+    // 星星（闪烁放慢一半：整屏每 0.3 秒才重画一次，慢速闪烁在低刷新下依然平滑）
     if (starA > 0.01) {
       ctx.fillStyle = '#fff';
       for (const s of stars) {
         if (s.y > hz) continue;
-        ctx.globalAlpha = starA * (0.55 + 0.45 * Math.sin(simT * s.f + s.p)) * (1 - s.y / hz * 0.6);
+        ctx.globalAlpha = starA * (0.55 + 0.45 * Math.sin(simT * s.f * 0.5 + s.p)) * (1 - s.y / hz * 0.6);
         ctx.fillRect(s.x, s.y, s.r, s.r);
       }
       ctx.globalAlpha = 1;
     }
 
-    const vis = (1 - smooth(0.45, 1, cur.cloud) * 0.93) * (1 - cur.fog * 0.6);
     // 月亮
-    const moonV = e < -2 ? (1 - smooth(-6, -2, e)) * (1 - smooth(0.55, 1, cur.cloud) * 0.9) * (1 - cur.fog * 0.6) : 0;
-    if (moonV > 0) drawMoon(t, li, sp.di, moonV);
-    const k = !L.lowmem || starA > 0.01 || moonV > 0.05 || vis * smooth(-4, 0.5, e) > 0.25 ? 1 : 0.5;
-    if (k !== wantK) { wantK = k; wantSince = performance.now(); }
+    if (moonV > 0) drawMoon(st.mp, moonV);
     // 太阳
     if (e > -4) drawSun(sp, vis);
 
-    // 云
-    const cc = cloudColors(e, daylight, golden, storm);
-    recolorSprites(cc[0], cc[1], performance.now());
-    const ov = smooth(0.65, 1, cur.cloud);
+    // 阴天时顶部压一层云色（云画布盖在它上面）
+    const cc = st.cc, ov = smooth(0.65, 1, cur.cloud);
     if (ov > 0.01) {
       const og = ctx.createLinearGradient(0, 0, 0, hz * 0.85);
       og.addColorStop(0, css(cc[1], ov * 0.8)); og.addColorStop(0.6, css(mix(cc[0], cc[1], 0.5), ov * 0.35)); og.addColorStop(1, css(cc[0], 0));
       ctx.fillStyle = og; ctx.fillRect(0, 0, W, hz);
     }
+  }
+
+  // 云层：云朵 + 雾（雾的渐变和飘动的雾团）。半分辨率透明画布，没有云 / 雾时不存在。
+  function drawClouds(st) {
+    const on = cloudsVisible();
+    cloudAlloc(on);
+    if (!on) return;
+    ctx = cctx;
+    ctx.clearRect(0, 0, W, H);
+    recolorSprites(st.cc[0], st.cc[1], performance.now());
     const sx = W / 1920;
     for (const layer of [3, 0, 1, 2]) {   // 层云垫底，然后由远及近
       for (const c of clouds) {
         if (c.layer !== layer || c.a < 0.01) continue;
-        const w = SW * c.sc * sx, h = SH * c.sc * sx;
+        const w = SW * c.sc * sx, h = SH * c.sc * sx, x = c.fx * W;
+        if (x > W || x + w < 0) continue;   // 在屏幕外的不画
         ctx.globalAlpha = c.a;
-        ctx.drawImage(sprites[c.spr], c.fx * W, c.fy * H, w, h);
+        ctx.drawImage(sprites[c.spr], x, c.fy * H, w, h);
       }
     }
     ctx.globalAlpha = 1;
-
-    // 雨天压暗 / 雾 / 雾霾
-    if (cur.dark > 0.01) {
-      const dg = ctx.createLinearGradient(0, 0, 0, H);
-      dg.addColorStop(0, `rgba(6,8,14,${cur.dark * 0.5})`); dg.addColorStop(1, `rgba(6,8,14,${cur.dark * 0.15})`);
-      ctx.fillStyle = dg; ctx.fillRect(0, 0, W, H);
-    }
     if (cur.fog > 0.01) {
-      const fc = mix(hex('#3a3f47'), hex('#d5d9de'), daylight);
+      const fc = mix(hex('#3a3f47'), hex('#d5d9de'), st.daylight);
       const fg = ctx.createLinearGradient(0, H * 0.15, 0, H);
       fg.addColorStop(0, css(fc, cur.fog * 0.25)); fg.addColorStop(1, css(fc, cur.fog * 0.75));
       ctx.fillStyle = fg; ctx.fillRect(0, 0, W, H);
@@ -506,14 +572,24 @@
       }
       ctx.globalAlpha = 1;
     }
-    const aqi = weather && preview === 'live' ? WX.chinaAqi(weather.aq && weather.aq.current) : null;
+  }
+
+  // 雨天压暗 / 雾霾：盖在云上面的整屏渐变，直接交给 CSS（合成器画，不占画布），内容变了才写样式
+  let aqiW = null, aqiV = null, veilKey = '';
+  function aqiNow() {
+    if (weather !== aqiW) { aqiW = weather; aqiV = weather ? WX.chinaAqi(weather.aq && weather.aq.current) : null; }
+    return weather && preview === 'live' ? aqiV : null;
+  }
+  function updateVeil() {
+    const parts = [];
+    const aqi = aqiNow();
     if (aqi > 100) {
       const ha = Math.min(0.3, (aqi - 100) / 500);
-      const hg = ctx.createLinearGradient(0, 0, 0, H);
-      hg.addColorStop(0, `rgba(190,175,150,${ha * 0.4})`); hg.addColorStop(1, `rgba(190,175,150,${ha})`);
-      ctx.fillStyle = hg; ctx.fillRect(0, 0, W, H);
+      parts.push(`linear-gradient(rgba(190,175,150,${(ha * 0.4).toFixed(3)}),rgba(190,175,150,${ha.toFixed(3)}))`);
     }
-    lastDaylight = daylight;
+    if (cur.dark > 0.01) parts.push(`linear-gradient(rgba(6,8,14,${(cur.dark * 0.5).toFixed(3)}),rgba(6,8,14,${(cur.dark * 0.15).toFixed(3)}))`);
+    const key = parts.join(',');
+    if (key !== veilKey) { veilKey = key; veil.style.background = key; }
   }
 
   // 前景层：降水与闪电（透明画布，按设定帧率绘制；没有降水时整层停掉）
@@ -606,33 +682,56 @@
     ctx.globalCompositeOperation = 'source-over';
   }
 
-  function drawMoon(t, li, di, v) {
+  // 月相按真实日期算：取月亮与太阳的黄经差（月亮带上几项主要摄动），朔望时刻误差在 1 小时内；
+  // 换算成"月龄"天数，0 = 朔，SYN/2 = 望。只用平均朔望月的话误差可达半天以上，十五十六哪天最圆会算错。
+  const SYN = 29.530588853;
+  function moonAge(t) {
+    const d = t / 86400000 - 10957.5;
+    const g = (357.529 + 0.98560028 * d) * RAD;
+    const ls = 280.459 + 0.98564736 * d + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g);
+    const Mm = (134.963 + 13.064993 * d) * RAD, D = (297.850 + 12.190749 * d) * RAD;
+    const lm = 218.316 + 13.176396 * d + 6.289 * Math.sin(Mm) + 1.274 * Math.sin(2 * D - Mm) + 0.658 * Math.sin(2 * D)
+      + 0.214 * Math.sin(2 * Mm) - 0.186 * Math.sin(g);
+    return (((lm - ls) % 360 + 360) % 360) / 360 * SYN;
+  }
+  // 月亮每天比太阳晚升起约 50 分钟，即落后太阳 age/SYN 天：把太阳的东升西落整体推迟这么久，就是此刻月亮在天上的位置。
+  // 于是初一与太阳同升同落（夜里看不见），初七八傍晚高挂、半夜落下，十五六日落时东升、整夜可见，二十二三后半夜才升起。
+  function moonPos(t, li) {
+    const age = moonAge(t);
+    const tm = t - age / SYN * 86400000, di = dayInfo(tm, li);
+    let a = di.rise, b = di.set;
+    if (a == null || b == null) { a = di.mid + 6 * 3600000; b = di.mid + 18 * 3600000; }   // 极夜：按 6 点升 18 点落
+    const p = (tm - a) / (b - a), hz = horizonY();
+    return { age, p, x: W * (0.12 + 0.76 * p), y: hz - (hz - H * 0.16) * Math.sin(Math.PI * p) * 0.9 };
+  }
+
+  function drawMoon(mp, v) {
     if (v < 0.01) return;
-    let a, b;
-    if (di.set != null && t > di.set) { a = di.set; b = dayInfo(t + 86400000, li).rise; }
-    else { a = dayInfo(t - 86400000, li).set; b = di.rise; }
-    if (a == null || b == null) { a = di.mid - 6 * 3600000; b = di.mid + 6 * 3600000; }
-    const p = clamp((t - a) / (b - a), 0, 1);
-    const hz = horizonY();
-    const x = W * (0.12 + 0.76 * p), y = hz - (hz - H * 0.16) * Math.sin(Math.PI * p) * 0.9;
-    const T = 29.530588853, age = (((t - 947182440000) / 86400000) % T + T) % T;
-    const ph = Math.cos(TAU * age / T), waxing = age < T / 2;
+    const { x, y, age, p } = mp, hz = horizonY();
+    const ph = Math.cos(TAU * age / SYN), illum = (1 - ph) / 2;
     const r = Math.min(W, H) * 0.026;
     ctx.globalCompositeOperation = 'lighter';
-    const illum = (1 - ph) / 2;
     const gg = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 9);
     gg.addColorStop(0, `rgba(200,215,255,${0.22 * v * (0.3 + illum)})`); gg.addColorStop(1, 'rgba(200,215,255,0)');
     ctx.fillStyle = gg; ctx.fillRect(x - r * 9, y - r * 9, r * 18, r * 18);
     ctx.globalCompositeOperation = 'source-over';
-    ctx.save(); ctx.translate(x, y); ctx.rotate(-0.35);
-    if (!waxing) ctx.scale(-1, 1);
-    ctx.fillStyle = `rgba(160,170,195,${0.12 * v})`;
-    ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
+    // 亮面朝向太阳：太阳在同一条天弧上领先月亮 age/SYN 圈（已落到地平线下），取两者连线方向。
+    // 傍晚西边的月牙亮面朝下偏右，后半夜东边的残月亮面朝左下
+    const th = Math.PI * p, ts = th + TAU * age / SYN;
+    const ang = Math.atan2((hz - H * 0.16) * 0.9 * (Math.sin(th) - Math.sin(ts)), W * 0.38 * (Math.cos(th) - Math.cos(ts)));
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+    // 暗面的灰光是地照（"新月抱旧月"）：只有细月牙时看得见，月亮越满越淡，过了上弦就没了
+    const es = 0.12 * v * (1 - smooth(0.12, 0.5, illum));
+    if (es > 0.004) {
+      ctx.fillStyle = `rgba(160,170,195,${es})`;
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
+    }
     ctx.beginPath();
     ctx.arc(0, 0, r, -Math.PI / 2, Math.PI / 2, false);
     ctx.ellipse(0, 0, r * Math.abs(ph), r, 0, Math.PI / 2, -Math.PI / 2, ph > 0);
     ctx.closePath();
-    const mg = ctx.createRadialGradient(-r * 0.3, -r * 0.3, 0, 0, 0, r);
+    const ca = Math.cos(ang), sa = Math.sin(ang);   // 高光固定在屏幕左上方，不跟着亮面方向转
+    const mg = ctx.createRadialGradient(-r * 0.3 * (ca + sa), -r * 0.3 * (ca - sa), 0, 0, 0, r);
     mg.addColorStop(0, `rgba(255,252,235,${v})`); mg.addColorStop(1, `rgba(225,220,200,${v})`);
     ctx.fillStyle = mg; ctx.fill();
     ctx.restore();
@@ -678,9 +777,13 @@
     // x' = x + s*y：沿雨丝方向剪切，贴图竖直画，落到屏幕上就是斜的
     ctx.setTransform(DPR, 0, vxk * DPR, DPR, 0, 0);
     ctx.globalAlpha = 0.5 * (1 + 0.75 * lightRain());
-    for (const d of drops) {
-      const s = spr[d.tier];
-      ctx.drawImage(s, d.x - vxk * d.y - s.lw / 2, d.y - d.l, s.lw, d.l);
+    // 按层级分三批画：同一张贴图连续绘制，浏览器可以把整批合并成一次提交（雨滴在数组里是乱序的，交替换贴图就合并不了）
+    for (let tier = 0; tier < 3; tier++) {
+      const s = spr[tier];
+      for (let i = 0; i < drops.length; i++) {
+        const d = drops[i];
+        if (d.tier === tier) ctx.drawImage(s, d.x - vxk * d.y - s.lw / 2, d.y - d.l, s.lw, d.l);
+      }
     }
     ctx.globalAlpha = 1;
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -729,22 +832,56 @@
   }
 
   // ------------------------------------------------------------------ 主循环
-  // 背景层变化很慢（云每秒只飘十几像素），最多 15 FPS；前景层只在有降水/闪电时按 L.fps 绘制
-  let last = performance.now(), lastBg = -1e9, raf = 0, fxDirty = false;
+  // 按需调度，不再无条件每个垂直同步都跑：
+  //  - 有雨雪 / 闪电：requestAnimationFrame，按 L.fps 绘制前景（和以前一样）
+  //  - 没有降水：setTimeout，只在下一次真要画的时候醒来——有云 12 FPS；天空变化期 15 FPS；
+  //    有星星 / 日芒的夜晚 / 晴天 3 FPS；其余时候每秒只查一次"指纹"有没有变
+  let last = performance.now(), lastSky = -1e9, lastCloud = -1e9, raf = 0, tm = 0, fxDirty = false;
+  const cloudFps = () => Math.min(L.fps, 12);
+  const bgFps = () => demo && demo.speed > 1 ? L.fps : Math.min(L.fps, 15);
+  const FADE_KEYS = ['cloud', 'fog', 'dark', 'rain', 'thunder'];   // 影响天空 / 云画面的场景量
+  function transitioning() {
+    for (const k of FADE_KEYS) if (Math.abs(cur[k] - tgt[k]) > 0.004) return true;
+    return false;
+  }
+  function idleDelay(st, cloudsOn) {
+    let d = 1000;
+    if (cloudsOn) d = Math.min(d, 1000 / cloudFps());
+    if (transitioning() || (demo && demo.speed > 1)) d = Math.min(d, 1000 / bgFps());
+    if (st.starA > 0.01) d = Math.min(d, 300);
+    if (st.rays) d = Math.min(d, 500);
+    return d;
+  }
+  /// 状态变了（天气 / 预览 / 布局 / 恢复）：别等下一次定时，马上跑一轮
+  function wake() {
+    if (paused || raf) return;   // rAF 循环在跑时它自己会处理
+    clearTimeout(tm);
+    tm = setTimeout(() => frame(performance.now()), 0);
+  }
   function frame(ts) {
-    raf = 0;
+    raf = 0; tm = 0;
     if (paused) return;
-    raf = requestAnimationFrame(frame);
     const fxActive = fxNeeded();
-    const bgFps = demo && demo.speed > 1 ? L.fps : Math.min(L.fps, 15);
-    const interval = 1000 / (fxActive ? L.fps : bgFps);
-    if (ts - last < interval - 3) return;
-    const dt = Math.min(0.1, (ts - last) / 1000);
+    if (fxActive && ts - last < 1000 / L.fps - 3) { raf = requestAnimationFrame(frame); return; }
+    const dt = Math.min(fxActive ? 0.1 : 1.5, (ts - last) / 1000);
     last = ts;
-    update(dt);
-    if (fxActive) { fxAlloc(true); drawFx(); fxDirty = true; }
-    else if (fxDirty) { fxAlloc(false); fxDirty = false; }
-    if (ts - lastBg >= 1000 / bgFps - 3) { lastBg = ts; drawBg(); }
+    let st = null, cloudsOn = false;
+    try {
+      update(dt);
+      if (fxActive) { fxAlloc(true); drawFx(); fxDirty = true; }
+      else if (fxDirty) { fxAlloc(false); fxDirty = false; }
+
+      st = bgState();
+      const realloc = updateBgRes(st, false);
+      if (realloc || (skySig(st) !== skySigLast && ts - lastSky >= 1000 / bgFps() - 3)) { lastSky = ts; drawSky(st); }
+      cloudsOn = cloudsVisible();
+      if (cloudsOn ? ts - lastCloud >= 1000 / cloudFps() - 3 : cloudOn) { lastCloud = ts; drawClouds(st); }
+      updateVeil();
+    } finally {
+      // 这一帧出错（比如收到残缺的天气数据）也照样排下一帧，否则画面会永远停住
+      if (fxNeeded()) raf = requestAnimationFrame(frame);
+      else tm = setTimeout(() => frame(performance.now()), st ? idleDelay(st, cloudsOn) : 1000);
+    }
   }
   // 前景画布只在有雨雪 / 闪电时才分配整屏大小；晴天、多云时缩成 1×1 并隐藏，省下一整屏的显存和合成开销
   function fxNeeded() { return drops.length > 0 || flakes.length > 0 || splash.length > 0 || ripples.length > 0 || !!flash || tgt.rain > 0 || tgt.snow > 0; }
@@ -761,11 +898,15 @@
     W = window.innerWidth; H = window.innerHeight;
     bgAlloc(bgK);
     { const was = fxOn; fxOn = !was; fxAlloc(was); }   // 按新尺寸重新分配（或确保初始为 1×1）
-    lastBg = -1e9; fxDirty = true;
+    { const was = cloudOn; cloudOn = !was; cloudAlloc(was); }
+    skySigLast = ''; lastSky = lastCloud = -1e9; fxDirty = true;
     initStars();
     drops.length = 0; flakes.length = 0; firstFill = true;
+    wake();
   }
   window.addEventListener('resize', resize);
+  // GPU 重置（驱动更新、切换显卡等）后画布内容和变换都会丢；天空现在只在指纹变化时重画，得主动按当前尺寸重建一遍
+  for (const c of [cvs, cldCvs, fxCvs]) c.addEventListener('contextrestored', resize);
   resize();
 
   if (host) {
@@ -782,8 +923,9 @@
       // 暂停中（被最大化窗口遮挡）也要保证画面是最新的静态帧，取消遮挡时不会闪黑
       if (paused) { firstScene = true; update(0.016); draw(); }
       switch (m.t) {
-        case 'resume': if (paused) { paused = false; last = performance.now(); if (!raf) raf = requestAnimationFrame(frame); } break;
+        case 'resume': if (paused) { paused = false; last = performance.now(); } break;
       }
+      wake();
     });
     post('ready');
   } else {
@@ -797,14 +939,17 @@
       paused = true;
       window.__step = (dt) => { vt += dt * 1000; update(dt); draw(); };
     }
+    const dd = Date.parse(q.get('date') + 'T00:00:00');   // ?date=2026-11-24 换一天（看月相）
+    if (!isNaN(dd)) { const d0 = new Date().setHours(0, 0, 0, 0), real = Date.now; Date.now = () => real() + dd - d0; }
     const apply = () => {
       setPreview(q.get('mode') || 'live', q.get('day') === '1');
       const at = /^(\d+):(\d+)$/.exec(q.get('at') || '');   // ?at=13:00 固定当地时间
       if (at && !dayDemo) demo = { base: dayInfo(Date.now(), locInfo()).mid + (at[1] * 60 + +at[2]) * 60000, start: performance.now(), speed: 1 };
+      wake();
     };
     if (q.get('data')) fetch(q.get('data')).then(r => r.json()).then(m => { weather = m; dayCache.clear(); apply(); firstScene = true; window.__ready = true; });
     else { apply(); window.__ready = true; }
   }
   setInterval(() => { if (paused) { firstScene = true; update(0.016); draw(); } }, 60000);
-  raf = requestAnimationFrame(frame);
+  wake();
 })();
