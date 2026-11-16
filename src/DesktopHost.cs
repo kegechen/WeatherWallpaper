@@ -75,15 +75,27 @@ namespace WeatherWallpaper
             Native.MapWindowPoints(IntPtr.Zero, Parent, ref pt, 1);
             Native.SetWindowPos(h, IntPtr.Zero, pt.X, pt.Y, screenBounds.Width, screenBounds.Height,
                 Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
-            FixZOrder(h);
+            // 先插到图标层正下方：已挂好的其他壁纸窗口仍在它下面、WorkerW 上面，不会被打乱。整组层级建完后由 FixZOrder 一次排好
+            if (Raised && DefView != IntPtr.Zero)
+                Native.SetWindowPos(h, DefView, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
         }
 
-        public static void FixZOrder(IntPtr h)
+        /// <summary>
+        /// raised 结构下把所有壁纸窗口依次串在 DefView（图标层）下面，再把 WorkerW（系统壁纸层）压到最后一块下面。
+        /// 多块屏必须一起排：逐块"贴到 DefView 下 + 把 WorkerW 压到自己下面"时，后一块会把 WorkerW 插到前一块上面，
+        /// 前面那块屏就被系统壁纸盖住（表现为"所有显示器"只有一块屏有画面）。
+        /// </summary>
+        public static void FixZOrder(IList<IntPtr> walls)
         {
-            if (!Raised) return;
+            if (!Raised || walls == null || walls.Count == 0) return;
             const uint f = Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE;
-            if (DefView != IntPtr.Zero) Native.SetWindowPos(h, DefView, 0, 0, 0, 0, f);   // 紧贴在图标层下面
-            if (WorkerW != IntPtr.Zero) Native.SetWindowPos(WorkerW, h, 0, 0, 0, 0, f);   // 系统壁纸层压到我们下面
+            var after = DefView;
+            foreach (var h in walls)
+            {
+                if (after != IntPtr.Zero) Native.SetWindowPos(h, after, 0, 0, 0, 0, f);
+                after = h;
+            }
+            if (WorkerW != IntPtr.Zero) Native.SetWindowPos(WorkerW, after, 0, 0, 0, 0, f);
         }
 
         /// <summary>
@@ -108,7 +120,7 @@ namespace WeatherWallpaper
                 return DesktopState.Ok;
 
             // WorkerW / DefView 被系统重建（句柄变了）或层级被挪过：重新压回图标层与系统壁纸层之间
-            foreach (var h in walls) FixZOrder(h);
+            FixZOrder(walls);
             Log.Write($"desktop layers changed (workerw {Hex(oldWorkerW)}->{Hex(WorkerW)} defview {Hex(oldDefView)}->{Hex(DefView)}), z-order restored");
             return DesktopState.Repaired;
         }

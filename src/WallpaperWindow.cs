@@ -99,8 +99,6 @@ namespace WeatherWallpaper
             Post(p ? "{\"t\":\"pause\"}" : "{\"t\":\"resume\"}");
         }
 
-        public void FixZOrder() => DesktopHost.FixZOrder(Handle);
-
         public async System.Threading.Tasks.Task Capture(string path)
         {
             if (ctl == null) return;

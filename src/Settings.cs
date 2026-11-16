@@ -24,7 +24,7 @@ namespace WeatherWallpaper
         public bool DevTools { get; set; }
         public bool LowMemory { get; set; }            // 省内存模式：背景半分辨率 + 渐变缓存 + 颜色量化（默认关，画面略软）
         public bool Minimal { get; set; }              // 极简模式：平时只显示系统壁纸 + 天气卡片，天气有明显变化时才播放一小段天气动画
-        // 每次播放天气动画的秒数。声明成 object：用户手写成字符串、小数或超出 int 的大数时，按 int 反序列化会让整个文件读取失败；
+        // 每次播放天气动画的秒数（极简模式播放、雨后彩虹、效果预览共用）。声明成 object：用户手写成字符串、小数或超出 int 的大数时，按 int 反序列化会让整个文件读取失败；
         // 这里什么值都先收下，加载后由 NormalizePlaySeconds 校验，不合法就回到默认值
         public object PlaySeconds { get; set; } = DefaultPlaySeconds;
         public bool AutoUpdate { get; set; } = true;   // 启动后及每天自动检查更新
@@ -108,7 +108,7 @@ namespace WeatherWallpaper
             ["LowMemory"] = "省内存模式：true 开 / false 关。开启后约少 30–50 MB，代价是背景画面略软、渐变可能有极细微色带，托盘面板每次打开要等约 1 秒",
             ["Minimal"] = "极简模式：true 开 / false 关。开启后平时只显示你原来的系统壁纸和天气卡片，几乎不占 CPU / GPU；" +
                 "启动时、转雨 / 下雪 / 雷雨 / 暴雨、雨后转晴（彩虹）时播放一小段天气动画（桌面被挡住或人不在时等你回来再播）",
-            ["PlaySeconds"] = "极简模式每次播放天气动画（以及雨后彩虹）的时长，单位秒，" + MinPlaySeconds + "–" + MaxPlaySeconds + " 的整数，如 30；写错按默认 " + DefaultPlaySeconds + " 秒",
+            ["PlaySeconds"] = "每次播放天气动画的时长（极简模式的天气变化播放、雨后彩虹、托盘「效果预览」都用它），单位秒，" + MinPlaySeconds + "–" + MaxPlaySeconds + " 的整数，如 30；写错按默认 " + DefaultPlaySeconds + " 秒",
             ["AutoUpdate"] = "自动检查更新：true / false",
             ["SkipVersion"] = "已选择跳过的版本号，null = 不跳过",
         };

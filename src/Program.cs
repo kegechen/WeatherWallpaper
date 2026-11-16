@@ -87,7 +87,8 @@ namespace WeatherWallpaper
         bool previewDay;
         DateTime previewUntil;
         readonly WinTimer previewTimer = new WinTimer { Interval = 1000 };
-        const int PreviewSeconds = 60, DayDemoSeconds = 49;   // 天气预览 1 分钟后恢复实时；一天快进 48 秒走完一遍后恢复
+        // 天气预览的时长与极简模式每次播放的时长是同一个设置（PlaySeconds）；一天快进固定 48 秒走完一遍后恢复
+        const int DayDemoSeconds = 49;
         Loc loc;
         DateTime locTime;
         bool refreshing, locked;
@@ -184,6 +185,7 @@ namespace WeatherWallpaper
                 w.OnJson += OnWallJson;
                 walls.Add(w);
             }
+            DesktopHost.FixZOrder(walls.Select(w => w.Handle).ToList());
             ConfigureOverlay();
             UpdateBackdrops(false);
         }
@@ -686,7 +688,7 @@ namespace WeatherWallpaper
                 previewTimer.Stop();
                 if (preview != "live" || day)
                 {
-                    previewUntil = DateTime.Now.AddSeconds(day ? DayDemoSeconds : PreviewSeconds);
+                    previewUntil = DateTime.Now.AddSeconds(day ? DayDemoSeconds : settings.PlaySecondsValue());
                     previewTimer.Start();
                 }
             }
@@ -750,7 +752,7 @@ namespace WeatherWallpaper
                 liveIt.Text = settings.Minimal ? "当前天气（立即播放 " + settings.PlaySecondsValue() + " 秒）" : "实时天气";
                 var back = settings.Minimal ? "收起" : "恢复实时天气";
                 var left = (int)Math.Ceiling((previewUntil - DateTime.Now).TotalSeconds);
-                pvTip.Text = previewTimer.Enabled && left > 0 ? $"{left} 秒后{back}" : "预览 1 分钟后自动" + back;
+                pvTip.Text = previewTimer.Enabled && left > 0 ? $"{left} 秒后{back}" : $"预览 {settings.PlaySecondsValue()} 秒后自动{back}";
             };
             menu.Items.Add(pv);
 
