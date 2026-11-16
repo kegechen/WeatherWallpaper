@@ -52,7 +52,7 @@ namespace WeatherWallpaper
         [DllImport("user32", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
         [DllImport("user32")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
-        public const uint GW_HWNDPREV = 3;
+        public const uint GW_HWNDPREV = 3, GW_HWNDNEXT = 2;
         public const uint WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
         [DllImport("user32")] public static extern bool ShowWindow(IntPtr h, int cmd);
         [DllImport("user32")] public static extern uint GetDpiForWindow(IntPtr h);

@@ -109,8 +109,10 @@ namespace WeatherWallpaper
             SystemEvents.DisplaySettingsChanged += (s, e) => ScheduleRebuild(1500);
             SystemEvents.SessionSwitch += (s, e) =>
             {
-                if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.ConsoleDisconnect || e.Reason == SessionSwitchReason.RemoteDisconnect) locked = true;
-                else if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.ConsoleConnect || e.Reason == SessionSwitchReason.RemoteConnect) locked = false;
+                if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.ConsoleDisconnect || e.Reason == SessionSwitchReason.RemoteDisconnect)
+                { locked = true; Log.Write("session: lock (" + e.Reason + ")"); }
+                else if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.ConsoleConnect || e.Reason == SessionSwitchReason.RemoteConnect)
+                { locked = false; Log.Write("session: unlock (" + e.Reason + ")"); }
                 Watch();
             };
             SystemEvents.UserPreferenceChanged += (s, e) => { if (e.Category == UserPreferenceCategory.General) ConfigureOverlay(); };
@@ -304,7 +306,18 @@ namespace WeatherWallpaper
         // ---------------------------------------------------------------- 遮挡 / 全屏检测
         void Watch()
         {
-            if (walls.Count > 0 && !DesktopHost.StillValid()) { ScheduleRebuild(1500); return; }
+            if (walls.Count > 0)
+            {
+                // 体检：系统会在锁屏 / 息屏 / 解锁后悄悄重建桌面层（WorkerW），把系统壁纸压到我们上面，
+                // 没有任何广播可听，只能自己盯。能修层级的当场修，结构坏了才整体重建。
+                var st = DesktopHost.CheckWalls(walls.Select(w => w.Handle).ToArray());
+                if (st == DesktopState.Invalid)
+                {
+                    // 只在没排上时才调度：本方法 0.7 秒一次，每次都重置会把重建无限期顶掉
+                    if (!rebuildTimer.Enabled) ScheduleRebuild(1500);
+                    return;
+                }
+            }
             var tops = new List<IntPtr>();
             uint myPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
             Native.EnumWindows((h, l) =>
