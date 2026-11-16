@@ -5,6 +5,7 @@
   // → veil 压暗 / 雾霾（CSS 渐变）→ fx 雨雪闪电（按设定帧率）
   const cvs = document.getElementById('sky'), cldCvs = document.getElementById('cloud'), fxCvs = document.getElementById('fx');
   const veil = document.getElementById('veil');
+  const sceneEl = document.getElementById('scene'), backEl = document.getElementById('backdrop');
   const bctx = cvs.getContext('2d', { alpha: false }), cctx = cldCvs.getContext('2d'), fctx = fxCvs.getContext('2d');
   let ctx = bctx;
   const panel = document.getElementById('panel');
@@ -61,7 +62,7 @@
   const rand = Math.random;
   function prng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, pos: 'tr', mx: 28, my: 28 };
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, pos: 'tr', mx: 28, my: 28 };
 
   // 卡片位置：tr / tl / tc / br / bl；底部时让开任务栏
   function placePanel() {
@@ -74,6 +75,9 @@
   }
   let W = 0, H = 0, DPR = 1;
   let weather = null, preview = 'live', demo = null, paused = false;
+  // 极简模式：fxKind = 宿主让播放的天气动画（start / rain / heavy / thunder / snow / rainbow，null = 不播）；
+  // asleep = 天气画面整层已淡出并释放（画布缩成 1×1、主循环停掉），只剩系统壁纸 + 卡片
+  let fxKind = null, asleep = false, sleepTm = 0, backdrop = null, backKey = '', backTok = 0;
 
   // ------------------------------------------------------------------ 时间与太阳
   function locInfo() {
@@ -139,6 +143,7 @@
     drizzle: { code: 53, cc: 95, label: '毛毛雨' }, rain: { code: 63, cc: 100, wind: 15, label: '中雨' },
     heavy: { code: 65, cc: 100, wind: 32, label: '暴雨' }, thunder: { code: 95, cc: 100, wind: 25, label: '雷阵雨' },
     snow: { code: 73, cc: 100, wind: 8, label: '雪' },
+    rainbow: { code: 1, cc: 20, time: 'bow', bow: true, label: '雨后彩虹' },
   };
   let dayDemo = false;
   const previewLabel = () => {
@@ -157,9 +162,10 @@
     s.cloudDir = sign;
     s.kmh = kmh;
     s.code = code;
+    s.bow = (pv ? pv.bow : fxKind === 'rainbow') ? 1 : 0;   // 雨后彩虹：预览，或宿主判断雨停转晴时播
     return s;
   }
-  const cur = { cloud: 0.2, rain: 0, snow: 0, fog: 0, thunder: 0, dark: 0, windX: 0.2 };
+  const cur = { cloud: 0.2, rain: 0, snow: 0, fog: 0, thunder: 0, dark: 0, windX: 0.2, bow: 0 };
   let tgt = targetScene(), firstScene = true;
 
   /// mode：天气预览（live = 实时天气）；day：一天快进演示（用 mode 的天气，从凌晨 4 点快进 24 小时，48 秒走一遍）
@@ -173,8 +179,16 @@
     else if (pv && pv.time === 'rise' && di.rise) demo = { base: di.rise - 12 * 60000, start: performance.now(), speed: 20 };
     else if (pv && pv.time === 'set' && di.set) demo = { base: di.set - 45 * 60000, start: performance.now(), speed: 20 };
     else if (pv && pv.time === 'night') demo = { base: nightAt(di, li), start: performance.now(), speed: 1 };
+    else if (pv && pv.time === 'bow') demo = { base: bowAt(di, li), start: performance.now(), speed: 1 };
     tgt = targetScene();
     renderPanel();
+  }
+  // 彩虹预览放在下午太阳降到 28° 左右的时候（真实的彩虹也多见于上午、傍晚太阳不高时）
+  function bowAt(di, li) {
+    if (di.rise == null || di.set == null) return Date.now();
+    const noon = (di.rise + di.set) / 2;
+    for (let t = noon; t < di.set; t += 600000) if (sunElev(t, li.lat, li.lon) < 28) return t;
+    return noon;
   }
   // 晴夜预览默认看当晚 22:30；那时月亮已落下或还没升起，就换到当晚月亮最高的时刻，让预览里看得到今天的月相
   // （初一前后整夜无月，仍是 22:30）
@@ -402,17 +416,21 @@
     if ((hitsR.length || hitsS.length) && L.primary && L.overlay) post('H' + hitsR.join(',') + '|' + hitsS.join(','));
     hitsR = []; hitsS = [];
 
-    if (L.primary && simT - lastScenePost > 1) {
-      lastScenePost = simT;
-      let text = '';
-      if (weather) {
-        const c = weather.fc.current;
-        text = `${weather.loc.name} ${WX.info(c.weather_code).text} ${Math.round(c.temperature_2m)}°`;
-      }
-      const msg = JSON.stringify({ t: 'scene', rain: +tgt.rain.toFixed(2), snow: +tgt.snow.toFixed(2), wind: +tgt.windX.toFixed(2), text });
-      if (msg !== lastSceneMsg) { lastSceneMsg = msg; post(JSON.parse(msg)); }
-    }
+    if (simT - lastScenePost > 1) postScene();
     if (simT - panelT > 60) { panelT = simT; renderPanel(); }
+  }
+  // 告诉宿主当前的雨雪（任务栏 / 屋檐效果跟着它走）和托盘提示文字。极简模式没在播放时报 0，任务栏和屋檐也一起歇着
+  function postScene() {
+    if (!L.primary) return;
+    lastScenePost = simT;
+    let text = '';
+    if (weather) {
+      const c = weather.fc.current;
+      text = `${weather.loc.name} ${WX.info(c.weather_code).text} ${Math.round(c.temperature_2m)}°`;
+    }
+    const on = sceneWanted();
+    const msg = JSON.stringify({ t: 'scene', rain: on ? +tgt.rain.toFixed(2) : 0, snow: on ? +tgt.snow.toFixed(2) : 0, wind: +tgt.windX.toFixed(2), text });
+    if (msg !== lastSceneMsg) { lastSceneMsg = msg; post(JSON.parse(msg)); }
   }
   let firstFill = true;
 
@@ -479,7 +497,7 @@
   function skySig(st) {
     const q = v => Math.round(v * 200);
     return [bgK, W, H, Math.round(L.ground * 1000), L.lowmem ? 1 : 0, Math.round(st.e * 8),
-      q(cur.cloud), q(cur.fog), q(cur.dark), q(cur.rain), q(cur.thunder), Math.round(st.sp.x), Math.round(st.sp.y),
+      q(cur.cloud), q(cur.fog), q(cur.dark), q(cur.rain), q(cur.thunder), q(cur.bow), Math.round(st.sp.x), Math.round(st.sp.y),
       st.moonV > 0 ? q(st.moonV) + ':' + Math.floor(st.t / 30000) : 0,
       st.rays ? Math.floor(simT / 0.5) : 0, st.starA > 0.01 ? Math.floor(simT / 0.3) : 0].join();
   }
@@ -531,6 +549,8 @@
     if (moonV > 0) drawMoon(st.mp, moonV);
     // 太阳
     if (e > -4) drawSun(sp, vis);
+    // 雨后彩虹（画在天空层，云层盖在上面会自然挡住一部分）
+    if (cur.bow > 0.01) drawRainbow(st);
 
     // 阴天时顶部压一层云色（云画布盖在它上面）
     const cc = st.cc, ov = smooth(0.65, 1, cur.cloud);
@@ -682,6 +702,35 @@
     ctx.globalCompositeOperation = 'source-over';
   }
 
+  // 彩虹出现在背对太阳的方向：画在离太阳远的一侧，圆心在地平线以下，太阳越高弧越矮。
+  // 主虹内紫外红，外侧一道颜色反过来、更宽更淡的副虹，主虹里面的天空略亮一些
+  const BOW = ['#8a5cf0', '#3d7bff', '#36c070', '#ffe03a', '#ff9a2e', '#ff3b30'].map(hex);
+  function drawRainbow(st) {
+    const a = cur.bow * st.daylight * (1 - smooth(0.55, 0.95, cur.cloud)) * (1 - cur.fog) * (1 - clamp(cur.rain * 2, 0, 1));
+    if (a < 0.01) return;
+    const { sp, e, hz } = st;
+    const R = Math.min(H * 0.62, W * 0.45), away = R * 1.35;
+    const cx = clamp(sp.x >= W / 2 ? sp.x - away : sp.x + away, R * 0.3, W - R * 0.3);
+    const cy = hz + R * (0.1 + 0.35 * smooth(10, 50, e));
+    const ring = (r0, r1, cols, alpha) => {
+      const g = ctx.createRadialGradient(cx, cy, r0, cx, cy, r1), n = cols.length;
+      g.addColorStop(0, css(cols[0], 0));
+      for (let i = 0; i < n; i++) g.addColorStop(0.14 + 0.72 * i / (n - 1), css(cols[i], alpha));
+      g.addColorStop(1, css(cols[n - 1], 0));
+      ctx.fillStyle = g; ctx.fillRect(cx - r1, cy - r1, 2 * r1, 2 * r1);
+    };
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, W, hz); ctx.clip();
+    ctx.globalCompositeOperation = 'screen';
+    const glow = ctx.createRadialGradient(cx, cy, R * 0.45, cx, cy, R * 0.92);
+    glow.addColorStop(0, 'rgba(255,255,255,0)'); glow.addColorStop(0.92, css([255, 255, 255], 0.08 * a)); glow.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = glow; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
+    ctx.globalCompositeOperation = 'source-over';
+    ring(R * 0.9, R, BOW, 0.34 * a);
+    ring(R * 1.12, R * 1.25, BOW.slice().reverse(), 0.07 * a);
+    ctx.restore();
+  }
+
   // 月相按真实日期算：取月亮与太阳的黄经差（月亮带上几项主要摄动），朔望时刻误差在 1 小时内；
   // 换算成"月龄"天数，0 = 朔，SYN/2 = 望。只用平均朔望月的话误差可达半天以上，十五十六哪天最圆会算错。
   const SYN = 29.530588853;
@@ -822,11 +871,14 @@
   }
 
   // ------------------------------------------------------------------ 天气卡片
+  let panelHtml = '';
   function renderPanel() {
     if (!(L.panel && L.primary) || !weather) { panel.classList.add('hidden'); return; }
     placePanel();
     try {
-      panel.innerHTML = WX.panelHtml(weather, Date.now() + weather.fc.utc_offset_seconds * 1000, previewLabel());
+      // 内容没变就不动 DOM：卡片带毛玻璃，重排一次要重新模糊整块背景
+      const html = WX.panelHtml(weather, Date.now() + weather.fc.utc_offset_seconds * 1000, previewLabel());
+      if (html !== panelHtml) { panelHtml = html; panel.innerHTML = html; }
       panel.classList.remove('hidden');
     } catch (err) { post('log:panel ' + err.message); }
   }
@@ -839,7 +891,7 @@
   let last = performance.now(), lastSky = -1e9, lastCloud = -1e9, raf = 0, tm = 0, fxDirty = false;
   const cloudFps = () => Math.min(L.fps, 12);
   const bgFps = () => demo && demo.speed > 1 ? L.fps : Math.min(L.fps, 15);
-  const FADE_KEYS = ['cloud', 'fog', 'dark', 'rain', 'thunder'];   // 影响天空 / 云画面的场景量
+  const FADE_KEYS = ['cloud', 'fog', 'dark', 'rain', 'thunder', 'bow'];   // 影响天空 / 云画面的场景量
   function transitioning() {
     for (const k of FADE_KEYS) if (Math.abs(cur[k] - tgt[k]) > 0.004) return true;
     return false;
@@ -854,13 +906,13 @@
   }
   /// 状态变了（天气 / 预览 / 布局 / 恢复）：别等下一次定时，马上跑一轮
   function wake() {
-    if (paused || raf) return;   // rAF 循环在跑时它自己会处理
+    if (paused || asleep || raf) return;   // rAF 循环在跑时它自己会处理
     clearTimeout(tm);
     tm = setTimeout(() => frame(performance.now()), 0);
   }
   function frame(ts) {
     raf = 0; tm = 0;
-    if (paused) return;
+    if (paused || asleep) return;
     const fxActive = fxNeeded();
     if (fxActive && ts - last < 1000 / L.fps - 3) { raf = requestAnimationFrame(frame); return; }
     const dt = Math.min(fxActive ? 0.1 : 1.5, (ts - last) / 1000);
@@ -896,12 +948,13 @@
   function resize() {
     DPR = window.devicePixelRatio || 1;
     W = window.innerWidth; H = window.innerHeight;
+    initStars();
+    drops.length = 0; flakes.length = 0; firstFill = true;
+    if (asleep) return;   // 睡着时不分配画布，醒来时按当时的尺寸重建
     bgAlloc(bgK);
     { const was = fxOn; fxOn = !was; fxAlloc(was); }   // 按新尺寸重新分配（或确保初始为 1×1）
     { const was = cloudOn; cloudOn = !was; cloudAlloc(was); }
     skySigLast = ''; lastSky = lastCloud = -1e9; fxDirty = true;
-    initStars();
-    drops.length = 0; flakes.length = 0; firstFill = true;
     wake();
   }
   window.addEventListener('resize', resize);
@@ -909,22 +962,100 @@
   for (const c of [cvs, cldCvs, fxCvs]) c.addEventListener('contextrestored', resize);
   resize();
 
+  // ------------------------------------------------------------------ 极简模式
+  // 平时天气画面整层淡出后"睡着"：三张画布缩成 1×1、主循环停掉，页面上只剩系统壁纸底图 + 卡片，CPU / GPU 基本为 0。
+  // 宿主让播放（fx）、或者在看效果预览时醒来：按当前天气立刻画好一帧再淡入，播完再淡出睡回去。
+  const FADE_MS = 1500;
+  function sceneWanted() { return !L.minimal || !!fxKind || preview !== 'live' || dayDemo; }
+  function applyMinimal() {
+    if (!gotLayout) return;
+    if (sceneWanted()) {
+      clearTimeout(sleepTm); sleepTm = 0;
+      if (asleep) {
+        asleep = false; firstScene = true;
+        sceneEl.style.display = '';
+        resize();                   // 按当前尺寸重新分配画布并启动主循环
+        update(0.016); draw();      // 先画好完整的一帧再淡入，不会从空白画布淡进来
+        void sceneEl.offsetWidth;   // 让 display 的变化先生效，下面的 opacity 才有过渡
+      }
+      sceneEl.style.opacity = '1';
+    } else if (!asleep && !sleepTm) {
+      if (sceneEl.style.opacity === '0') sleep();
+      else { sceneEl.style.opacity = '0'; sleepTm = setTimeout(sleep, FADE_MS + 200); }
+    }
+    // 第一次显隐立即生效（先强制一次样式计算），之后恢复淡入淡出
+    if (sceneEl.style.transition === 'none') { void sceneEl.offsetWidth; sceneEl.style.transition = ''; }
+  }
+  function sleep() {
+    sleepTm = 0;
+    if (sceneWanted()) return;
+    asleep = true;
+    cancelAnimationFrame(raf); clearTimeout(tm); raf = tm = 0;
+    sceneEl.style.display = 'none';
+    cvs.width = 1; cvs.height = 1; skySigLast = '';
+    cloudAlloc(false); fxAlloc(false); fxDirty = false;
+    drops.length = 0; flakes.length = 0; splash.length = 0; ripples.length = 0; flash = null;
+    postScene();
+  }
+  // 底图画进一张不透明画布后立即丢掉图片：显存里只留一份整屏纹理（CSS 背景图会同时占着解码缓存和光栅瓦片两份）
+  function applyBackdrop() {
+    const b = L.minimal ? backdrop || {} : null;
+    backEl.style.display = b ? 'block' : 'none';   // 样式表默认 display:none
+    const key = b ? (b.color || '') + '|' + (b.url || '') : '';
+    if (key === backKey) return;
+    backKey = key;
+    const tok = ++backTok, ctx = backEl.getContext('2d', { alpha: false });
+    const fill = () => { backEl.width = 1; backEl.height = 1; ctx.fillStyle = (b && b.color) || '#000'; ctx.fillRect(0, 0, 1, 1); };
+    // 纯色壁纸、非极简模式：1×1 纯色拉满全屏（顺带把整屏纹理还回去）
+    if (!b || !b.url) { fill(); return; }
+    // 换图：旧图留到新图加载好再替换，不闪黑；还没有图时先用纯色垫着
+    if (backEl.width <= 1) fill();
+    const img = new Image();
+    img.onload = () => {
+      img.onload = img.onerror = null;   // 下面清空 src 会再触发一次 error
+      if (tok === backTok) {
+        // 按图片本身的像素尺寸画（宿主已按屏幕物理分辨率生成）：非整数缩放时 W×DPR 会差一两个像素，整张图被重采样变糊
+        backEl.width = img.naturalWidth; backEl.height = img.naturalHeight;
+        ctx.drawImage(img, 0, 0);
+      }
+      img.src = '';
+    };
+    img.onerror = () => {
+      img.onload = img.onerror = null;
+      if (tok !== backTok) return;
+      post('log:backdrop load failed ' + b.url);
+      b.retry = (b.retry || 0) + 1;
+      if (b.retry <= 3) setTimeout(() => { if (tok === backTok) { backKey = ''; applyBackdrop(); } }, 3000 * b.retry);
+    };
+    img.src = b.url;
+  }
+  // GPU 重置后底图画布内容也会丢，按原图重画
+  backEl.addEventListener('contextrestored', () => { backKey = ''; applyBackdrop(); });
+  // 宿主模式下先藏着（不带过渡），等第一条 layout 知道是不是极简模式：普通模式立即显示，极简模式直接睡下（不闪一下天气画面）。
+  // 宿主在页面 ready 前排队的消息（天气等）会先于 layout 到达，这之前不决定显隐
+  let gotLayout = !host;
+  if (host) { sceneEl.style.transition = 'none'; sceneEl.style.opacity = '0'; }
+
   if (host) {
     host.addEventListener('message', ev => {
       const m = ev.data;
       if (!m || !m.t) return;
       switch (m.t) {
-        case 'layout': Object.assign(L, m); drops.length = 0; flakes.length = 0; firstFill = true; renderPanel(); break;
+        case 'layout': Object.assign(L, m); gotLayout = true; drops.length = 0; flakes.length = 0; firstFill = true; renderPanel(); applyBackdrop(); break;
         case 'weather': weather = m; dayCache.clear(); tgt = targetScene(); renderPanel(); break;
         case 'preview': setPreview(m.mode, m.day); break;
+        case 'fx': fxKind = m.kind || null; tgt = targetScene(); break;
+        case 'backdrop': backdrop = m; applyBackdrop(); break;
         case 'pause': paused = true; break;
         case 'perf': L.fps = clamp(m.fps | 0, 5, 60); break;
       }
+      applyMinimal();
       // 暂停中（被最大化窗口遮挡）也要保证画面是最新的静态帧，取消遮挡时不会闪黑
-      if (paused) { firstScene = true; update(0.016); draw(); }
+      if (paused && !asleep) { firstScene = true; update(0.016); draw(); }
       switch (m.t) {
         case 'resume': if (paused) { paused = false; last = performance.now(); } break;
       }
+      postScene();
       wake();
     });
     post('ready');
@@ -932,6 +1063,7 @@
     // 浏览器里直接打开调试：?mode=rain&day=1&data=sample.json&panel=0
     const q = new URLSearchParams(location.search);
     L.panel = q.get('panel') !== '0'; L.primary = true; L.ground = 0.0444;
+    L.minimal = q.get('minimal') === '1'; fxKind = q.get('fx') || null;   // ?minimal=1&fx=rainbow 调试极简模式
     if (q.get('manual') === '1') {
       // 录制用：停掉 rAF，由外部按固定步长推进虚拟时钟逐帧绘制（截图慢也不影响动画流畅度）
       let vt = performance.now();
@@ -945,11 +1077,14 @@
       setPreview(q.get('mode') || 'live', q.get('day') === '1');
       const at = /^(\d+):(\d+)$/.exec(q.get('at') || '');   // ?at=13:00 固定当地时间
       if (at && !dayDemo) demo = { base: dayInfo(Date.now(), locInfo()).mid + (at[1] * 60 + +at[2]) * 60000, start: performance.now(), speed: 1 };
+      tgt = targetScene();
+      applyBackdrop(); applyMinimal();
       wake();
     };
     if (q.get('data')) fetch(q.get('data')).then(r => r.json()).then(m => { weather = m; dayCache.clear(); apply(); firstScene = true; window.__ready = true; });
     else { apply(); window.__ready = true; }
   }
-  setInterval(() => { if (paused) { firstScene = true; update(0.016); draw(); } }, 60000);
+  // 每分钟：睡着时只刷新卡片（逐小时预报会随时间滚动）；暂停时补一张最新的静态帧
+  setInterval(() => { if (asleep) renderPanel(); else if (paused) { firstScene = true; update(0.016); draw(); } }, 60000);
   wake();
 })();

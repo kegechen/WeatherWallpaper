@@ -115,7 +115,12 @@ namespace WeatherWallpaper
                 { locked = false; Log.Write("session: unlock (" + e.Reason + ")"); }
                 Watch();
             };
-            SystemEvents.UserPreferenceChanged += (s, e) => { if (e.Category == UserPreferenceCategory.General) ConfigureOverlay(); };
+            SystemEvents.UserPreferenceChanged += (s, e) =>
+            {
+                if (e.Category == UserPreferenceCategory.General) ConfigureOverlay();
+                if (e.Category == UserPreferenceCategory.Desktop && settings.Minimal) { backdropTimer.Stop(); backdropTimer.Start(); }   // 换了系统壁纸
+            };
+            backdropTimer.Tick += (s, e) => { backdropTimer.Stop(); UpdateBackdrops(true); };
             SystemEvents.PowerModeChanged += (s, e) =>
             {
                 if (e.Mode == PowerModes.Resume) { weatherTimer.Stop(); weatherTimer.Interval = 15000; weatherTimer.Start(); }
@@ -180,6 +185,7 @@ namespace WeatherWallpaper
                 walls.Add(w);
             }
             ConfigureOverlay();
+            UpdateBackdrops(false);
         }
 
         /// <summary>settings.Monitors: "all" / "primary" / 某块屏的 DeviceName。指定的屏不存在时退回主屏。</summary>
@@ -226,7 +232,8 @@ namespace WeatherWallpaper
             return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)
                 + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel && main)
                 + ",\"fps\":" + w.Fps + ",\"pos\":" + WeatherService.JsonStr(settings.PanelPos ?? "tr")
-                + ",\"lowmem\":" + B(settings.LowMemory) + ",\"mx\":" + settings.PanelMarginX + ",\"my\":" + settings.PanelMarginY + "}";
+                + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
+                + ",\"mx\":" + settings.PanelMarginX + ",\"my\":" + settings.PanelMarginY + "}";
         }
         static string B(bool b) => b ? "true" : "false";
 
@@ -236,6 +243,8 @@ namespace WeatherWallpaper
             w.Post(LayoutJson(w, TaskbarRect(out h)));
             if (payload != null) w.Post(payload);
             w.Post(PreviewJson());
+            w.Post(FxJson());
+            if (w.BackdropJson != null) w.Post(w.BackdropJson);
         }
 
         void OnWallString(WallpaperWindow w, string s)
@@ -414,9 +423,188 @@ namespace WeatherWallpaper
             }
             else eaves.Update(new IntPtr[0]);
 
+            wallsShown = running > 0;
+            FxStep();
+            if (settings.Minimal && ++backdropCheck >= 43) { backdropCheck = 0; CheckBackdrops(); }   // 约 30 秒查一次（幻灯片放映换图不一定有广播）
+
             if (locked) perfText = "已暂停（锁屏）";
             else if (running == 0) perfText = "已暂停（桌面被遮挡）";
+            else if (settings.Minimal && fxKind == null && preview == "live" && !previewDay) perfText = "极简模式：静止，天气有变化时播放动画";
             else perfText = $"{minFps} FPS" + (reasons.Count > 0 ? "（" + string.Join("，", reasons) + "）" : minFps < settings.Fps ? "（桌面大部分被遮挡）" : "");
+        }
+
+        // ---------------------------------------------------------------- 极简模式：系统壁纸做底
+        readonly WinTimer backdropTimer = new WinTimer { Interval = 1000 };
+        int backdropGen, backdropCheck, backdropFails;
+        string backdropKeys = "", backdropProbe;
+        DateTime backdropRetryAt;
+
+        /// <summary>
+        /// 极简模式下把每块屏的系统壁纸缩放好交给页面垫底；onlyIfChanged = 只在壁纸设置变了时才重新生成（定时检查用）。
+        /// 非极简模式下通知页面撤掉底图。
+        /// </summary>
+        async void UpdateBackdrops(bool onlyIfChanged)
+        {
+            var list = walls.ToList();
+            if (!settings.Minimal)
+            {
+                ++backdropGen;   // 作废还在生成中的底图
+                backdropKeys = "";
+                foreach (var w in list) SendBackdrop(w, "{\"t\":\"backdrop\",\"url\":null}");
+                return;
+            }
+            if (list.Count == 0) return;   // 桌面还没就绪：别拿空列表去清缓存
+            try
+            {
+                var infos = list.Select(w => Backdrop.Query(w.Bounds)).ToList();
+                var keys = string.Join("\n", infos.Select(i => i.Key));
+                if (onlyIfChanged && keys == backdropKeys) return;   // 没变：也不能作废正在生成的那一次
+                int gen = ++backdropGen;
+                backdropKeys = keys;
+                var files = await Task.Run(() => infos.Select(Backdrop.Render).ToList());
+                if (gen != backdropGen) return;
+                for (int i = 0; i < list.Count; i++)
+                    SendBackdrop(list[i], "{\"t\":\"backdrop\",\"url\":" + (files[i] == null ? "null" : WeatherService.JsonStr("https://" + Backdrop.Host + "/" + files[i]))
+                        + ",\"color\":" + WeatherService.JsonStr(infos[i].Css) + "}");
+                Backdrop.Clean(files);
+                backdropFails = 0;
+                Log.Write("backdrop: " + string.Join(", ", infos.Select((x, i) => (files[i] ?? "color " + x.Css) + " pos " + x.Pos)));
+                GC.Collect();   // 解码大图留下的大对象堆，生成完就还回去
+            }
+            catch (Exception ex)
+            {
+                // 读不出壁纸（刚换图文件还被占着等）：清掉指纹和探测结果，按 30 秒、1 分钟……最长 10 分钟的间隔重试
+                backdropKeys = ""; backdropProbe = null;
+                backdropRetryAt = DateTime.UtcNow.AddSeconds(Math.Min(600, 30 << Math.Min(backdropFails, 5)));
+                backdropFails++;
+                Log.Write("backdrop failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>页面 ready 之前不发（排队的消息会抢在 layout 前面），记下来由 OnWallReady 在 layout 之后补发。</summary>
+        static void SendBackdrop(WallpaperWindow w, string json)
+        {
+            w.BackdropJson = json;
+            if (w.Ready) w.Post(json);
+        }
+
+        /// <summary>Watch 里约 30 秒一次：先做廉价探测，壁纸设置看起来变了（或上次失败到了重试时间）才完整查询。</summary>
+        void CheckBackdrops()
+        {
+            if (backdropProbe == null && DateTime.UtcNow < backdropRetryAt) return;
+            var p = Backdrop.Probe();
+            if (p == backdropProbe) return;
+            backdropProbe = p;
+            UpdateBackdrops(true);
+        }
+
+        // ---------------------------------------------------------------- 天气动画的"播一次"（极简模式）与雨后彩虹
+        // 极简模式平时不画天气，只在这些时候整屏播放一小段（PlaySeconds，默认 30 秒）：启动后拿到第一份天气、转雨、转暴雨、转雷雨、转雪、雨后转晴（彩虹）。
+        // 桌面被挡住、锁屏或人不在电脑前时先记下，等桌面露出来、有人操作时再看是否还需要播（雨已经停了就不播了）。
+        // 彩虹在普通模式下也会出现（雨后转晴的白天挂同样长的时间）。
+        const double FxIdleSeconds = 120;
+        string fxKind, fxPending, wxCat;   // 正在播 / 等着播的类型；上一份实时天气的类别
+        double fxLeft;
+        // 全部用 UTC：夏令时切换时本地时间会跳一小时，"一小时内不重复""雨停 90 分钟内"会算错
+        DateTime fxTick = DateTime.UtcNow, lastWetAt = DateTime.MinValue, bowShownFor = DateTime.MinValue;
+        bool wxDay, wallsShown;
+        readonly Dictionary<string, DateTime> fxShown = new Dictionary<string, DateTime>();
+
+        string FxJson() => "{\"t\":\"fx\",\"kind\":" + (fxKind == null ? "null" : WeatherService.JsonStr(fxKind)) + "}";
+        void PostFx() { foreach (var w in walls) w.Post(FxJson()); }
+
+        static string Category(int code) =>
+            code >= 95 ? "thunder" :
+            (code >= 71 && code <= 77) || code == 85 || code == 86 ? "snow" :
+            code == 65 || code == 67 || code == 82 ? "heavy" :
+            (code >= 51 && code <= 67) || (code >= 80 && code <= 82) ? "rain" :
+            code == 45 || code == 48 ? "fog" :
+            code == 3 ? "cloudy" : "clear";
+        static bool Wet(string c) => c == "rain" || c == "heavy" || c == "thunder";
+        // 雨停后 90 分钟内转晴的白天，每场雨只挂一次
+        bool RainbowDue => wxCat == "clear" && wxDay && lastWetAt > bowShownFor && (DateTime.UtcNow - lastWetAt).TotalMinutes < 90;
+
+        /// <summary>换了城市：上一个城市的天气不能拿来比较（否则会误判转雨、雨后彩虹），按"刚启动"处理。</summary>
+        void ResetWeatherFx() { wxCat = null; lastWetAt = DateTime.MinValue; fxPending = null; }
+
+        /// <summary>每拿到一份实时天气调用一次：和上一份比，判断要不要播。fresh = false 表示用的是启动时的缓存（可能是很久以前的）。</summary>
+        void OnWeather(bool fresh = true)
+        {
+            int code; bool day;
+            try
+            {
+                var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(payload);
+                var cur = (Dictionary<string, object>)((Dictionary<string, object>)d["fc"])["current"];
+                code = Convert.ToInt32(cur["weather_code"]);
+                day = !cur.ContainsKey("is_day") || Convert.ToInt32(cur["is_day"]) != 0;
+            }
+            catch (Exception ex) { Log.Write("fx: weather parse " + ex.Message); return; }
+            string prev = wxCat, cat = Category(code);
+            wxCat = cat; wxDay = day;
+            if (Wet(cat) && fresh) lastWetAt = DateTime.UtcNow;   // 缓存里的雨可能是昨天的，别拿来判断"刚下过雨"
+            string kind = null;
+            if (prev == null) kind = "start";
+            else if (cat != prev)
+            {
+                if (cat == "snow") kind = "snow";
+                else if (cat == "thunder") kind = "thunder";
+                else if (cat == "heavy" && prev != "thunder") kind = "heavy";
+                else if (cat == "rain" && !Wet(prev)) kind = "rain";
+            }
+            if (!settings.Minimal) kind = null;   // 普通模式一直在播天气，只有彩虹需要额外挂一下
+            if (kind == null && RainbowDue) kind = "rainbow";
+            DateTime t;
+            if (kind != null && kind != "start" && fxShown.TryGetValue(kind, out t) && (DateTime.UtcNow - t).TotalMinutes < 60) kind = null;   // 一小时内同类不重复播
+            if (kind != null && kind != fxPending && kind != fxKind) { fxPending = kind; Log.Write("fx: pending " + kind + " (" + prev + " -> " + cat + ")"); }
+            FxStep();
+        }
+
+        /// <summary>延后的动画到真要播时再确认一次：天气已经变回去了就不播。</summary>
+        bool FxStillDue(string k)
+        {
+            switch (k)
+            {
+                case "snow": return wxCat == "snow";
+                case "rain": case "heavy": case "thunder": return Wet(wxCat);
+                case "rainbow": return RainbowDue;
+                default: return true;
+            }
+        }
+
+        /// <summary>Watch 每 0.7 秒调一次：倒计时只算桌面露出来的时间；等着播的在桌面可见且有人操作时开播。</summary>
+        void FxStep()
+        {
+            var now = DateTime.UtcNow;
+            double dt = Math.Max(0, Math.Min(2, (now - fxTick).TotalSeconds));
+            fxTick = now;
+            bool ended = false;
+            if (fxKind != null)
+            {
+                if (wallsShown) fxLeft -= dt;
+                if (fxLeft > 0) return;
+                Log.Write("fx: end " + fxKind);
+                fxKind = null;
+                ended = true;
+            }
+            if (fxPending != null && wallsShown && !locked && Native.IdleSeconds() <= FxIdleSeconds)
+            {
+                var k = fxPending;
+                fxPending = null;
+                if (FxStillDue(k)) { PlayFx(k); return; }   // 紧接着播下一段：直接换类型，不先淡出再淡入
+                Log.Write("fx: dropped " + k + " (now " + wxCat + ")");
+            }
+            if (ended) PostFx();
+        }
+
+        void PlayFx(string kind)
+        {
+            if (kind == "off") { fxKind = null; fxLeft = 0; fxPending = null; PostFx(); return; }
+            fxKind = kind; fxLeft = settings.PlaySecondsValue(); fxTick = DateTime.UtcNow;
+            if (fxPending != "rainbow") fxPending = null;   // 正在按当前天气播了，等着的转雨 / 下雪不用再播一遍（彩虹画面不同，留着）
+            fxShown[kind] = DateTime.UtcNow;
+            if (kind == "rainbow") bowShownFor = lastWetAt;
+            Log.Write("fx: play " + kind + " " + fxLeft + "s");
+            PostFx();
         }
 
         // ---------------------------------------------------------------- 天气
@@ -438,11 +626,13 @@ namespace WeatherWallpaper
                 Broadcast(payload);
                 weatherTimer.Interval = 15 * 60 * 1000;
                 Log.Write("weather updated: " + loc.Name);
+                OnWeather();
             }
             catch (Exception ex)
             {
                 Log.Write("refresh failed: " + ex.Message);
                 weatherTimer.Interval = 2 * 60 * 1000;
+                if (wxCat == null && payload != null) OnWeather(false);   // 启动时联网失败：先按缓存的天气播启动动画
             }
             finally
             {
@@ -465,6 +655,7 @@ namespace WeatherWallpaper
                     SetPreview(pa.Count > 0 ? pa[0] : (day ? preview : "live"), day);
                     break;
                 case "refresh": Refresh(true); break;
+                case "fx": PlayFx(arg == "" ? "start" : arg.ToLowerInvariant()); break;   // fx [start|rain|heavy|thunder|snow|rainbow|off]：立即播放（测试用）
                 case "rebuild": BuildWalls(); break;
                 case "quit": Quit(); break;
                 case "checkupdate": CheckUpdate(arg == "manual"); break;
@@ -515,7 +706,7 @@ namespace WeatherWallpaper
             var city = new ToolStripMenuItem("设置城市…", null, (s, e) => PickCity());
             var auto = new ToolStripMenuItem("使用自动定位", null, (s, e) =>
             {
-                settings.City = null; settings.Lat = null; settings.Lon = null; settings.Save(); Refresh(true);
+                settings.City = null; settings.Lat = null; settings.Lon = null; settings.Save(); ResetWeatherFx(); Refresh(true);
             });
             menu.Items.Add(city);
             menu.Items.Add(auto);
@@ -527,15 +718,23 @@ namespace WeatherWallpaper
                 new[] { "live", "实时天气" }, null,
                 new[] { "clear", "晴天" }, new[] { "sunrise", "晴 · 日出" }, new[] { "sunset", "晴 · 日落" }, new[] { "night", "晴 · 夜晚" },
                 new[] { "partly", "多云" }, new[] { "cloudy", "阴天" }, new[] { "fog", "雾" }, null,
-                new[] { "drizzle", "毛毛雨" }, new[] { "rain", "中雨" }, new[] { "heavy", "暴雨" }, new[] { "thunder", "雷阵雨" }, new[] { "snow", "雪" }, null,
+                new[] { "drizzle", "毛毛雨" }, new[] { "rain", "中雨" }, new[] { "heavy", "暴雨" }, new[] { "thunder", "雷阵雨" }, new[] { "snow", "雪" },
+                new[] { "rainbow", "雨后彩虹" }, null,
             };
+            ToolStripMenuItem liveIt = null;
             foreach (var m in modes)
             {
                 if (m == null) { pv.DropDownItems.Add(new ToolStripSeparator()); continue; }
                 var key = m[0];
                 var it = new ToolStripMenuItem(m[1]) { Tag = key };
-                it.Click += (s, e) => SetPreview(key, previewDay);
+                it.Click += (s, e) =>
+                {
+                    // 极简模式平时不显示天气，没有可"切回"的实时画面：这一项就是"按当前天气播放一次"
+                    if (key == "live" && settings.Minimal && !previewDay) { SetPreview("live", false); PlayFx("start"); }
+                    else SetPreview(key, previewDay);
+                };
                 pv.DropDownItems.Add(it);
+                if (key == "live") liveIt = it;
             }
             var dayIt = new ToolStripMenuItem("一天快进演示（按上面所选天气，48 秒一遍）");
             dayIt.Click += (s, e) => SetPreview(preview, !previewDay);
@@ -546,19 +745,27 @@ namespace WeatherWallpaper
             {
                 foreach (var o in pv.DropDownItems.OfType<ToolStripMenuItem>()) if (o.Tag is string) o.Checked = (string)o.Tag == preview;
                 dayIt.Checked = previewDay;
+                // 极简模式：「当前天气」只在真正播放时打勾；平时桌面上是系统壁纸，什么都不勾
+                if (settings.Minimal && preview == "live" && !previewDay && fxKind == null) liveIt.Checked = false;
+                liveIt.Text = settings.Minimal ? "当前天气（立即播放 " + settings.PlaySecondsValue() + " 秒）" : "实时天气";
+                var back = settings.Minimal ? "收起" : "恢复实时天气";
                 var left = (int)Math.Ceiling((previewUntil - DateTime.Now).TotalSeconds);
-                pvTip.Text = previewTimer.Enabled && left > 0 ? $"{left} 秒后恢复实时天气" : "预览 1 分钟后自动恢复实时天气";
+                pvTip.Text = previewTimer.Enabled && left > 0 ? $"{left} 秒后{back}" : "预览 1 分钟后自动" + back;
             };
             menu.Items.Add(pv);
 
             var fx = new ToolStripMenuItem("任务栏雨雪效果") { CheckOnClick = true };
             fx.Click += (s, e) => { settings.TaskbarFx = fx.Checked; settings.Save(); ConfigureOverlay(); };
-            var lowMem = new ToolStripMenuItem("省内存模式（约少 30–50 MB，画面略软）") { CheckOnClick = true };
+            // 省内存模式不再作为常规选项：想省资源用极简模式（静止时 CPU / GPU 为 0，内存也更低）；settings.json 里的 LowMemory 仍然有效。
+            // 只在已经开着时显示这一项，让以前开过的人能直接在菜单里关掉
+            var lowMem = new ToolStripMenuItem("省内存模式") { CheckOnClick = true };
             lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); ApplyFlyoutMode(); };
             var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
             wfx.Click += (s, e) => { settings.WindowFx = wfx.Checked; settings.Save(); Watch(); };
             var card = new ToolStripMenuItem("显示天气卡片") { CheckOnClick = true };
             card.Click += (s, e) => { settings.ShowPanel = card.Checked; settings.Save(); ConfigureOverlay(); };
+            var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
+            minimal.Click += (s, e) => { settings.Minimal = minimal.Checked; settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch(); };
             var mon = new ToolStripMenuItem("显示在");
             mon.DropDownOpening += (s, e) =>
             {
@@ -596,6 +803,7 @@ namespace WeatherWallpaper
             fps60.Click += (s, e) => { settings.Fps = fps60.Checked ? 60 : 30; settings.Save(); overlay.SetFps(settings.Fps); ConfigureOverlay(); };
             var startup = new ToolStripMenuItem("开机自启") { CheckOnClick = true };
             startup.Click += (s, e) => SetAutoStart(startup.Checked);
+            menu.Items.Add(minimal);
             menu.Items.Add(fx); menu.Items.Add(wfx); menu.Items.Add(card); menu.Items.Add(pos); menu.Items.Add(mon); menu.Items.Add(fps60); menu.Items.Add(lowMem); menu.Items.Add(startup);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(status);
@@ -615,7 +823,10 @@ namespace WeatherWallpaper
 
             menu.Opening += (s, e) =>
             {
-                fx.Checked = settings.TaskbarFx; lowMem.Checked = settings.LowMemory; wfx.Checked = settings.WindowFx; card.Checked = settings.ShowPanel;
+                lowMem.Checked = settings.LowMemory; lowMem.Visible = settings.LowMemory;
+                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx; card.Checked = settings.ShowPanel;
+                minimal.Checked = settings.Minimal;
+                minimal.Text = "极简模式（平时只显示卡片，天气变化时播放 " + settings.PlaySecondsValue() + " 秒）";
                 status.Text = "当前：" + (perfText == "" ? "启动中" : perfText);
                 fps60.Checked = settings.Fps >= 60; startup.Checked = IsAutoStart();
                 auto.Checked = !settings.Lat.HasValue;
@@ -694,6 +905,7 @@ namespace WeatherWallpaper
                 settings.Save();
             }
             await Task.Yield();
+            ResetWeatherFx();
             Refresh(true);
         }
 
@@ -726,13 +938,14 @@ namespace WeatherWallpaper
             if (n.Same(settings)) return;   // 自己保存触发的
             bool walls = n.Monitors != settings.Monitors || n.Layered != settings.Layered || n.DevTools != settings.DevTools;
             bool loc = n.Lat != settings.Lat || n.Lon != settings.Lon;
+            bool minimal = n.Minimal != settings.Minimal;
             settings.CopyFrom(n);
             Log.Write("settings reloaded");
             overlay.SetFps(settings.Fps);
-            if (walls) BuildWalls(); else ConfigureOverlay();
+            if (walls) BuildWalls(); else { ConfigureOverlay(); if (minimal) UpdateBackdrops(false); }
             ApplyFlyoutMode();
             Watch();
-            if (loc) Refresh(true);
+            if (loc) { ResetWeatherFx(); Refresh(true); }
         }
 
         // ---------------------------------------------------------------- 检查更新

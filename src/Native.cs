@@ -79,6 +79,16 @@ namespace WeatherWallpaper
         [DllImport("gdi32")] public static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
         [DllImport("user32")] public static extern bool DestroyIcon(IntPtr h);
 
+        [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize, dwTime; }
+        [DllImport("user32")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO p);
+
+        /// <summary>距上次键盘 / 鼠标输入的秒数。</summary>
+        public static double IdleSeconds()
+        {
+            var li = new LASTINPUTINFO { cbSize = 8 };
+            return GetLastInputInfo(ref li) ? unchecked((uint)Environment.TickCount - li.dwTime) / 1000.0 : 0;
+        }
+
         public static string ClassOf(IntPtr h)
         {
             var sb = new StringBuilder(256);

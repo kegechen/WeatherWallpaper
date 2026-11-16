@@ -23,6 +23,10 @@ namespace WeatherWallpaper
         public string Layered { get; set; } = "auto"; // auto / on / off：24H2 桌面结构下是否给壁纸窗口加 WS_EX_LAYERED
         public bool DevTools { get; set; }
         public bool LowMemory { get; set; }            // 省内存模式：背景半分辨率 + 渐变缓存 + 颜色量化（默认关，画面略软）
+        public bool Minimal { get; set; }              // 极简模式：平时只显示系统壁纸 + 天气卡片，天气有明显变化时才播放一小段天气动画
+        // 每次播放天气动画的秒数。声明成 object：用户手写成字符串、小数或超出 int 的大数时，按 int 反序列化会让整个文件读取失败；
+        // 这里什么值都先收下，加载后由 NormalizePlaySeconds 校验，不合法就回到默认值
+        public object PlaySeconds { get; set; } = DefaultPlaySeconds;
         public bool AutoUpdate { get; set; } = true;   // 启动后及每天自动检查更新
         public string SkipVersion { get; set; }        // 用户选择"跳过此版本"的版本号
 
@@ -38,6 +42,28 @@ namespace WeatherWallpaper
 
         static PropertyInfo[] Props => typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance);
 
+        public const int DefaultPlaySeconds = 30, MinPlaySeconds = 5, MaxPlaySeconds = 3600;
+
+        /// <summary>播放秒数（已校验，总在 5–3600 之间）。</summary>
+        public int PlaySecondsValue() => PlaySeconds is int n ? n : DefaultPlaySeconds;
+
+        /// <summary>
+        /// 把 PlaySeconds 规整成合法的 int：接受整数、小数（四舍五入）和数字字符串；
+        /// null、布尔、非数字、超出 5–3600（含超出 int / long 范围的大数）一律回到默认 30。
+        /// 先在 decimal / double 上比较范围再转 int，不会溢出。
+        /// </summary>
+        void NormalizePlaySeconds()
+        {
+            double v;
+            var o = PlaySeconds;
+            if (o is int || o is long || o is decimal || o is double) v = Convert.ToDouble(o, System.Globalization.CultureInfo.InvariantCulture);
+            else if (!(o is string s) || !double.TryParse(s.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v)) v = double.NaN;
+            PlaySeconds = !double.IsNaN(v) && v >= MinPlaySeconds && v <= MaxPlaySeconds ? (int)Math.Round(v) : DefaultPlaySeconds;
+        }
+
+        static readonly System.Text.RegularExpressions.Regex PlaySecondsNum =
+            new System.Text.RegularExpressions.Regex(@"(""PlaySeconds""\s*:\s*)(-?[0-9][0-9.eE+-]*)");
+
         public static Settings Load() => TryLoad() ?? new Settings();
 
         /// <summary>读取失败（如手动编辑写错了 JSON）返回 null；文件不存在返回默认值。</summary>
@@ -48,7 +74,13 @@ namespace WeatherWallpaper
                 try
                 {
                     if (!File.Exists(FilePath)) return new Settings();
-                    return new JavaScriptSerializer().Deserialize<Settings>(File.ReadAllText(FilePath)) ?? new Settings();
+                    var text = File.ReadAllText(FilePath);
+                    // 超出 double 范围的数字（如 1e400）连 JSON 解析都过不去，会让整个文件读取失败：先换成 null，按默认值处理
+                    text = PlaySecondsNum.Replace(text, m => double.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out _) ? m.Value : m.Groups[1].Value + "null");
+                    var s = new JavaScriptSerializer().Deserialize<Settings>(text) ?? new Settings();
+                    s.NormalizePlaySeconds();
+                    return s;
                 }
                 catch (IOException) { System.Threading.Thread.Sleep(100); }   // 编辑器还在写
                 catch (Exception ex) { Log.Write("settings load: " + ex.Message); return null; }
@@ -74,6 +106,9 @@ namespace WeatherWallpaper
             ["Layered"] = "兼容选项，一般不用改：auto / on / off",
             ["DevTools"] = "开发调试用：true 允许打开 WebView2 开发者工具",
             ["LowMemory"] = "省内存模式：true 开 / false 关。开启后约少 30–50 MB，代价是背景画面略软、渐变可能有极细微色带，托盘面板每次打开要等约 1 秒",
+            ["Minimal"] = "极简模式：true 开 / false 关。开启后平时只显示你原来的系统壁纸和天气卡片，几乎不占 CPU / GPU；" +
+                "启动时、转雨 / 下雪 / 雷雨 / 暴雨、雨后转晴（彩虹）时播放一小段天气动画（桌面被挡住或人不在时等你回来再播）",
+            ["PlaySeconds"] = "极简模式每次播放天气动画（以及雨后彩虹）的时长，单位秒，" + MinPlaySeconds + "–" + MaxPlaySeconds + " 的整数，如 30；写错按默认 " + DefaultPlaySeconds + " 秒",
             ["AutoUpdate"] = "自动检查更新：true / false",
             ["SkipVersion"] = "已选择跳过的版本号，null = 不跳过",
         };

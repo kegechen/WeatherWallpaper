@@ -2,6 +2,9 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1026; use
 canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 /* 雨天压暗 / 雾霾：盖在云上面的整屏渐变，用 CSS 画，不占画布内存 */
 #veil { position: fixed; inset: 0; pointer-events: none; }
+/* 极简模式：系统壁纸（宿主已按屏幕分辨率缩放好）垫底；天气画面整层只在播放时淡入，平时 display:none 不参与合成 */
+#backdrop { position: fixed; inset: 0; display: none; }
+#scene { position: fixed; inset: 0; transition: opacity 1.5s ease; }
 
 #panel {
   position: fixed; top: 28px; right: 28px; width: 336px; box-sizing: border-box;

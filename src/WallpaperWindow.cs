@@ -13,6 +13,7 @@ namespace WeatherWallpaper
         public Rectangle Bounds { get; }
         public bool Primary { get; }
         public bool Ready { get; private set; }
+        public string BackdropJson;   // 极简模式底图消息：页面 ready 时由宿主在 layout 之后补发
         public event Action<WallpaperWindow> OnReady;
         public event Action<WallpaperWindow, string> OnString;
         public event Action<WallpaperWindow, string> OnJson;
@@ -55,6 +56,7 @@ namespace WeatherWallpaper
                 st.AreBrowserAcceleratorKeysEnabled = false;
                 var web = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "web");
                 wv.SetVirtualHostNameToFolderMapping("wallpaper.local", web, CoreWebView2HostResourceAccessKind.Allow);
+                wv.SetVirtualHostNameToFolderMapping(Backdrop.Host, Backdrop.Dir, CoreWebView2HostResourceAccessKind.Allow);   // 极简模式的系统壁纸底图
                 wv.WebMessageReceived += (o, e) =>
                 {
                     string str = null;
