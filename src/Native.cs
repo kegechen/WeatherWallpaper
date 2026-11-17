@@ -30,6 +30,18 @@ namespace WeatherWallpaper
             public uint biCompression, biSizeImage; public int biXPelsPerMeter, biYPelsPerMeter; public uint biClrUsed, biClrImportant;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct DISPLAY_DEVICE
+        {
+            public int cb;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+            public int StateFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+        }
+        [DllImport("user32", CharSet = CharSet.Unicode)] public static extern bool EnumDisplayDevices(string device, uint index, ref DISPLAY_DEVICE dd, uint flags);
+
         public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
 
         [DllImport("user32")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);
@@ -78,6 +90,23 @@ namespace WeatherWallpaper
         [DllImport("gdi32")] public static extern bool DeleteDC(IntPtr dc);
         [DllImport("gdi32")] public static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
         [DllImport("user32")] public static extern bool DestroyIcon(IntPtr h);
+
+        [DllImport("user32")] public static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+        [DllImport("shcore")] public static extern int GetDpiForMonitor(IntPtr mon, int type, out uint dpiX, out uint dpiY);
+
+        /// <summary>这块屏的缩放比例（有效 DPI / 96）：页面的 CSS 像素 = 物理像素 / 它。</summary>
+        public static float ScaleOf(System.Windows.Forms.Screen s)
+        {
+            try
+            {
+                var b = s.Bounds;
+                var m = MonitorFromPoint(new POINT(b.X + b.Width / 2, b.Y + b.Height / 2), 2 /*MONITOR_DEFAULTTONEAREST*/);
+                uint x, y;
+                if (GetDpiForMonitor(m, 0 /*MDT_EFFECTIVE_DPI*/, out x, out y) == 0 && x > 0) return x / 96f;
+            }
+            catch { }
+            return 1f;
+        }
 
         [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize, dwTime; }
         [DllImport("user32")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO p);

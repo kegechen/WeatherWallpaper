@@ -83,27 +83,26 @@ namespace WeatherWallpaper
         readonly NotifyIcon tray = new NotifyIcon();
         readonly ShellWatcher shell;
         CoreWebView2Environment env;
-        string payload, preview = "live", sceneText = "";
+        string preview = "live", sceneText = "";
         bool previewDay;
         DateTime previewUntil;
         readonly WinTimer previewTimer = new WinTimer { Interval = 1000 };
         // 天气预览的时长与极简模式每次播放的时长是同一个设置（PlaySeconds）；一天快进固定 48 秒走完一遍后恢复
         const int DayDemoSeconds = 49;
-        Loc loc;
-        DateTime locTime;
-        bool refreshing, locked;
-        string layeredMode, perfText = "";
+        bool locked;
+        string perfText = "";
         readonly PerfMonitor perf = new PerfMonitor();
-
-        static string CachePath => Path.Combine(Settings.LocalDir, "cache.json");
+        static readonly JavaScriptSerializer Js = new JavaScriptSerializer();
+        static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
 
         public App()
         {
             shell = new ShellWatcher(() => ScheduleRebuild(2500)) { OnCommand = OnCommand };
             BuildTray();
             overlay.SetFps(settings.Fps);
-            rebuildTimer.Tick += (s, e) => { rebuildTimer.Stop(); BuildWalls(); };
-            weatherTimer.Tick += (s, e) => Refresh(false);
+            rebuildTimer.Tick += (s, e) => RebuildNow();
+            weatherTimer.Interval = 30 * 1000;   // 每 30 秒看一眼哪个城市到了该刷新的时间（各城市 15 分钟一次，失败 2 分钟后重试）
+            weatherTimer.Tick += (s, e) => RefreshDue();
             previewTimer.Tick += (s, e) => { if (DateTime.Now >= previewUntil) SetPreview("live", false); };
             watchTimer.Interval = 700;
             watchTimer.Tick += (s, e) => Watch();
@@ -119,12 +118,26 @@ namespace WeatherWallpaper
             SystemEvents.UserPreferenceChanged += (s, e) =>
             {
                 if (e.Category == UserPreferenceCategory.General) ConfigureOverlay();
-                if (e.Category == UserPreferenceCategory.Desktop && settings.Minimal) { backdropTimer.Stop(); backdropTimer.Start(); }   // 换了系统壁纸
+                // 换了系统壁纸，或工作区变了（任务栏自动隐藏、改大小）：卡片按工作区摆，要重排
+                if (e.Category == UserPreferenceCategory.Desktop) { backdropTimer.Stop(); backdropTimer.Start(); }
             };
-            backdropTimer.Tick += (s, e) => { backdropTimer.Stop(); UpdateBackdrops(true); };
+            backdropTimer.Tick += (s, e) =>
+            {
+                backdropTimer.Stop();
+                // 换壁纸（幻灯片每次切换）也走这里：工作区没变就不用重排
+                var wa = string.Join("|", Screen.AllScreens.Select(x => x.DeviceName + x.WorkingArea));
+                if (wa != lastWorkAreas) { lastWorkAreas = wa; ConfigureOverlay(); }
+                if (settings.Minimal) UpdateBackdrops(true);
+            };
+            cardSaveTimer.Tick += (s, e) => FlushCardSave();
             SystemEvents.PowerModeChanged += (s, e) =>
             {
-                if (e.Mode == PowerModes.Resume) { weatherTimer.Stop(); weatherTimer.Interval = 15000; weatherTimer.Start(); }
+                if (e.Mode != PowerModes.Resume) return;
+                foreach (var c in cities.Values) c.Due = DateTime.UtcNow.AddSeconds(15);   // 唤醒后网络通常要等一会儿
+                // 30 秒一次的 tick 相位不定：另起一个一次性定时器，15 秒后准时捡起来（不改 weatherTimer 的间隔）
+                var wake = new WinTimer { Interval = 15500 };
+                wake.Tick += (s2, e2) => { wake.Stop(); wake.Dispose(); if (quitStage == 0) RefreshDue(); };
+                wake.Start();
             };
             StartUpdateTimer();
             WatchSettings();
@@ -146,10 +159,16 @@ namespace WeatherWallpaper
                 ExitThread();
                 return;
             }
-            try { if (File.Exists(CachePath)) payload = File.ReadAllText(CachePath); } catch { }
+            MigrateOldCache();
+            SyncCities(false);   // 先读各城市的缓存：壁纸页面一就绪就有天气可显示
+            CleanCache();
             BuildWalls();
             watchTimer.Start();
-            Refresh(true);
+            weatherTimer.Start();
+            RefreshDue();
+            // 启动时 Load 之后文件可能变过（Load 里迁移写盘被外部修改拒掉、Init 期间被改了）、或者 Load 那会儿文件被占着读不出来（按默认值起来的）：
+            // 主动对一次（文件就是上次读写的内容的话 ReloadSettings 什么都不做）
+            settingsReload.Start();
             // 壁纸起来后再在后台预热托盘面板，不和壁纸抢启动时间
             var warm = new WinTimer { Interval = 4000 };
             warm.Tick += (s, e) => { warm.Stop(); warm.Dispose(); ApplyFlyoutMode(); };
@@ -157,50 +176,203 @@ namespace WeatherWallpaper
         }
 
         // ---------------------------------------------------------------- 壁纸窗口
+        DateTime rebuildFirst, rebuildDue;   // 这次排着的重建第一次被要求的时间、现在排定的到点时间
+
+        /// <summary>
+        /// 去抖：每来一次都从现在重新等 ms（接扩展坞时几秒内连着来好几次显示器变化，要等编号、硬件 ID 都稳定了再建，只建一次）；
+        /// 只往后推、不往前挪（别的调用方要求的等待短，不能把显示器变化排好的较长等待提前）；
+        /// 但从第一次要求算起最多等 5 秒，事件一直不停也不会被无限期推迟。
+        /// </summary>
         void ScheduleRebuild(int ms)
         {
+            var now = DateTime.UtcNow;
+            if (!rebuildTimer.Enabled) rebuildFirst = rebuildDue = now;
+            var at = now.AddMilliseconds(ms);
+            if (at < rebuildDue) at = rebuildDue;
+            var cap = rebuildFirst.AddSeconds(5);
+            if (at > cap) at = cap;
+            rebuildDue = at;
             rebuildTimer.Stop();
-            rebuildTimer.Interval = ms;
+            rebuildTimer.Interval = Math.Max(1, (int)(at - now).TotalMilliseconds);
             rebuildTimer.Start();
         }
 
-        void BuildWalls()
+        /// <summary>立即按当前排定的方式重建（消费掉 rebuildRestore）。排着的重建到点、托盘「重建壁纸」共用。</summary>
+        void RebuildNow()
         {
-            if (env == null) return;
-            foreach (var w in walls) w.Dispose();
-            walls.Clear();
-            if (!DesktopHost.Prepare())
-            {
-                Log.Write("desktop not ready, retry");
-                ScheduleRebuild(3000);
-                return;
-            }
-            layeredMode = settings.Layered;
-            bool layered = layeredMode == "on" || (layeredMode == "auto" && DesktopHost.Raised);
-            foreach (var s in SelectedScreens())
-            {
-                var w = new WallpaperWindow(s, env, layered, settings.DevTools);
-                w.OnReady += OnWallReady;
-                w.OnString += OnWallString;
-                w.OnJson += OnWallJson;
-                walls.Add(w);
-            }
-            DesktopHost.FixZOrder(walls.Select(w => w.Handle).ToList());
-            ConfigureOverlay();
-            UpdateBackdrops(false);
+            rebuildTimer.Stop();
+            bool r = rebuildRestore;
+            rebuildRestore = false;
+            BuildWalls(r);
         }
 
-        /// <summary>settings.Monitors: "all" / "primary" / 某块屏的 DeviceName。指定的屏不存在时退回主屏。</summary>
-        List<Screen> SelectedScreens()
+        /// <summary>重建所有壁纸窗口。restore = 先让系统重绘原壁纸（旧桌面结构下，窗口销毁后那块屏会停在最后一帧）。</summary>
+        bool buildingWalls;
+        void BuildWalls(bool restore = false)
         {
-            var all = Screen.AllScreens;
-            var m = settings.Monitors ?? "all";
-            if (m == "all") return all.ToList();
-            var pick = all.Where(s => s.DeviceName == m).ToList();
-            return pick.Count > 0 ? pick : all.Where(s => s.Primary).ToList();
+            // 防重入：建窗口期间会走到布局、同步窗口的代码（HealAllScreens、ConfigureOverlay），那里再触发整体重建的话内层直接跳过，外层接着建完
+            if (env == null || buildingWalls) return;
+            buildingWalls = true;
+            try
+            {
+                foreach (var w in walls) w.Dispose();
+                walls.Clear();
+                if (restore) DesktopHost.RestoreSystemWallpaper();
+                if (!DesktopHost.Prepare())
+                {
+                    Log.Write("desktop not ready, retry");
+                    ScheduleRebuild(3000);
+                    return;
+                }
+                HealAllScreens();
+                var layered = settings.Layered;
+                wallsLayered = layered == "on" || (layered == "auto" && DesktopHost.Raised);
+                foreach (var s in WallScreens()) walls.Add(NewWall(s));
+                Log.Write("walls: " + (walls.Count == 0 ? "none" : string.Join(", ", walls.Select(w => w.DeviceName))));
+                DesktopHost.FixZOrder(walls.Select(w => w.Handle).ToList());
+                ConfigureOverlay();
+                UpdateBackdrops(false);
+            }
+            finally { buildingWalls = false; }
         }
 
-        /// <summary>显示天气卡片、上报场景的那块：主屏在显示就用主屏，否则用第一块。</summary>
+        /// <summary>
+        /// 卡片按显示器硬件 ID 找屏：\\.\DISPLAYn 在重插扩展坞、更新驱动后可能换号，硬件 ID 还在就把卡片的 Screen 改成新编号；
+        /// 硬件 ID 找不到的（没记过、或换了接口 / 驱动后 ID 变了）按设备名找：
+        ///  · 这个编号现在那块显示器有别的卡片按硬件 ID 认领、而且它们原来记的是别的编号 → 是另一块屏换号占了这个编号，
+        ///    当作"屏没接上"：Screen 记成 CardSpec.AwayPrefix + 原编号，
+        ///    不显示、不去挤那块屏上的卡片，原来那块接回来时按硬件 ID 找回；
+        ///    没记过硬件 ID 的卡片不这样做（让出去就再也认不回来了）：和下一条一样，留在这个编号上；
+        ///  · 没人认领 → 就是这块屏（多半是同一块显示器换了 ID）：改记它现在的硬件 ID，免得之后新卡片记了新 ID、把这些卡片误判成"没接上"。
+        /// 已经让出去的卡片，原编号上的显示器后来没有别的卡片认领了（占着它的那块屏拔掉了、那张卡片删了或挪走了）：回到原编号、改记现在的 ID。
+        /// all = 所有卡片（判断硬件 ID 归谁，按改之前的样子算）。返回 true = 改了。
+        /// </summary>
+        static bool HealScreens(IEnumerable<CardSpec> cards, IList<CardSpec> all)
+        {
+            var ids = Screen.AllScreens.Select(s => new { s, id = CardLayout.MonitorId(s) }).ToList();
+            // 先记下"哪些卡片按硬件 ID 找得到自己的屏"（连同它原来记的编号）：本轮改记的新 ID 不算认领（同一块屏上的几张卡片都要改记，不能互相判成别人的屏）；
+            // 原来记的就是这个编号的也不算（同一个编号上一直是这块屏，只是这张卡片记的 ID 旧了）
+            var owners = all.Where(k => k.Monitor != null && ids.Any(x => x.id == k.Monitor)).Select(k => new { k.Id, k.Monitor, k.Screen }).ToList();
+            // 还住着没让出去的卡片的编号：away 卡片不收回这样的编号——上面可能摆着按设备名住下的卡片（没记过硬件 ID），
+            // 收回会把两张卡片叠到一块屏上，还把硬件 ID 改记成现在这块屏的（原来那块接回来就再也找不回它了）。
+            // 和 owners 一样按改之前的样子算：两张一起让出去的卡片要还能一起回来
+            var residents = new HashSet<string>(all.Where(k => !k.Screen.StartsWith(CardSpec.AwayPrefix)).Select(k => k.Screen));
+            bool changed = false;
+            foreach (var c in cards)
+            {
+                if (c.Screen == CardSpec.PrimaryScreen) continue;
+                var hw = c.Monitor == null ? null : ids.FirstOrDefault(x => x.id == c.Monitor);
+                if (hw != null)
+                {
+                    if (hw.s.DeviceName == c.Screen) continue;
+                    Log.Write("card " + c.Id + ": screen " + c.Screen + " -> " + hw.s.DeviceName + " (same monitor)");
+                    c.Screen = hw.s.DeviceName;
+                    changed = true;
+                    continue;
+                }
+                bool away = c.Screen.StartsWith(CardSpec.AwayPrefix);
+                var num = away ? c.Screen.Substring(CardSpec.AwayPrefix.Length) : c.Screen;
+                var cur = ids.FirstOrDefault(x => x.s.DeviceName == num);
+                if (cur == null) continue;   // 这个编号现在没有屏：等它的屏回来。屏在但取不到硬件 ID（cur.id == null，部分虚拟显示器）：照常处理，按设备名留在它上面
+                if (away)
+                {
+                    // 还被别的卡片占着就不能收回：按硬件 ID 认领它的；还有别的卡片住在这个编号上（含按设备名住下、没记过硬件 ID 的）也算被占
+                    if (owners.Any(o => o.Id != c.Id && o.Monitor == cur.id) || residents.Contains(num)) continue;
+                    Log.Write("card " + c.Id + ": " + num + " is no longer taken by another card's monitor -> back");
+                    c.Screen = num;
+                    if (cur.id != null) c.Monitor = cur.id;   // 取不到现在的 ID：留着原来记的，别抹掉（那块屏以后还能按它找回）
+                }
+                else if (c.Monitor != null && owners.Any(o => o.Id != c.Id && o.Monitor == cur.id && o.Screen != c.Screen))
+                {
+                    Log.Write("card " + c.Id + ": monitor gone, " + c.Screen + " is now another monitor -> away");
+                    c.Screen = CardSpec.AwayPrefix + c.Screen;
+                }
+                else
+                {
+                    // 本来就是：别每轮都当成改了去写盘。
+                    // 现在取不到这块屏的 ID（部分虚拟显示器、插拔扩展坞 / 更新驱动的那一下）：按设备名留在它上面，但原来记的 ID 不动——
+                    // 一次偶发的读取失败不能永久抹掉它，之后换号时还要靠它找回原来那块屏
+                    if (c.Monitor == cur.id || cur.id == null) continue;
+                    if (c.Monitor != null) Log.Write("card " + c.Id + ": " + c.Screen + " monitor id changed, adopt new id");
+                    c.Monitor = cur.id;
+                }
+                changed = true;
+            }
+            return changed;
+        }
+
+        void HealAllScreens()
+        {
+            // 编辑中的那张也要改，并告诉页面（只改屏，不重新初始化：正在输入、搜索的内容不丢）。
+            // 页面在收到之前发出的编辑还带着旧编号：靠 cardGen 认出来，屏以宿主为准（见 ParseCard）
+            if (draft != null && HealScreens(new[] { draft }, settings.Cards))
+            {
+                cardGen++;
+                cardWin?.Post(Js.Serialize(new { t = "screen", id = draft.Id, screen = draft.Screen, gen = cardGen }));
+            }
+            if (!HealScreens(settings.Cards, settings.Cards)) return;
+            Settings.NormalizeScenes(settings.Cards);
+            settings.Save();   // 文件刚被外部改过的话 Save 不写、改为重新加载（重新加载后会再整理一遍）
+        }
+
+        bool wallsLayered, syncingWalls;   // wallsLayered：BuildWalls 时定下的分层方式，之后单独加的窗口沿用
+        bool layoutQueued;                 // 已经排了一次"回到消息循环再重排"，还没执行
+        bool rebuildRestore;               // 排着的那次重建要先让系统重绘原壁纸（旧桌面结构下去掉了某块屏的壁纸窗口）
+        string lastWorkAreas;              // 上次系统设置变化时各屏的工作区：没变就不重排
+
+        WallpaperWindow NewWall(Screen s)
+        {
+            var w = new WallpaperWindow(s, env, wallsLayered, settings.DevTools);
+            w.OnReady += OnWallReady;
+            w.OnString += OnWallString;
+            w.OnJson += OnWallJson;
+            return w;
+        }
+
+        /// <summary>天气跟着卡片走：放了卡片（含隐藏卡片、设置窗口里正在编辑的那张）的屏才显示天气壁纸，其余屏只有系统壁纸。</summary>
+        List<Screen> WallScreens()
+        {
+            var cards = EffectiveCards();
+            return Screen.AllScreens.Where(s => cards.Any(c => SameScreen(c.Screen, s))).ToList();
+        }
+
+        /// <summary>
+        /// 卡片换了屏、增删了卡片：只增减对应屏的壁纸窗口，其他屏的窗口不动（不重建、不闪）。
+        /// 有增减返回 true（已经重新布局过）；屏幕变化等需要整体重建的情况交给 BuildWalls。
+        /// </summary>
+        bool SyncWalls()
+        {
+            // buildingWalls：BuildWalls 执行中（它里面的 ConfigureOverlay → UpdateLayout 会走到这里）——
+            // 此时 walls 已被清空，这里把窗口建出来后外层又会建一遍，每块屏叠两个壁纸窗口；外层自己会建好，直接跳过
+            if (env == null || syncingWalls || buildingWalls) return false;
+            var want = WallScreens();
+            var gone = walls.Where(w => !want.Any(s => s.DeviceName == w.DeviceName && s.Bounds == w.Bounds)).ToList();
+            var add = want.Where(s => !walls.Any(w => w.DeviceName == s.DeviceName && w.Bounds == s.Bounds)).ToList();
+            if (gone.Count == 0 && add.Count == 0) return false;
+            // 旧桌面结构（壁纸窗口挂在 WorkerW 下）：单独销毁一块屏的窗口后 WorkerW 不会重画系统壁纸，那块屏会停在最后一帧。
+            // 这种情况整体重建，中间让系统重绘一次原壁纸（24H2 的 raised 结构下系统壁纸是单独一层，窗口没了自然露出来）。
+            // 稍等一下再重建：在卡片设置的屏幕下拉框里连着切换时只重建一次（等待期间不再增减窗口，那块屏暂时只显示天气画面）
+            if (gone.Count > 0 && !DesktopHost.Raised) { rebuildRestore = true; ScheduleRebuild(1200); return false; }
+            if (rebuildTimer.Enabled) return false;   // 已经排着一次重建：窗口的增减交给它（要撤掉的屏上面已把 restore 记上）
+            // 桌面父窗口没了（资源管理器重启、WorkerW 被重建）：新窗口挂不上去，马上整体重建。
+            // 放在上一行之后：排着的重建（如显示器变化的去抖，等编号稳定）不能被这里提前顶掉
+            if (add.Count > 0 && (DesktopHost.Parent == IntPtr.Zero || !Native.IsWindow(DesktopHost.Parent))) { RebuildNow(); return true; }
+            syncingWalls = true;
+            try
+            {
+                foreach (var w in gone) { walls.Remove(w); w.Dispose(); }
+                foreach (var s in add) walls.Add(NewWall(s));
+                Log.Write("walls: " + (walls.Count == 0 ? "none" : string.Join(", ", walls.Select(w => w.DeviceName)))
+                    + (add.Count > 0 ? " +" + string.Join(",", add.Select(s => s.DeviceName)) : "") + (gone.Count > 0 ? " -" + string.Join(",", gone.Select(w => w.DeviceName)) : ""));
+                DesktopHost.FixZOrder(walls.Select(w => w.Handle).ToList());
+                ConfigureOverlay();   // 里面会 UpdateLayout（syncingWalls 挡住重入）
+                if (add.Count > 0) UpdateBackdrops(false);   // 新窗口要底图（极简模式）；已有屏的底图有缓存文件，不会重新生成
+            }
+            finally { syncingWalls = false; }
+            return true;
+        }
+
+        /// <summary>上报场景（任务栏 / 屋檐雨雪、托盘提示）的那块：主屏在显示就用主屏，否则用第一块。</summary>
         WallpaperWindow MainWall => walls.FirstOrDefault(w => w.Primary) ?? walls.FirstOrDefault();
 
         static Rectangle? TaskbarRect(out IntPtr hwnd)
@@ -220,9 +392,61 @@ namespace WeatherWallpaper
             var prim = Screen.PrimaryScreen.Bounds;
             float scale = tbh != IntPtr.Zero ? Native.GetDpiForWindow(tbh) / 96f : 1f;
             if (scale <= 0) scale = 1;
-            // 任务栏效果只画在主屏任务栏上：壁纸没显示在主屏（如设成仅副屏）就不画
+            // 任务栏效果只画在主屏任务栏上：主屏上没有卡片（没显示天气壁纸）就不画
             overlay.Configure(tb, prim, scale, settings.TaskbarFx && walls.Any(w => w.Primary));
-            foreach (var w in walls) w.Post(LayoutJson(w, tb));
+            UpdateLayout(tb, true);
+        }
+
+        // ---------------------------------------------------------------- 卡片布局与每块屏的画面城市
+        List<CardPlace> places = new List<CardPlace>();
+
+        /// <summary>这块屏在页面里的尺寸：页面报过视口就按它换算（最准），否则按显示器 DPI。</summary>
+        ScreenArea AreaOf(Screen s)
+        {
+            var w = walls.FirstOrDefault(x => x.DeviceName == s.DeviceName && x.Bounds == s.Bounds);
+            float k = w != null && w.CssWidth > 0 ? s.Bounds.Width / w.CssWidth : Native.ScaleOf(s);
+            return ScreenArea.Of(s, k);
+        }
+
+        static bool SameScreen(string id, Screen s)
+        {
+            var r = CardLayout.Resolve(id);
+            return r != null && s != null && r.DeviceName == s.DeviceName;
+        }
+
+        IEnumerable<CardPlace> PlacesOn(WallpaperWindow w) => places.Where(p => p.Host != null && p.Host.DeviceName == w.DeviceName && p.Rect.HasValue);
+
+        /// <summary>
+        /// 每块屏只能画一种全屏天气，画面跟着哪个城市：这块屏上勾了"画面跟随"的卡片 → 这块屏的第一张卡片。
+        /// 这块屏上一张卡片都没有（卡片刚被删光、壁纸窗口还在等着销毁——旧桌面结构下延迟重建）：保持原来的画面城市，
+        /// 别切成默认城市闪一下。
+        /// </summary>
+        string SceneKeyOf(WallpaperWindow w)
+        {
+            var on = places.Where(p => p.Host != null && p.Host.DeviceName == w.DeviceName).ToList();
+            var pick = on.FirstOrDefault(p => p.Card.Scene) ?? on.FirstOrDefault();
+            return pick != null ? pick.Card.LocKey() : w.SceneKey;
+        }
+
+        /// <summary>重新排卡片、定每块屏的画面城市，发给各页面（卡片设置窗口开着时一并更新它的"放不放得下"）。</summary>
+        /// <param name="tbKnown">true = 调用方刚查过任务栏，tb 就是结果（null = 没有底部任务栏），别再查一遍（两次之间任务栏弹出 / 收起会前后不一致）</param>
+        void UpdateLayout(Rectangle? tb = null, bool tbKnown = false)
+        {
+            if (SyncWalls()) return;   // 卡片换了屏 / 增删：先增减壁纸窗口（里面会再调到这里）
+            if (!tbKnown) { IntPtr h; tb = TaskbarRect(out h); }
+            var shown = walls.Select(w => Screen.AllScreens.FirstOrDefault(s => s.DeviceName == w.DeviceName)).Where(s => s != null).ToList();
+            places = CardLayout.Arrange(EffectiveCards(), shown, AreaOf);
+            foreach (var w in walls)
+            {
+                w.SceneKey = SceneKeyOf(w);
+                var j = LayoutJson(w, tb);
+                if (j == w.LayoutSent) continue;   // 这块屏的布局没变（如在卡片设置里改的是别的屏的卡片）：页面不用重排一遍
+                w.LayoutSent = j;
+                w.Post(j);
+            }
+            FxStep();
+            PostFx();
+            cardWin?.Post(CardFitJson());
         }
 
         string LayoutJson(WallpaperWindow w, Rectangle? tb)
@@ -231,21 +455,25 @@ namespace WeatherWallpaper
             bool hasTb = tb.HasValue && w.Bounds.Contains(new Point(tb.Value.X + tb.Value.Width / 2, tb.Value.Y + tb.Value.Height / 2));
             if (hasTb) ground = (w.Bounds.Bottom - tb.Value.Top) / (double)w.Bounds.Height;
             bool main = w == MainWall;
-            return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)
-                + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel && main)
-                + ",\"fps\":" + w.Fps + ",\"pos\":" + WeatherService.JsonStr(settings.PanelPos ?? "tr")
-                + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
-                + ",\"mx\":" + settings.PanelMarginX + ",\"my\":" + settings.PanelMarginY + "}";
+            var cards = string.Join(",", PlacesOn(w).Select(p => "{\"id\":" + WeatherService.JsonStr(p.Card.Id) + ",\"key\":" + WeatherService.JsonStr(p.Card.LocKey())
+                + ",\"x\":" + p.Rect.Value.X.ToString("F1", Inv) + ",\"y\":" + p.Rect.Value.Y.ToString("F1", Inv) + "}"));
+            return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", Inv)
+                + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel)
+                + ",\"fps\":" + w.Fps + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
+                + ",\"scene\":" + WeatherService.JsonStr(w.SceneKey) + ",\"cards\":[" + cards + "]"
+                + ",\"keys\":[" + string.Join(",", cities.Keys.Select(WeatherService.JsonStr)) + "]}";   // 还在用的城市：页面据此丢掉不再用的天气数据
         }
         static string B(bool b) => b ? "true" : "false";
 
         void OnWallReady(WallpaperWindow w)
         {
             IntPtr h;
-            w.Post(LayoutJson(w, TaskbarRect(out h)));
-            if (payload != null) w.Post(payload);
+            w.LayoutSent = LayoutJson(w, TaskbarRect(out h));   // 页面（重新）就绪：不管之前发没发过都发一次
+            w.Post(w.LayoutSent);
+            foreach (var c in cities.Values) if (c.Payload != null) w.Post(c.Payload);
             w.Post(PreviewJson());
-            w.Post(FxJson());
+            w.FxSent = FxKindOf(w);
+            w.Post(FxJson(w.FxSent));
             if (w.BackdropJson != null) w.Post(w.BackdropJson);
         }
 
@@ -257,12 +485,33 @@ namespace WeatherWallpaper
 
         void OnWallJson(WallpaperWindow w, string json)
         {
-            if (w != MainWall) return;
             try
             {
-                var d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
-                if (d == null || !d.ContainsKey("t") || (string)d["t"] != "scene") return;
-                Func<string, double> num = k => d.ContainsKey(k) ? Convert.ToDouble(d[k], System.Globalization.CultureInfo.InvariantCulture) : 0;
+                var d = Js.Deserialize<Dictionary<string, object>>(json);
+                if (d == null || !d.ContainsKey("t")) return;
+                Func<string, double> num = k => d.ContainsKey(k) && d[k] != null ? Convert.ToDouble(d[k], Inv) : 0;
+                var t = d["t"] as string;
+                if (t == "viewport")
+                {
+                    // 页面的实际视口：卡片位置按它换算，和页面的 CSS 像素严格一致
+                    float cw = (float)num("w");
+                    if (cw > 0 && Math.Abs(cw - w.CssWidth) > 0.5f)
+                    {
+                        w.CssWidth = cw;
+                        // 放回消息循环里再重排：重排可能增减、重建壁纸窗口，不能在发消息的这个窗口自己的 WebView2 事件回调里把它销毁。
+                        // 几块屏的页面差不多同时报视口（重建后）：只排一次。
+                        // 同步上下文不在（理论上的防御分支）：宁可跳过这次，也不能在这里同步重排——
+                        // 新的 CssWidth 已经记下，之后任意一次触发重排的事件（设置变化、卡片编辑、重建）会把它用上
+                        var ui = SynchronizationContext.Current;
+                        if (ui != null && !layoutQueued)
+                        {
+                            layoutQueued = true;
+                            ui.Post(_ => { layoutQueued = false; if (quitStage == 0) UpdateLayout(); }, null);
+                        }
+                    }
+                    return;
+                }
+                if (t != "scene" || w != MainWall) return;
                 overlay.SetScene(num("rain"), num("snow"), num("wind"));
                 eaves.SetScene(num("rain"), num("snow"), num("wind"));
                 sceneText = d.ContainsKey("text") ? Convert.ToString(d["text"]) : "";
@@ -281,7 +530,8 @@ namespace WeatherWallpaper
             if (flyout == null)
             {
                 flyout = new FlyoutWindow(env) { OnCommand = FlyoutCommand };
-                if (payload != null) flyout.Post(payload);
+                var dc = DefaultCity();
+                if (dc?.Payload != null) flyout.Post(dc.Payload);
                 flyout.Post(PreviewJson());
                 flyout.Post(UpdateJson());
             }
@@ -302,8 +552,8 @@ namespace WeatherWallpaper
         {
             switch (c)
             {
-                case "refresh": Refresh(true); break;
-                case "city": flyout.HideFlyout(); PickCity(); break;
+                case "refresh": RefreshAll(true); break;
+                case "card": case "city": flyout.HideFlyout(); OpenCardSettings(CardSpec.DefaultId); break;   // 托盘面板显示的就是默认卡片
                 case "hide": flyout.HideFlyout(); break;
                 case "update": flyout.HideFlyout(); if (newer != null) PromptUpdate(newer); break;
                 case "menu":
@@ -349,7 +599,6 @@ namespace WeatherWallpaper
             perf.Sample();
             var fg = Native.GetForegroundWindow();
             bool fullscreenOnPrimary = false;
-            var prim = Screen.PrimaryScreen;
             var rects = tops.Select(h => new { h, r = Native.VisibleRect(h) }).Where(x => x.r.Width > 0 && x.r.Height > 0).ToList();
 
             // 全局帧率上限：电池 / 系统繁忙
@@ -361,7 +610,10 @@ namespace WeatherWallpaper
             int running = 0, minFps = int.MaxValue;
             foreach (var w in walls)
             {
-                var scr = Screen.AllScreens.FirstOrDefault(s => s.Bounds == w.Bounds) ?? prim;
+                var scr = Screen.AllScreens.FirstOrDefault(s => s.Bounds == w.Bounds);
+                if (scr == null) { w.SetPerf(true, w.Fps); w.Shown = false; continue; }
+                // ↑ 这块屏已经不在了（拔掉 / 卡片删光后等销毁的旧窗口）：当作不可见，别拿主屏的遮挡情况喂它；
+                //   只暂停，帧率保持原值（填 0 会被 layout 带出去，窗口留下来时页面一直按最低帧率画）
                 foreach (var x in rects)
                     if (x.h == fg && x.r.Contains(scr.Bounds) && scr.Primary) fullscreenOnPrimary = true;
 
@@ -382,6 +634,7 @@ namespace WeatherWallpaper
                 int fps = cap;
                 if (!pause && vis < 0.35) fps = Math.Min(fps, 15);
                 w.SetPerf(pause, fps);
+                w.Shown = !pause;
                 if (w.Primary) overlay.SetCovered(vis < 0.03);
                 if (!pause) { running++; minFps = Math.Min(minFps, fps); }
             }
@@ -425,13 +678,15 @@ namespace WeatherWallpaper
             }
             else eaves.Update(new IntPtr[0]);
 
-            wallsShown = running > 0;
-            FxStep();
+            // walls 为空时要判一次"是一张卡片都不在已连接的屏上，还是壁纸没建好 / 在排队重建"：FxStep 和下面的 perfText 都要用，算一次传下去
+            var emptyScreens = walls.Count == 0 ? WallScreens() : null;
+            FxStep(emptyScreens);
             if (settings.Minimal && ++backdropCheck >= 43) { backdropCheck = 0; CheckBackdrops(); }   // 约 30 秒查一次（幻灯片放映换图不一定有广播）
 
             if (locked) perfText = "已暂停（锁屏）";
+            else if (walls.Count == 0) perfText = emptyScreens.Count == 0 ? "没有显示天气壁纸（已连接的屏上都没有卡片）" : "正在准备桌面…";
             else if (running == 0) perfText = "已暂停（桌面被遮挡）";
-            else if (settings.Minimal && fxKind == null && preview == "live" && !previewDay) perfText = "极简模式：静止，天气有变化时播放动画";
+            else if (settings.Minimal && !AnyFx() && preview == "live" && !previewDay) perfText = "极简模式：静止，天气有变化时播放动画";
             else perfText = $"{minFps} FPS" + (reasons.Count > 0 ? "（" + string.Join("，", reasons) + "）" : minFps < settings.Fps ? "（桌面大部分被遮挡）" : "");
         }
 
@@ -501,145 +756,276 @@ namespace WeatherWallpaper
         }
 
         // ---------------------------------------------------------------- 天气动画的"播一次"（极简模式）与雨后彩虹
-        // 极简模式平时不画天气，只在这些时候整屏播放一小段（PlaySeconds，默认 30 秒）：启动后拿到第一份天气、转雨、转暴雨、转雷雨、转雪、雨后转晴（彩虹）。
-        // 桌面被挡住、锁屏或人不在电脑前时先记下，等桌面露出来、有人操作时再看是否还需要播（雨已经停了就不播了）。
-        // 彩虹在普通模式下也会出现（雨后转晴的白天挂同样长的时间）。
+        // 每个城市一份状态（WeatherFx）：城市 X 的天气变了，只在画面跟着 X 的屏上播；"桌面露出来"和倒计时也只看这些屏。
+        // 只出现在卡片上、不是任何一块屏画面城市的城市不播全屏动画（等着播的留着，成了画面城市时再播）。
         const double FxIdleSeconds = 120;
-        string fxKind, fxPending, wxCat;   // 正在播 / 等着播的类型；上一份实时天气的类别
-        double fxLeft;
-        // 全部用 UTC：夏令时切换时本地时间会跳一小时，"一小时内不重复""雨停 90 分钟内"会算错
-        DateTime fxTick = DateTime.UtcNow, lastWetAt = DateTime.MinValue, bowShownFor = DateTime.MinValue;
-        bool wxDay, wallsShown;
-        readonly Dictionary<string, DateTime> fxShown = new Dictionary<string, DateTime>();
+        DateTime fxTick = DateTime.UtcNow;
 
-        string FxJson() => "{\"t\":\"fx\",\"kind\":" + (fxKind == null ? "null" : WeatherService.JsonStr(fxKind)) + "}";
-        void PostFx() { foreach (var w in walls) w.Post(FxJson()); }
+        bool AnyFx() => cities.Values.Any(c => c.Fx.Kind != null);
+        string FxKindOf(WallpaperWindow w) { City c; return cities.TryGetValue(w.SceneKey ?? "", out c) ? c.Fx.Kind : null; }
+        static string FxJson(string kind) => "{\"t\":\"fx\",\"kind\":" + (kind == null ? "null" : WeatherService.JsonStr(kind)) + "}";
 
-        static string Category(int code) =>
-            code >= 95 ? "thunder" :
-            (code >= 71 && code <= 77) || code == 85 || code == 86 ? "snow" :
-            code == 65 || code == 67 || code == 82 ? "heavy" :
-            (code >= 51 && code <= 67) || (code >= 80 && code <= 82) ? "rain" :
-            code == 45 || code == 48 ? "fog" :
-            code == 3 ? "cloudy" : "clear";
-        static bool Wet(string c) => c == "rain" || c == "heavy" || c == "thunder";
-        // 雨停后 90 分钟内转晴的白天，每场雨只挂一次
-        bool RainbowDue => wxCat == "clear" && wxDay && lastWetAt > bowShownFor && (DateTime.UtcNow - lastWetAt).TotalMinutes < 90;
-
-        /// <summary>换了城市：上一个城市的天气不能拿来比较（否则会误判转雨、雨后彩虹），按"刚启动"处理。</summary>
-        void ResetWeatherFx() { wxCat = null; lastWetAt = DateTime.MinValue; fxPending = null; }
-
-        /// <summary>每拿到一份实时天气调用一次：和上一份比，判断要不要播。fresh = false 表示用的是启动时的缓存（可能是很久以前的）。</summary>
-        void OnWeather(bool fresh = true)
+        /// <summary>每块屏按自己画面城市的播放状态，变了才通知页面。</summary>
+        void PostFx()
         {
-            int code; bool day;
-            try
+            foreach (var w in walls)
             {
-                var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(payload);
-                var cur = (Dictionary<string, object>)((Dictionary<string, object>)d["fc"])["current"];
-                code = Convert.ToInt32(cur["weather_code"]);
-                day = !cur.ContainsKey("is_day") || Convert.ToInt32(cur["is_day"]) != 0;
-            }
-            catch (Exception ex) { Log.Write("fx: weather parse " + ex.Message); return; }
-            string prev = wxCat, cat = Category(code);
-            wxCat = cat; wxDay = day;
-            if (Wet(cat) && fresh) lastWetAt = DateTime.UtcNow;   // 缓存里的雨可能是昨天的，别拿来判断"刚下过雨"
-            string kind = null;
-            if (prev == null) kind = "start";
-            else if (cat != prev)
-            {
-                if (cat == "snow") kind = "snow";
-                else if (cat == "thunder") kind = "thunder";
-                else if (cat == "heavy" && prev != "thunder") kind = "heavy";
-                else if (cat == "rain" && !Wet(prev)) kind = "rain";
-            }
-            if (!settings.Minimal) kind = null;   // 普通模式一直在播天气，只有彩虹需要额外挂一下
-            if (kind == null && RainbowDue) kind = "rainbow";
-            DateTime t;
-            if (kind != null && kind != "start" && fxShown.TryGetValue(kind, out t) && (DateTime.UtcNow - t).TotalMinutes < 60) kind = null;   // 一小时内同类不重复播
-            if (kind != null && kind != fxPending && kind != fxKind) { fxPending = kind; Log.Write("fx: pending " + kind + " (" + prev + " -> " + cat + ")"); }
-            FxStep();
-        }
-
-        /// <summary>延后的动画到真要播时再确认一次：天气已经变回去了就不播。</summary>
-        bool FxStillDue(string k)
-        {
-            switch (k)
-            {
-                case "snow": return wxCat == "snow";
-                case "rain": case "heavy": case "thunder": return Wet(wxCat);
-                case "rainbow": return RainbowDue;
-                default: return true;
+                var k = FxKindOf(w);
+                if (k == w.FxSent) continue;
+                w.FxSent = k;
+                w.Post(FxJson(k));
             }
         }
 
-        /// <summary>Watch 每 0.7 秒调一次：倒计时只算桌面露出来的时间；等着播的在桌面可见且有人操作时开播。</summary>
-        void FxStep()
+        /// <summary>Watch 每 0.7 秒调一次（布局变化、拿到天气时也调）：推进各城市的倒计时，等着播的在可以开播时开播。
+        /// wallScreens：调用方（Watch）这轮已经算过的 WallScreens()，省得同一个 0.7 秒里算两遍；null = 自己算。</summary>
+        void FxStep(List<Screen> wallScreens = null)
         {
             var now = DateTime.UtcNow;
             double dt = Math.Max(0, Math.Min(2, (now - fxTick).TotalSeconds));
             fxTick = now;
-            bool ended = false;
-            if (fxKind != null)
+            bool canStart = !locked && Native.IdleSeconds() <= FxIdleSeconds;
+            int secs = settings.PlaySecondsValue();
+            bool changed = false;
+            // walls 为空有两种情况：卡片确实都不在已连接的屏上（该丢的丢），或者有卡片但壁纸还没建好 / 正在重建（桌面没就绪，都留着）
+            bool rebuilding = walls.Count == 0 && (wallScreens ?? WallScreens()).Count > 0;
+            foreach (var c in cities.Values)
             {
-                if (wallsShown) fxLeft -= dt;
-                if (fxLeft > 0) return;
-                Log.Write("fx: end " + fxKind);
-                fxKind = null;
-                ended = true;
+                var mine = walls.Where(w => w.SceneKey == c.Key).ToList();
+                if (mine.Count == 0) { if (c.Fx.Detach(!rebuilding)) changed = true; continue; }
+                if (c.Fx.Step(dt, mine.Any(w => w.Shown), canStart, secs)) changed = true;
             }
-            if (fxPending != null && wallsShown && !locked && Native.IdleSeconds() <= FxIdleSeconds)
-            {
-                var k = fxPending;
-                fxPending = null;
-                if (FxStillDue(k)) { PlayFx(k); return; }   // 紧接着播下一段：直接换类型，不先淡出再淡入
-                Log.Write("fx: dropped " + k + " (now " + wxCat + ")");
-            }
-            if (ended) PostFx();
+            if (changed) PostFx();
         }
 
-        void PlayFx(string kind)
+        /// <summary>
+        /// 立即播放（fx 命令、托盘「当前天气（立即播放）」）：cardId 为空 = 每块屏各播各自画面城市；否则只播这张卡片的城市
+        /// （只在画面跟着这个城市的屏上播，不是任何屏的画面城市就不播）。off = 全部停止。
+        /// </summary>
+        void PlayFx(string kind, string cardId = null)
         {
-            if (kind == "off") { fxKind = null; fxLeft = 0; fxPending = null; PostFx(); return; }
-            fxKind = kind; fxLeft = settings.PlaySecondsValue(); fxTick = DateTime.UtcNow;
-            if (fxPending != "rainbow") fxPending = null;   // 正在按当前天气播了，等着的转雨 / 下雪不用再播一遍（彩虹画面不同，留着）
-            fxShown[kind] = DateTime.UtcNow;
-            if (kind == "rainbow") bowShownFor = lastWetAt;
-            Log.Write("fx: play " + kind + " " + fxLeft + "s");
+            int secs = settings.PlaySecondsValue();
+            var keys = kind == "off" ? cities.Keys.ToList()
+                : cardId != null ? EffectiveCards().Where(c => c.Id == cardId).Select(c => c.LocKey()).ToList()
+                : walls.Select(w => w.SceneKey).Distinct().ToList();
+            foreach (var k in keys)
+            {
+                City c;
+                if (!cities.TryGetValue(k, out c)) continue;
+                if (kind != "off" && !walls.Any(w => w.SceneKey == k)) { Log.Write("fx[" + k + "]: not a scene city, skipped"); continue; }
+                c.Fx.Play(kind, secs);
+            }
             PostFx();
         }
 
-        // ---------------------------------------------------------------- 天气
-        async void Refresh(bool relocate)
+        // ---------------------------------------------------------------- 天气：按城市分组，每个城市独立刷新、失败重试、缓存
+        class City
         {
-            if (refreshing) return;
-            refreshing = true;
-            weatherTimer.Stop();
+            public readonly string Key;
+            public CardSpec Spec;              // 定位用：用到这个城市的第一张卡片
+            public Loc Loc;
+            public DateTime LocTime, Due;      // UTC
+            public int LocGen;                 // 每次要求重新定位（立即刷新、卡片改名）加一：RefreshCity 据此认出定位途中又被要求过
+            public string Payload;             // 最近一份天气（发给页面的 JSON）
+            public string FxBad;               // 解析失败过的那份 Payload（坏缓存）：不再拿它去播动画
+            public bool Busy;
+            public DateTime RetiredAt;         // 不再用到的时间（UTC），见 retired
+            public readonly WeatherFx Fx;
+            public City(string key, CardSpec spec) { Key = key; Spec = spec; Fx = new WeatherFx(key); }
+            public string CachePath => CachePathOf(Key);
+        }
+        readonly Dictionary<string, City> cities = new Dictionary<string, City>();
+        // 刚不再用到的城市先留一阵（最多 30 分钟、16 个）：在卡片设置里换了城市又换回来、只预览的草稿关掉时，
+        // 不用重新联网，也不会被当成新城市再播一次"启动"动画；雨后彩虹的计时、一小时内不重播的记录都还在
+        readonly Dictionary<string, City> retired = new Dictionary<string, City>();
+
+        static string cacheDir;
+        static string CacheDir => cacheDir ?? (cacheDir = Path.Combine(Settings.LocalDir, "cache"));   // 目录在写缓存时才建（运行中被删了也能再建出来）
+
+        string DefaultKey() => EffectiveCards()[0].LocKey();
+        City DefaultCity() { City c; return cities.TryGetValue(DefaultKey(), out c) ? c : null; }
+        string AutoName() { City c; return cities.TryGetValue("auto", out c) && c.Loc != null ? c.Loc.Name : null; }
+
+        /// <summary>卡片变了之后：给新出现的城市建状态（先读缓存，refresh = 马上去取），不再用到的城市先收起来（见 retired）。
+        /// edited = 刚在卡片设置里改过城市的卡片：这个地点的名字优先按它（画面、托盘面板的地名跟着最新的编辑走）。</summary>
+        void SyncCities(bool refresh = true, CardSpec edited = null)
+        {
+            var now = DateTime.UtcNow;
+            var eff = EffectiveCards();
+            var want = new Dictionary<string, CardSpec>();
+            foreach (var c in eff) if (!want.ContainsKey(c.LocKey())) want[c.LocKey()] = c;
+            foreach (var k in cities.Keys.ToList())
+            {
+                if (want.ContainsKey(k)) continue;
+                var c = cities[k];
+                cities.Remove(k);
+                c.Fx.Detach(true);
+                c.RetiredAt = now;
+                retired[k] = c;
+            }
+            var stale = retired.Values.OrderByDescending(x => x.RetiredAt).Where((x, i) => i >= 16 || (now - x.RetiredAt).TotalMinutes > 30).Select(x => x.Key).ToList();
+            foreach (var k in stale) retired.Remove(k);
+            foreach (var kv in want)
+            {
+                City c;
+                bool known = cities.TryGetValue(kv.Key, out c);
+                if (!known && retired.TryGetValue(kv.Key, out c))
+                {
+                    retired.Remove(kv.Key);
+                    cities[kv.Key] = c;
+                    known = true;
+                    if (c.Payload != null) foreach (var w in walls) if (w.Ready) w.Post(c.Payload);   // 页面已经按 keys 丢掉了它的天气
+                }
+                if (known)
+                {
+                    // 定位、显示用哪张卡片：优先刚编辑过的，其次上次用的那张（还在这个地点上），都不在就用第一张。
+                    // 按卡片挑而不是按名字挑：同地点多张卡片名字不同时，每来一次就换一个名字重取一遍（地名来回跳）
+                    var pick = (edited != null && edited.LocKey() == kv.Key ? eff.FirstOrDefault(x => x.Id == edited.Id) : null)
+                        ?? eff.FirstOrDefault(x => x.Id == c.Spec.Id && x.LocKey() == kv.Key)
+                        ?? kv.Value;
+                    if (!pick.IsAuto() && pick.City != c.Spec.City)
+                    {
+                        // 用着的这张换了名字（刚编辑过、或原来定位的那张改名了）：马上按新名字重取（正在取的那次取完后接着再取，见 RefreshCity）
+                        c.Loc = null; c.LocTime = DateTime.MinValue; c.LocGen++; c.Due = DateTime.UtcNow;
+                    }
+                    c.Spec = pick;
+                    continue;
+                }
+                c = new City(kv.Key, kv.Value) { Due = DateTime.MinValue, LocTime = DateTime.MinValue };
+                c.Payload = ReadCache(c);
+                cities[kv.Key] = c;
+                if (c.Payload != null) foreach (var w in walls) if (w.Ready) w.Post(c.Payload);   // 还没就绪的窗口在 OnWallReady 里会收到所有城市的天气
+            }
+            // 托盘面板显示默认卡片的城市：换了城市就跟着换（新城市还没有天气时显示"正在获取"，不留着旧城市的）
+            var dk = DefaultKey();
+            if (dk != flyoutKey) { flyoutKey = dk; flyout?.Post(DefaultCity()?.Payload ?? "{\"t\":\"weather\",\"none\":true}"); }
+            if (refresh) RefreshDue();
+        }
+        string flyoutKey;
+
+        /// <summary>启动时清理缓存目录：不再用到、30 天没更新的城市缓存删掉（搜过又换掉的城市会留下缓存文件）。</summary>
+        void CleanCache()
+        {
             try
             {
-                if (relocate || loc == null || (DateTime.Now - locTime).TotalHours > 2)
+                if (!Directory.Exists(CacheDir)) return;
+                var keep = new HashSet<string>(cities.Values.Select(c => Path.GetFileName(c.CachePath)), StringComparer.OrdinalIgnoreCase);
+                foreach (var p in Directory.GetFiles(CacheDir, "*.json"))
+                    if (!keep.Contains(Path.GetFileName(p)) && (DateTime.UtcNow - File.GetLastWriteTimeUtc(p)).TotalDays > 30) File.Delete(p);
+            }
+            catch (Exception ex) { Log.Write("cache clean: " + ex.Message); }
+        }
+
+        static string CachePathOf(string key) => Path.Combine(CacheDir, key.Replace(',', '_') + ".json");
+
+        /// <summary>
+        /// 启动时做一次：旧版本只有一份缓存（cache.json，就是默认卡片的城市），补上城市键挪成默认卡片城市的缓存；
+        /// 那个城市已经有自己的缓存就不用它。旧文件总是删掉（留着的话，以后换到没缓存的城市会错拿到它）。
+        /// </summary>
+        void MigrateOldCache()
+        {
+            var old = Path.Combine(Settings.LocalDir, "cache.json");
+            try
+            {
+                if (!File.Exists(old)) return;
+                var key = settings.DefaultCard().LocKey();
+                var path = CachePathOf(key);
+                if (!File.Exists(path))
                 {
-                    var l = await ws.Locate(settings);
-                    if (l != null) { loc = l; locTime = DateTime.Now; }
+                    var p = File.ReadAllText(old);
+                    const string head = "{\"t\":\"weather\",";
+                    if (p.StartsWith(head))
+                    {
+                        if (!p.StartsWith(head + "\"key\"")) p = head + "\"key\":" + WeatherService.JsonStr(key) + "," + p.Substring(head.Length);
+                        Directory.CreateDirectory(CacheDir);
+                        File.WriteAllText(path, p);
+                    }
+                    else Log.Write("cache migrate: unrecognized cache.json, dropped");   // 搬过去也带不上城市键，页面取不到，别占着位置
+                }
+                File.Delete(old);
+            }
+            catch (Exception ex) { Log.Write("cache migrate: " + ex.Message); }
+        }
+
+        string ReadCache(City c)
+        {
+            try
+            {
+                if (!File.Exists(c.CachePath)) return null;
+                var p = File.ReadAllText(c.CachePath);
+                // 写到一半崩了 / 断电会留下半截 JSON：PostWebMessageAsJson 会拒收，卡片一直「正在获取天气…」。解析不了就当没有缓存
+                if (!(Js.DeserializeObject(p) is Dictionary<string, object>)) throw new FormatException("not an object");
+                return p;
+            }
+            catch (Exception ex) { var m = ex.Message; Log.Write("cache read: " + c.Key + " " + (m.Length > 120 ? m.Substring(0, 120) + "…" : m)); }   // 解析异常的消息会带上整段文本
+            return null;
+        }
+
+        /// <summary>到了刷新时间的城市去取天气。</summary>
+        void RefreshDue()
+        {
+            var now = DateTime.UtcNow;
+            foreach (var c in cities.Values.ToList()) if (!c.Busy && now >= c.Due) RefreshCity(c);
+        }
+
+        /// <summary>「立即刷新天气」：所有城市马上重取，relocate = 自动定位的也重新定位。正在取的城市取完后接着再取一次（RefreshCity 里处理）。</summary>
+        void RefreshAll(bool relocate)
+        {
+            var now = DateTime.UtcNow;
+            foreach (var c in cities.Values) { if (relocate) { c.LocTime = DateTime.MinValue; c.LocGen++; } c.Due = now; }
+            RefreshDue();
+        }
+
+        async void RefreshCity(City c)
+        {
+            c.Busy = true;
+            // 取的过程中「立即刷新」、唤醒改了 Due / LocTime：取完不拿默认的间隔盖掉，按新的要求接着再取
+            DateTime due = c.Due;
+            int gen = c.LocGen;   // 不能拿 LocTime 对照：第一次定位时它本来就是 MinValue，和「立即刷新」设的值分不出来
+            try
+            {
+                var loc = c.Loc;   // 本地留一份：取的过程中卡片换了名字，c.Loc 会被清掉
+                if (loc == null || (DateTime.UtcNow - c.LocTime).TotalHours > 2)
+                {
+                    var l = await ws.Locate(c.Spec);
+                    if (l != null)
+                    {
+                        loc = l;   // 这次照常用它取
+                        // 定位途中又被要求重新定位（或卡片改了名字）：结果不记下，Due 也被改过了，取完接着按新的要求再定位
+                        if (c.LocGen == gen) { c.Loc = l; c.LocTime = DateTime.UtcNow; }
+                    }
                 }
                 if (loc == null) throw new Exception("定位失败");
-                payload = await ws.Fetch(loc);
-                try { File.WriteAllText(CachePath, payload); } catch { }
-                Broadcast(payload);
-                weatherTimer.Interval = 15 * 60 * 1000;
-                Log.Write("weather updated: " + loc.Name);
-                OnWeather();
+                var p = await ws.Fetch(loc, c.Key);
+                City cur;
+                if (!cities.TryGetValue(c.Key, out cur) || cur != c) return;   // 取的过程中这个城市已经不用了
+                c.Payload = p;
+                if (c.Due == due) c.Due = DateTime.UtcNow.AddMinutes(15);
+                try { Directory.CreateDirectory(CacheDir); File.WriteAllText(c.CachePath, p); } catch { }
+                foreach (var w in walls) if (w.Ready) w.Post(p);
+                if (c.Key == DefaultKey()) flyout?.Post(p);
+                if (c.Key == "auto") cardWin?.Post(Js.Serialize(new { t = "autoname", name = AutoName() ?? "" }));   // 卡片设置里的「自动定位（城市名）」跟着更新
+                Log.Write("weather updated: " + c.Key + " " + loc.Name);
+                c.Fx.OnWeather(p, true, settings.Minimal);
+                FxStep();
             }
             catch (Exception ex)
             {
-                Log.Write("refresh failed: " + ex.Message);
-                weatherTimer.Interval = 2 * 60 * 1000;
-                if (wxCat == null && payload != null) OnWeather(false);   // 启动时联网失败：先按缓存的天气播启动动画
+                Log.Write("refresh failed (" + c.Key + "): " + ex.Message);
+                if (c.Due == due) c.Due = DateTime.UtcNow.AddMinutes(2);
+                // 启动时联网失败：先按缓存的天气播启动动画（缓存坏了解析不了的，同一份不再反复解析）
+                if (!c.Fx.HasWeather && c.Payload != null && !ReferenceEquals(c.Payload, c.FxBad))
+                {
+                    c.Fx.OnWeather(c.Payload, false, settings.Minimal);
+                    if (!c.Fx.HasWeather) c.FxBad = c.Payload;
+                    FxStep();
+                }
             }
             finally
             {
-                refreshing = false;
-                weatherTimer.Start();
+                c.Busy = false;
+                City cur;
+                if (c.Due != due && DateTime.UtcNow >= c.Due && cities.TryGetValue(c.Key, out cur) && cur == c) RefreshCity(c);
             }
         }
 
@@ -656,9 +1042,13 @@ namespace WeatherWallpaper
                     bool day = pa.Remove("day");
                     SetPreview(pa.Count > 0 ? pa[0] : (day ? preview : "live"), day);
                     break;
-                case "refresh": Refresh(true); break;
-                case "fx": PlayFx(arg == "" ? "start" : arg.ToLowerInvariant()); break;   // fx [start|rain|heavy|thunder|snow|rainbow|off]：立即播放（测试用）
-                case "rebuild": BuildWalls(); break;
+                case "refresh": RefreshAll(true); break;
+                case "fx":   // fx [start|rain|heavy|thunder|snow|rainbow|off] [卡片 Id]：立即播放（测试用），带卡片 Id 只播那张卡片的城市
+                    var fa = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    PlayFx(fa.Length > 0 ? fa[0].ToLowerInvariant() : "start", fa.Length > 1 ? fa[1] : null);
+                    break;
+                case "card": OpenCardSettings(arg == "" ? CardSpec.DefaultId : arg == "new" ? null : arg); break;   // card [Id|new]：打开卡片设置
+                case "rebuild": RebuildNow(); break;
                 case "quit": Quit(); break;
                 case "checkupdate": CheckUpdate(arg == "manual"); break;
                 case "update-now":   // 不弹确认直接更新（脚本 / 测试用）
@@ -704,14 +1094,8 @@ namespace WeatherWallpaper
             PromoteTrayIconSoon();
             var menu = new ContextMenuStrip();
 
-            menu.Items.Add("立即刷新天气", null, (s, e) => Refresh(true));
-            var city = new ToolStripMenuItem("设置城市…", null, (s, e) => PickCity());
-            var auto = new ToolStripMenuItem("使用自动定位", null, (s, e) =>
-            {
-                settings.City = null; settings.Lat = null; settings.Lon = null; settings.Save(); ResetWeatherFx(); Refresh(true);
-            });
-            menu.Items.Add(city);
-            menu.Items.Add(auto);
+            menu.Items.Add("立即刷新天气", null, (s, e) => RefreshAll(true));
+            menu.Items.Add("卡片设置…", null, (s, e) => OpenCardSettings(CardSpec.DefaultId));   // 新增、切换、删除卡片都在设置窗口里
             menu.Items.Add(new ToolStripSeparator());
 
             var pv = new ToolStripMenuItem("效果预览");
@@ -748,7 +1132,7 @@ namespace WeatherWallpaper
                 foreach (var o in pv.DropDownItems.OfType<ToolStripMenuItem>()) if (o.Tag is string) o.Checked = (string)o.Tag == preview;
                 dayIt.Checked = previewDay;
                 // 极简模式：「当前天气」只在真正播放时打勾；平时桌面上是系统壁纸，什么都不勾
-                if (settings.Minimal && preview == "live" && !previewDay && fxKind == null) liveIt.Checked = false;
+                if (settings.Minimal && preview == "live" && !previewDay && !AnyFx()) liveIt.Checked = false;
                 liveIt.Text = settings.Minimal ? "当前天气（立即播放 " + settings.PlaySecondsValue() + " 秒）" : "实时天气";
                 var back = settings.Minimal ? "收起" : "恢复实时天气";
                 var left = (int)Math.Ceiling((previewUntil - DateTime.Now).TotalSeconds);
@@ -764,49 +1148,15 @@ namespace WeatherWallpaper
             lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); ApplyFlyoutMode(); };
             var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
             wfx.Click += (s, e) => { settings.WindowFx = wfx.Checked; settings.Save(); Watch(); };
-            var card = new ToolStripMenuItem("显示天气卡片") { CheckOnClick = true };
-            card.Click += (s, e) => { settings.ShowPanel = card.Checked; settings.Save(); ConfigureOverlay(); };
             var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
             minimal.Click += (s, e) => { settings.Minimal = minimal.Checked; settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch(); };
-            var mon = new ToolStripMenuItem("显示在");
-            mon.DropDownOpening += (s, e) =>
-            {
-                mon.DropDownItems.Clear();
-                Action<string, string> add = (key, text) =>
-                {
-                    var it = new ToolStripMenuItem(text) { Checked = (settings.Monitors ?? "all") == key };
-                    it.Click += (o, a) => { settings.Monitors = key; settings.Save(); BuildWalls(); };
-                    mon.DropDownItems.Add(it);
-                };
-                add("all", "所有显示器");
-                add("primary", "仅主显示器");
-                mon.DropDownItems.Add(new ToolStripSeparator());
-                var screens = Screen.AllScreens;
-                for (int i = 0; i < screens.Length; i++)
-                {
-                    var sc = screens[i];
-                    add(sc.DeviceName, $"仅显示器 {i + 1}（{sc.Bounds.Width}×{sc.Bounds.Height}{(sc.Primary ? "，主" : "")}{(sc.Bounds.X < 0 ? "，左侧" : sc.Bounds.X > 0 ? "，右侧" : "")}）");
-                }
-            };
-            mon.DropDownItems.Add("…");
-            var pos = new ToolStripMenuItem("卡片位置");
-            foreach (var p in new[] { new[] { "tr", "右上角" }, new[] { "tl", "左上角" }, new[] { "tc", "顶部居中" }, new[] { "br", "右下角" }, new[] { "bl", "左下角" } })
-            {
-                var key = p[0];
-                var it = new ToolStripMenuItem(p[1]) { Tag = key };
-                it.Click += (s, e) => { settings.PanelPos = key; settings.Save(); ConfigureOverlay(); };
-                pos.DropDownItems.Add(it);
-            }
-            pos.DropDownItems.Add(new ToolStripSeparator());
-            pos.DropDownItems.Add(new ToolStripMenuItem("调整边距…（编辑 PanelMarginX / PanelMarginY，保存即生效）", null, (s, e) => OpenSettingsFile()));
-            pos.DropDownOpening += (s, e) => { foreach (var o in pos.DropDownItems.OfType<ToolStripMenuItem>()) if (o.Tag is string) o.Checked = (string)o.Tag == (settings.PanelPos ?? "tr"); };
             var status = new ToolStripMenuItem("状态") { Enabled = false };
             var fps60 = new ToolStripMenuItem("高帧率（60 FPS）") { CheckOnClick = true };
             fps60.Click += (s, e) => { settings.Fps = fps60.Checked ? 60 : 30; settings.Save(); overlay.SetFps(settings.Fps); ConfigureOverlay(); };
             var startup = new ToolStripMenuItem("开机自启") { CheckOnClick = true };
             startup.Click += (s, e) => SetAutoStart(startup.Checked);
             menu.Items.Add(minimal);
-            menu.Items.Add(fx); menu.Items.Add(wfx); menu.Items.Add(card); menu.Items.Add(pos); menu.Items.Add(mon); menu.Items.Add(fps60); menu.Items.Add(lowMem); menu.Items.Add(startup);
+            menu.Items.Add(fx); menu.Items.Add(wfx); menu.Items.Add(fps60); menu.Items.Add(lowMem); menu.Items.Add(startup);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(status);
             menu.Items.Add(new ToolStripSeparator());
@@ -826,13 +1176,11 @@ namespace WeatherWallpaper
             menu.Opening += (s, e) =>
             {
                 lowMem.Checked = settings.LowMemory; lowMem.Visible = settings.LowMemory;
-                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx; card.Checked = settings.ShowPanel;
+                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx;
                 minimal.Checked = settings.Minimal;
                 minimal.Text = "极简模式（平时只显示卡片，天气变化时播放 " + settings.PlaySecondsValue() + " 秒）";
                 status.Text = "当前：" + (perfText == "" ? "启动中" : perfText);
                 fps60.Checked = settings.Fps >= 60; startup.Checked = IsAutoStart();
-                auto.Checked = !settings.Lat.HasValue;
-                city.Text = settings.Lat.HasValue ? "设置城市…（当前：" + settings.City + "）" : "设置城市…";
             };
             tray.ContextMenuStrip = menu;
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ToggleFlyout(); };
@@ -896,19 +1244,382 @@ namespace WeatherWallpaper
             }
         }
 
-        async void PickCity()
+        // ---------------------------------------------------------------- 卡片设置窗口
+        // 改动实时生效、自动保存（像 Windows 设置）：放得下就写进设置；放不下的改动只在桌面上预览、页面上标红，关窗口或换卡片时丢弃
+        CardWindow cardWin;
+        CardSpec draft;   // 正在编辑的卡片（放不下时和设置里的那张不一样）
+        readonly WinTimer cardSaveTimer = new WinTimer { Interval = 500 };   // 拖动、方向键、打字时连续改动：合并成一次写盘
+
+        /// <summary>参与布局的卡片：设置里的卡片，正在编辑的那张换成编辑中的样子。</summary>
+        List<CardSpec> EffectiveCards()
         {
-            using (var f = new CityDialog(ws))
+            var list = settings.Cards.Select(c => c.Clone()).ToList();   // 副本：NormalizeScenes 会改写 Scene
+            if (draft != null)
             {
-                if (f.ShowDialog() != DialogResult.OK || f.Result == null) return;
-                settings.City = f.Result.Name;
-                settings.Lat = f.Result.Lat;
-                settings.Lon = f.Result.Lon;
-                settings.Save();
+                int i = list.FindIndex(c => c.Id == draft.Id);
+                if (i >= 0) list[i] = draft.Clone(); else list.Add(draft.Clone());
             }
-            await Task.Yield();
-            ResetWeatherFx();
-            Refresh(true);
+            string prefer = null;
+            if (draft != null)
+            {
+                var stored = settings.Cards.FirstOrDefault(k => k.Id == draft.Id);
+                bool moved = stored != null && !draft.Hidden && CardLayout.GroupKey(stored) != CardLayout.GroupKey(draft);   // 换了屏：CommitDraft 不让它抢那块屏原来的画面跟随
+                if (draft.Scene && !moved) prefer = draft.Id;
+                else
+                {
+                    // 和 CommitDraft 一致：取消勾选的（哪怕还没提交）把画面跟随交给同屏的另一张，
+                    // 否则 NormalizeScenes 会还给排在第一的 draft，页面勾选框又被勾上，和 draft.Scene 对不上
+                    var key = CardLayout.GroupKey(draft);
+                    var other = list.FirstOrDefault(k => k.Id != draft.Id && CardLayout.GroupKey(k) == key && k.Scene)
+                             ?? list.FirstOrDefault(k => k.Id != draft.Id && CardLayout.GroupKey(k) == key);
+                    if (other != null) { other.Scene = true; prefer = other.Id; }
+                }
+            }
+            Settings.NormalizeScenes(list, prefer);
+            return list;
+        }
+
+        static int ScreenIndex(Screen s) => Array.FindIndex(Screen.AllScreens, x => x.DeviceName == s.DeviceName);
+        static string ScreenName(Screen s) => "显示器 " + (ScreenIndex(s) + 1);
+        string CardName(CardSpec c) => !string.IsNullOrEmpty(c.Name) ? c.Name : c.IsDefault() ? "默认卡片" : c.IsAuto() ? "自动定位"
+            : c.PlaceName();
+
+        /// <summary>
+        /// 打开卡片设置。id = CardSpec.DefaultId 只是打开 / 调到前台（托盘、托盘面板；窗口开着时正在编辑的卡片和没交上来的编辑都不动）；
+        /// 其他 id（如命令行 `card &lt;Id&gt;`）窗口开着时切到那张；id = null：打开后新增一张。
+        /// </summary>
+        void OpenCardSettings(string id)
+        {
+            if (env == null) return;
+            if (cardWin == null)
+            {
+                draft = (settings.Cards.FirstOrDefault(c => c.Id == id) ?? settings.Cards[0]).Clone();
+                cardWin = new CardWindow(env, "卡片设置 · 天气壁纸") { OnMessage = OnCardMessage };
+                cardWin.Reloaded = () => { if (cardWin != null && draft != null) { cardWin.Post(CardInitJson()); cardWin.Post(CardFitJson()); } };
+                cardWin.FormClosed += (s, e) =>
+                {
+                    cardWin = null;
+                    FlushCardSave();
+                    if (draft != null) { draft = null; if (quitStage == 0) { SyncCities(); UpdateLayout(); } }   // 放不下、没保存的改动：还原（退出时不用）
+                };
+                cardWin.Post(CardInitJson());
+                cardWin.Post(CardFitJson());
+                cardWin.Show();
+                Native.SetForegroundWindow(cardWin.Handle);
+            }
+            else
+            {
+                if (cardWin.WindowState == FormWindowState.Minimized) cardWin.WindowState = FormWindowState.Normal;
+                if (id != null && id != CardSpec.DefaultId) SwitchCard(id);
+            }
+            cardWin.Activate();
+            if (id == null) AddCard();
+        }
+
+        /// <summary>「＋ 新增卡片」：在放得下的屏上建一张新卡片（马上保存），切过去编辑。都放不下就不新增。</summary>
+        void AddCard()
+        {
+            if (cardWin == null || settings.Cards.Count >= Settings.MaxCards) return;
+            var prev = draft;
+            draft = null;   // 正在编辑的那张如果有放不下、没保存的改动，丢弃
+            var c = NewCard();
+            if (c == null) { draft = prev; UpdateLayout(); return; }
+            settings.Cards.Add(c);
+            Settings.NormalizeScenes(settings.Cards);
+            ScheduleCardSave();
+            Log.Write("card added: " + c.Id + " on " + c.Screen);
+            EditCard(settings.Cards.Last().Clone());
+        }
+
+        /// <summary>页签 / 预览图 / 托盘里换了一张卡片（正在编辑的那张如果有放不下、没保存的改动，丢弃）。</summary>
+        void SwitchCard(string id)
+        {
+            var t = settings.Cards.FirstOrDefault(k => k.Id == id);
+            if (cardWin == null || t == null || (draft != null && draft.Id == id)) return;
+            EditCard(t.Clone());
+        }
+
+        void EditCard(CardSpec c)
+        {
+            draft = c;
+            cardWin.Post(CardInitJson());
+            SyncCities(); UpdateLayout();
+        }
+
+        void DeleteCard()
+        {
+            if (draft == null || draft.IsDefault()) return;
+            var gone = settings.Cards.FirstOrDefault(k => k.Id == draft.Id);
+            if (gone != null)
+            {
+                // 删掉的是这块屏负责"画面跟随"的卡片：交给这块屏剩下的第一张；这块屏没有卡片了，它的天气壁纸也随之关掉
+                var keep = gone.Scene ? settings.Cards.FirstOrDefault(k => k != gone && CardLayout.GroupKey(k) == CardLayout.GroupKey(gone)) : null;
+                settings.Cards.Remove(gone);
+                if (keep != null) { keep.Scene = true; Log.Write("scene moved to: " + keep.Id); }
+                Settings.NormalizeScenes(settings.Cards, keep?.Id);
+                cardSaveTimer.Stop();
+                // 文件刚被外部改过（还没重新加载）：Save 不写、改为重新加载，以文件为准——这次删除让位，窗口会换成文件里的样子。没写成的原因 Save 自己记日志
+                Log.Write((settings.Save() ? "card deleted: " : "card deleted, not saved (see above): ") + gone.Id);
+            }
+            EditCard(settings.Cards[0].Clone());
+        }
+
+        /// <summary>新卡片放在哪：设置窗口所在的屏 → 主屏 → 其他屏，第一块放得下的；都放不下返回 null（不新增）。</summary>
+        CardSpec NewCard()
+        {
+            int n = settings.Cards.Count + 1;
+            while (settings.Cards.Any(k => k.Name == "卡片 " + n)) n++;
+            var c = new CardSpec { Id = CardSpec.NewId(), Name = "卡片 " + n };
+            var order = new List<string>();
+            if (cardWin != null) { var here = Screen.FromControl(cardWin); order.Add(here.Primary ? CardSpec.PrimaryScreen : here.DeviceName); }
+            order.Add(CardSpec.PrimaryScreen);
+            order.AddRange(Screen.AllScreens.Where(s => !s.Primary).Select(s => s.DeviceName));
+            foreach (var id in order.Distinct())
+            {
+                c.Screen = id;
+                if (!Fit(c).Ok) continue;
+                c.Monitor = CardLayout.MonitorOf(id);   // 只给选中的屏取（要枚举显示设备；卡片设置开着时每次重排都会试一遍新增）
+                return c;
+            }
+            return null;
+        }
+
+        void OnCardMessage(string json)
+        {
+            Dictionary<string, object> d;
+            try { d = Js.Deserialize<Dictionary<string, object>>(json); } catch { return; }
+            if (d == null || draft == null || cardWin == null) return;
+            switch (d.ContainsKey("t") ? d["t"] as string : null)
+            {
+                case "draft":   // 页面上改了什么：放得下就马上保存，放不下只预览（页面上标红）
+                    var c = ParseCard(d);
+                    if (c == null) return;
+                    // 画面跟随只认勾选框的点击（带 scene 字段）；其余改动沿用宿主这边的值（换屏、删卡片时会被自动转移）。
+                    // 换了屏：不带着原来那块屏的画面跟随过去（放不下只预览时也不去抢新屏的画面）；换回设置里的那块屏就用设置里的值
+                    if (d.ContainsKey("scene") && d["scene"] is bool) c.Scene = (bool)d["scene"];
+                    else if (CardLayout.GroupKey(c) == CardLayout.GroupKey(draft)) c.Scene = draft.Scene;
+                    else
+                    {
+                        var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
+                        c.Scene = saved != null && saved.Scene && CardLayout.GroupKey(saved) == CardLayout.GroupKey(c);
+                    }
+                    // 什么都没改（如输入框失焦、拖完又落回原处）：不重排、不写盘，只把当前结果再发一遍让页面复位
+                    if (Js.Serialize(c) == Js.Serialize(draft)) { cardWin.Post(CardFitJson()); return; }
+                    bool city = c.LocKey() != draft.LocKey() || c.City != draft.City;
+                    draft = c;
+                    if (Fit(c).Ok) CommitDraft();
+                    if (city) SyncCities(true, c);   // 换了城市：马上去取新城市的天气，桌面上的卡片跟着变
+                    UpdateLayout();
+                    break;
+                case "search": SearchCity(d.ContainsKey("q") ? Convert.ToString(d["q"]) : ""); break;
+                case "identify": ScreenBadge.ShowAll(); break;
+                case "add": AddCard(); break;
+                case "switch": SwitchCard(d.ContainsKey("id") ? Convert.ToString(d["id"]) : ""); break;
+                case "delete": DeleteCard(); break;
+                case "close": cardWin.CloseNow(); break;
+            }
+        }
+
+        /// <summary>
+        /// 页面发来的卡片：Id 由宿主定（页面改不了），其余字段校验后使用。
+        /// 宿主切到别的卡片、重新初始化页面之前页面已经发出的（Id 对不上、gen 早于那次初始化）丢掉；宿主改屏之前发出的（gen 旧了）屏以宿主为准。
+        /// </summary>
+        CardSpec ParseCard(Dictionary<string, object> d)
+        {
+            if (!d.ContainsKey("card") || d["card"] == null) return null;
+            try
+            {
+                var c = Js.Deserialize<CardSpec>(Js.Serialize(d["card"]));
+                if (c.Id != null && c.Id != draft.Id) return null;
+                c.Id = draft.Id;
+                int gen = d.ContainsKey("gen") && d["gen"] != null ? Convert.ToInt32(d["gen"], Inv) : -1;
+                if (gen < cardInitGen) return null;
+                if (gen != cardGen) c.Screen = draft.Screen;
+                c.Monitor = c.Screen == draft.Screen ? draft.Monitor : CardLayout.MonitorOf(c.Screen);   // 硬件 ID 由宿主定：换了屏才重新取
+                c.Normalize();
+                return c;
+            }
+            catch (Exception ex) { Log.Write("card parse: " + ex.Message); return null; }
+        }
+
+        /// <summary>把正在编辑的卡片写进设置（调用前已确认放得下），理顺每块屏的"画面跟随"，稍后写盘。</summary>
+        void CommitDraft()
+        {
+            var c = draft.Clone();
+            int i = settings.Cards.FindIndex(k => k.Id == c.Id);
+            if (i < 0) return;   // 卡片都是新增时就建好的；不在了（设置文件被改过）就不写
+            var old = settings.Cards[i];
+            string prefer = c.Scene ? c.Id : null;
+            if (CardLayout.GroupKey(old) != CardLayout.GroupKey(c)) { if (!c.Hidden) { c.Scene = false; prefer = null; } }   // 换了屏：不抢那块屏原来的画面跟随（那块屏没别的卡片时会自动给它）
+            else if (!c.Scene && old.Scene)
+            {
+                // 取消勾选：交给同屏的另一张（只有它一张时 NormalizeScenes 会还给它）
+                var other = settings.Cards.FirstOrDefault(k => k.Id != c.Id && CardLayout.GroupKey(k) == CardLayout.GroupKey(c));
+                if (other != null) { other.Scene = true; prefer = other.Id; }
+            }
+            settings.Cards[i] = c;
+            Settings.NormalizeScenes(settings.Cards, prefer);
+            draft.Scene = c.Scene;
+            ScheduleCardSave();
+        }
+
+        void ScheduleCardSave() { cardSaveTimer.Stop(); cardSaveTimer.Start(); }
+
+        void FlushCardSave()
+        {
+            if (!cardSaveTimer.Enabled) return;
+            cardSaveTimer.Stop();
+            // 文件刚被外部改过（还没重新加载）：Save 不写、改为重新加载，以文件为准——卡片设置里还没写盘的改动让位，窗口会换成文件里的样子
+            if (!settings.Save()) return;
+            Log.Write("cards saved: " + string.Join(" | ", settings.Cards.Select(c => c.Id + " " + c.Screen + " " + c.Pos + " " + c.LocKey()
+                + (c.Hidden ? " hidden" : "") + (c.Scene ? " scene" : ""))));
+        }
+
+        async void SearchCity(string q)
+        {
+            q = (q ?? "").Trim();
+            if (q == "") return;
+            object res;
+            try
+            {
+                var list = await ws.SearchCity(q);
+                res = new { t = "search", q, items = list.Select(r => new { name = r.Name, detail = r.Detail, lat = r.Lat, lon = r.Lon }).ToList() };
+            }
+            catch (Exception ex) { res = new { t = "search", q, error = ex.Message }; }
+            cardWin?.Post(Js.Serialize(res));
+        }
+
+        class FitResult
+        {
+            public bool Ok;
+            public string Msg, Warn;
+            public Screen Target;
+            public ScreenArea Area;
+            public List<CardSpec> On;   // 这块屏上要摆位置的卡片（不含隐藏卡片）
+            public RectangleF?[] Rects;
+        }
+
+        /// <summary>
+        /// 这张卡片在它选的屏上放不放得下：和这块屏上的其他卡片一起按顺序排一遍（与桌面上的布局同一套算法）。
+        /// 放不下、或者会把这块屏上别的卡片挤掉 → 不保存。隐藏卡片不占位置，总放得下。
+        /// </summary>
+        FitResult Fit(CardSpec c)
+        {
+            var f = new FitResult();
+            var target = CardLayout.Resolve(c.Screen);
+            if (target == null) { f.Ok = true; f.Warn = "这块显示器现在没有连接，接回来后卡片和天气画面会出现在它上面"; return f; }
+            var list = EffectiveCards();
+            int at = list.FindIndex(k => k.Id == c.Id);
+            if (at >= 0) list[at] = c.Clone(); else list.Add(c.Clone());
+            f.Target = target;
+            f.Area = AreaOf(target);
+            f.On = list.Where(k => SameScreen(k.Screen, target) && !k.Hidden).ToList();
+            f.Rects = CardLayout.Place(f.Area.Work, f.On);
+            int me = f.On.FindIndex(k => k.Id == c.Id);
+            if (me >= 0)
+            {
+                // 只算这次改动造成的：改之前（设置里的样子）放得下、现在放不下的卡片。本来就放不下的（换了分辨率、缩放）不算，
+                // 不然这块屏上的卡片（包括这张自己）连名称、城市都改不了
+                var before = settings.Cards.Where(k => SameScreen(k.Screen, target) && !k.Hidden).ToList();
+                var br = CardLayout.Place(f.Area.Work, before);
+                var placed = new HashSet<string>(before.Where((k, i) => br[i].HasValue).Select(k => k.Id));
+                if (!f.Rects[me].HasValue)
+                {
+                    // 本来就放不下、这次也没挪它（只改了名称、城市等）：照常保存，只提示；挪到了另一个同样放不下的地方 → 不保存
+                    var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
+                    bool samePlace = saved != null && saved.Screen == c.Screen && saved.Pos == c.Pos && saved.OffsetX == c.OffsetX && saved.OffsetY == c.OffsetY && saved.Hidden == c.Hidden;
+                    if (samePlace && !placed.Contains(c.Id))
+                        f.Warn = ScreenName(target) + " 现在放不下这张卡片，桌面上暂时不显示：换个位置、减小偏移，或者换一块屏";
+                    else f.Msg = ScreenName(target) + " 已经放不下这张卡片了：换个位置、减小偏移，或者换一块屏";
+                }
+                else
+                {
+                    var lost = f.On.Where((k, i) => k.Id != c.Id && !f.Rects[i].HasValue && placed.Contains(k.Id)).FirstOrDefault();
+                    if (lost != null) f.Msg = "这样摆会把「" + CardName(lost) + "」卡片挤得放不下，换个位置试试";
+                }
+            }
+            f.Ok = f.Msg == null;
+            return f;
+        }
+
+        string CardInitJson()
+        {
+            cardInitGen = ++cardGen;
+            return Js.Serialize(new { t = "init", card = draft, autoName = AutoName() ?? "", gen = cardGen });
+        }
+        // 宿主这边改过正在编辑的卡片的次数，页面的编辑带回来对照：cardGen = 改过屏（显示器换号自愈）或重新初始化；
+        // cardInitGen = 最近一次重新初始化页面（换卡片、设置文件被外部改了）时的值
+        int cardGen, cardInitGen;
+
+        /// <summary>放不放得下 + 页签（所有卡片）+ 屏幕下拉框（每块屏还能放几张）+ 所选屏的缩略图 + 画面跟随 / 新增按钮的状态。</summary>
+        string CardFitJson()
+        {
+            if (draft == null) return "{\"t\":\"noop\"}";
+            var f = Fit(draft);
+            var eff = EffectiveCards();
+            var mine = eff.FirstOrDefault(k => k.Id == draft.Id) ?? draft;
+            var all = Screen.AllScreens;
+            var others = eff.Where(k => k.Id != draft.Id).ToList();
+            int room = Settings.MaxCards - settings.Cards.Count;   // 按设置里的卡片数算（正在编辑的这张也占一个名额；Free 摆放时已把它算进去）
+            var screens = new List<object> { new { id = CardSpec.PrimaryScreen, label = "主屏（始终跟随主屏）" } };
+            for (int i = 0; i < all.Length; i++)
+            {
+                var s = all[i];
+                // 按正在编辑的这张卡片的位置和偏移往里塞，和真选过去时的判断一致
+                int free = CardLayout.Free(AreaOf(s).Work, others.Where(k => SameScreen(k.Screen, s) && !k.Hidden).ToList(), draft);
+                // 这张本来就在这块屏上：Free 把它占的位置也算成了空位，"还能再放"要扣掉，新增受总数名额限制；
+                // 别的屏：Free 里的第一张就是这张挪过去（不占名额），后面的才是新增
+                // 隐藏卡片不占位置：在本屏 Free 没把它算进去，不用扣；也不是"挪过去"，没有那 +1
+                free = !SameScreen(draft.Screen, s) ? Math.Min(room + 1, free)
+                    : draft.Hidden ? Math.Min(room, free) : Math.Min(room, free - 1);
+                free = Math.Max(0, free);
+                var b = s.Bounds;
+                screens.Add(new
+                {
+                    id = s.DeviceName,
+                    label = ScreenName(s) + " · " + b.Width + "×" + b.Height + (s.Primary ? " · 主屏" : b.X < 0 ? " · 左侧" : b.X > 0 ? " · 右侧" : "")
+                        + (free > 0 ? " · 还能放 " + free + " 张" : " · 放满了"),
+                });
+            }
+            if (draft.Screen != CardSpec.PrimaryScreen && CardLayout.Resolve(draft.Screen) == null)
+                screens.Add(new { id = draft.Screen, label = "未连接的显示器（" + (draft.Screen.StartsWith(CardSpec.AwayPrefix) ? "原 " + draft.Screen.Substring(CardSpec.AwayPrefix.Length) : draft.Screen) + "）" });
+
+            object thumb = null;
+            if (f.Target != null)
+            {
+                var boxes = new List<object>();
+                for (int i = 0; i < f.On.Count; i++)
+                {
+                    var k = f.On[i];
+                    bool me = k.Id == draft.Id;
+                    var r = f.Rects[i] ?? (me ? CardLayout.Desired(f.Area.Work, k) : (RectangleF?)null);
+                    if (r == null) continue;
+                    var ek = eff.FirstOrDefault(x => x.Id == k.Id) ?? k;
+                    boxes.Add(new { id = k.Id, x = r.Value.X, y = r.Value.Y, w = r.Value.Width, h = r.Value.Height, me, bad = !f.Rects[i].HasValue, scene = ek.Scene, name = CardName(k) });
+                }
+                var wk = f.Area.Work;
+                thumb = new { w = f.Area.Size.Width, h = f.Area.Size.Height, work = new[] { wk.X, wk.Y, wk.Width, wk.Height }, boxes, name = ScreenName(f.Target) };
+            }
+
+            // 画面跟随勾选框：这块屏只有这一张 / 这张是隐藏卡片 → 一定是它（打勾禁用）；同屏有隐藏卡片 → 一定是那张（不勾禁用）
+            var group = eff.Where(k => CardLayout.GroupKey(k) == CardLayout.GroupKey(draft)).ToList();
+            var hid = group.FirstOrDefault(k => k.Hidden && k.Scene && k.Id != draft.Id);   // 这块屏上拿着画面跟随的隐藏卡片（NormalizeScenes 让第一张隐藏卡片拿）
+            string sceneHint = hid != null ? "这块屏的天气画面由隐藏卡片「" + CardName(hid) + "」决定"
+                : draft.Hidden ? "隐藏卡片就是用来决定这块屏的天气画面的"
+                : group.Count <= 1 ? "这块屏上只有这一张卡片，天气画面一定跟随它" : null;
+
+            // 和 AddCard 同样的条件：新增时会丢掉正在编辑的卡片放不下、没保存的改动，所以按设置里的样子算
+            var keep = draft;
+            bool canAdd;
+            try { draft = null; canAdd = settings.Cards.Count < Settings.MaxCards && NewCard() != null; }
+            finally { draft = keep; }
+            string addHint = settings.Cards.Count >= Settings.MaxCards ? "最多 " + Settings.MaxCards + " 张卡片" : !canAdd ? "所有屏幕都放不下新卡片了" : null;
+            var cards = eff.Select(k => new { id = k.Id, name = CardName(k), scene = k.Scene, hidden = k.Hidden }).ToList();
+            var warn = string.Join("；", new[] { f.Warn, !settings.ShowPanel ? "设置文件里 ShowPanel 为 false：桌面上不显示任何卡片（只有天气画面），改成 true 才显示" : null }.Where(s => s != null));
+            // 偏移能调到多大：再大卡片也已经贴边、不会再动（方向键、± 按到这里为止）。按左右 / 上下贴边算，居中位置页面自己减半；
+            // 只跟所选的屏有关（scr），页面换了屏、新结果还没到时不用它
+            int[] lim = f.Area == null ? null : new[] { (int)Math.Max(0, f.Area.Work.Width - CardLayout.W), (int)Math.Max(0, f.Area.Work.Height - CardLayout.H) };
+            return Js.Serialize(new { t = "fit", id = draft.Id, scr = draft.Screen, ok = f.Ok, msg = f.Msg ?? "", warn, lim, scene = mine.Scene, sceneLock = sceneHint != null, sceneHint = sceneHint ?? "", addable = addHint == null, addHint = addHint ?? "", cards, screens, thumb });
         }
 
         // ---------------------------------------------------------------- 设置文件
@@ -918,7 +1629,8 @@ namespace WeatherWallpaper
         /// <summary>用记事本打开 settings.json（格式化成多行便于编辑），保存后自动重新加载。</summary>
         void OpenSettingsFile()
         {
-            settings.Save();
+            // 先格式化写回（文件被外部改过的话 Save 不写、改为重新加载）；文件写坏了：原样打开让用户修，别先用内存里的设置把它盖掉
+            settings.Save(keepBroken: true);
             OpenUrl("notepad.exe", "\"" + Settings.FilePath + "\"");
         }
 
@@ -926,28 +1638,60 @@ namespace WeatherWallpaper
         {
             settingsWatcher = new FileSystemWatcher(Settings.AppDataDir, "settings.json") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName };
             var ui = SynchronizationContext.Current;
-            FileSystemEventHandler h = (s, e) => ui?.Post(_ => { settingsReload.Stop(); settingsReload.Start(); }, null);
+            FileSystemEventHandler h = (s, e) => ui?.Post(_ => { reloadRetries = 0; settingsReload.Stop(); settingsReload.Start(); }, null);   // 新的文件事件：重读次数重新算
             settingsWatcher.Changed += h; settingsWatcher.Created += h;
             settingsWatcher.Renamed += (s, e) => h(s, e);
-            settingsReload.Tick += (s, e) => { settingsReload.Stop(); ReloadSettings(); };
+            // env == null：Init 还没走完（WebView2、缓存迁移都没好），先不重新加载；Init 末尾会主动对一次，这期间的改动不会丢
+            settingsReload.Tick += (s, e) => { settingsReload.Stop(); if (quitStage == 0 && env != null) ReloadSettings(); };
+            // 写盘时发现文件被外部改过（Save 没写）：排一次重新加载，以文件为准（监视器漏了事件也不会一直卡在"写不进去"）
+            Settings.ExternalChange += () => { if (quitStage == 0) { settingsReload.Stop(); settingsReload.Start(); } };
             settingsWatcher.EnableRaisingEvents = true;
         }
 
+        int reloadRetries;   // 文件被占着读不出来时，连着重读的次数
         void ReloadSettings()
         {
-            var n = Settings.TryLoad();
+            // 自己保存触发的：文件就是上次写进去的内容。之后内存里可能又改了、还没写盘（卡片设置 0.5 秒合并写盘），不能拿文件盖回去
+            string text = null;
+            try { text = File.ReadAllText(Settings.FilePath); } catch { }
+            var n = Settings.TryLoad(text, out var used);   // 用刚读的这份解析：再读一遍的话间隙变了会错位；外层读失败时 used 是 TryLoad 自己重读的那份
+            // used == null：文件这会儿不存在（被改名备份、挪走，或编辑器先改名再写的保存方式）。TryLoad 给的是默认值，不能拿来盖掉内存；
+            // 文件回来时会再有事件。真被删了也不重建：下次写盘时照常写出来
+            if (used == null)
+            {
+                // 文件在、但重试几次都读不出来（编辑器 / 杀毒 / 同步软件占着）：这次的事件不能就这么吞掉，过一会儿再读
+                // 最多再试 10 次（每次 TryLoad 自己要等约 300 毫秒，在 UI 线程上；一直被占着就算了，等下一次文件事件或写盘时的比较）
+                if (File.Exists(Settings.FilePath) && ++reloadRetries <= 10) settingsReload.Start();
+                else if (reloadRetries > 10) Log.Write("settings reload: file still locked, gave up");
+                return;
+            }
+            reloadRetries = 0;
+            if (used == Settings.LastWritten) return;
             if (n == null) { Log.Write("settings reload: parse failed, ignored"); return; }
-            if (n.Same(settings)) return;   // 自己保存触发的
-            bool walls = n.Monitors != settings.Monitors || n.Layered != settings.Layered || n.DevTools != settings.DevTools;
-            bool loc = n.Lat != settings.Lat || n.Lon != settings.Lon;
+            Settings.LastWritten = used;   // 内存和文件现在一致：之后用户把文件改回我们上次写的内容，也要能认出来是外部修改
+            if (n.Same(settings)) { if (n.NeedsSave()) settings.Save(); return; }   // 整理后和内存一样，但文件本身要整理（如超过 8 张、缺默认卡片）：写回
+            bool rebuildWalls = n.Layered != settings.Layered || n.DevTools != settings.DevTools;   // 别叫 walls：会遮住同名字段（壁纸窗口列表）
+            bool cards = Js.Serialize(n.Cards) != Js.Serialize(settings.Cards);
             bool minimal = n.Minimal != settings.Minimal;
+            cardSaveTimer.Stop();   // 以文件为准：排着的卡片合并写盘作废，别过后拿 CopyFrom 之后的内存再写一遍
             settings.CopyFrom(n);
+            if (n.NeedsSave()) settings.Save();   // 补了卡片 Id 等：写回，下次重新加载时 Id 不变
             Log.Write("settings reloaded");
+            bool editing = cards && cardWin != null && draft != null;
+            // 卡片设置窗口开着时设置文件被改了：窗口换成文件里的样子（编辑中的卡片被删了就换到默认卡片）；先换 draft 再整理屏幕，整理的是新的这张
+            if (editing) draft = (settings.Cards.FirstOrDefault(k => k.Id == draft.Id) ?? settings.Cards[0]).Clone();
+            if (cards) HealAllScreens();
+            if (editing)
+            {
+                cardWin.Post(CardInitJson());
+                cardWin.Post(CardFitJson());
+            }
             overlay.SetFps(settings.Fps);
-            if (walls) BuildWalls(); else { ConfigureOverlay(); if (minimal) UpdateBackdrops(false); }
+            if (cards) SyncCities();
+            if (rebuildWalls) RebuildNow();   // 排着的重建、等着的 restore 一并处理，别过后再来一遍
+            else { ConfigureOverlay(); if (minimal) UpdateBackdrops(false); }
             ApplyFlyoutMode();
             Watch();
-            if (loc) { ResetWeatherFx(); Refresh(true); }
         }
 
         // ---------------------------------------------------------------- 检查更新
@@ -1043,10 +1787,25 @@ namespace WeatherWallpaper
             catch (Exception ex) { Log.Write("open url: " + ex.Message); }
         }
 
+        int quitStage;   // 0 = 没在退出，1 = 等卡片设置窗口交上编辑后关掉，2 = 正在退出
+
         void Quit()
         {
+            if (quitStage == 2) return;
+            // 卡片设置开着：先按关窗口的流程让页面把还没发出来的编辑交上来（最多等 0.5 秒），窗口关掉后再接着退出
+            if (cardWin != null)
+            {
+                if (quitStage == 1) return;   // 已经在等了
+                quitStage = 1;
+                cardWin.FormClosed += (s, e) => Quit();
+                cardWin.Close();
+                return;
+            }
+            quitStage = 2;
             watchTimer.Stop(); weatherTimer.Stop(); updateTimer.Stop(); settingsWatcher?.Dispose();
             tray.Visible = false;
+            draft = null;
+            FlushCardSave();
             foreach (var w in walls) w.Dispose();
             walls.Clear();
             overlay.Dispose();
@@ -1117,65 +1876,6 @@ namespace WeatherWallpaper
             var t = new WinTimer { Interval = 1 };
             t.Tick += (s, e) => { t.Stop(); t.Dispose(); OnCommand?.Invoke(cmd); };
             t.Start();
-        }
-    }
-
-    class CityDialog : Form
-    {
-        public GeoResult Result;
-        readonly TextBox box = new TextBox();
-        readonly ListBox list = new ListBox();
-        readonly Label status = new Label();
-        readonly WeatherService ws;
-
-        public CityDialog(WeatherService ws)
-        {
-            this.ws = ws;
-            Text = "设置城市";
-            Icon = Program.AppIcon;
-            Font = new Font("Microsoft YaHei UI", 10f);
-            AutoScaleMode = AutoScaleMode.Dpi;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            MaximizeBox = MinimizeBox = false;
-            StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(420, 330);
-            TopMost = true;
-
-            var tip = new Label { Text = "输入城市名（中文或英文，如 伦敦 / London）：", Left = 14, Top = 12, Width = 390, Height = 24 };
-            box.SetBounds(14, 40, 300, 28);
-            var search = new Button { Text = "搜索", Left = 322, Top = 38, Width = 84, Height = 32 };
-            list.SetBounds(14, 80, 392, 180);
-            status.SetBounds(14, 266, 392, 24);
-            var ok = new Button { Text = "确定", Left = 230, Top = 290, Width = 84, Height = 32 };
-            var cancel = new Button { Text = "取消", Left = 322, Top = 290, Width = 84, Height = 32, DialogResult = DialogResult.Cancel };
-            Controls.AddRange(new Control[] { tip, box, search, list, status, ok, cancel });
-            AcceptButton = search;
-            CancelButton = cancel;
-
-            search.Click += async (s, e) =>
-            {
-                var q = box.Text.Trim();
-                if (q == "") return;
-                status.Text = "搜索中…";
-                list.Items.Clear();
-                try
-                {
-                    var res = await ws.SearchCity(q);
-                    foreach (var r in res) list.Items.Add(r);
-                    status.Text = res.Count == 0 ? "没有找到，换个写法试试" : "选择一个结果后点「确定」";
-                    if (res.Count > 0) list.SelectedIndex = 0;
-                }
-                catch (Exception ex) { status.Text = "搜索失败：" + ex.Message; }
-            };
-            EventHandler accept = (s, e) =>
-            {
-                Result = list.SelectedItem as GeoResult;
-                if (Result == null) { status.Text = "请先搜索并选择城市"; return; }
-                DialogResult = DialogResult.OK;
-                Close();
-            };
-            ok.Click += accept;
-            list.DoubleClick += accept;
         }
     }
 }

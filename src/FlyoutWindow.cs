@@ -111,11 +111,7 @@ namespace WeatherWallpaper
                 ctl.DefaultBackgroundColor = Color.Transparent;
                 ctl.Bounds = ClientRectangle;
                 var wv = ctl.CoreWebView2;
-                wv.Settings.AreDefaultContextMenusEnabled = false;
-                wv.Settings.IsZoomControlEnabled = false;
-                wv.Settings.IsStatusBarEnabled = false;
-                wv.Settings.AreBrowserAcceleratorKeysEnabled = false;
-                wv.SetVirtualHostNameToFolderMapping("wallpaper.local", Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "web"), CoreWebView2HostResourceAccessKind.Allow);
+                WebHost.Configure(wv);
                 wv.WebMessageReceived += (o, e) =>
                 {
                     string s = null;

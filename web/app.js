@@ -8,7 +8,7 @@
   const sceneEl = document.getElementById('scene'), backEl = document.getElementById('backdrop');
   const bctx = cvs.getContext('2d', { alpha: false }), cctx = cldCvs.getContext('2d'), fctx = fxCvs.getContext('2d');
   let ctx = bctx;
-  const panel = document.getElementById('panel');
+  const cardsEl = document.getElementById('cards');
   const host = window.chrome && window.chrome.webview;
   const post = m => { if (host) host.postMessage(m); };
   window.onerror = (msg, src, line) => post('log:' + msg + ' @' + line);
@@ -62,19 +62,32 @@
   const rand = Math.random;
   function prng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, pos: 'tr', mx: 28, my: 28 };
+  // cards：这块屏上的卡片 [{id, key, x, y}]（位置由宿主算好，CSS 像素）；scene：全屏天气画面跟着哪个城市（城市键）
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, scene: '', cards: [] };
 
-  // 卡片位置：tr / tl / tc / br / bl；底部时让开任务栏
-  function placePanel() {
-    const s = panel.style, p = L.pos || 'tr', bottom = p[0] === 'b';
-    s.top = bottom ? 'auto' : L.my + 'px';
-    s.bottom = bottom ? Math.round(L.ground * H + L.my) + 'px' : 'auto';
-    s.left = p[1] === 'l' ? L.mx + 'px' : p[1] === 'c' ? '50%' : 'auto';
-    s.right = p[1] === 'r' ? L.mx + 'px' : 'auto';
-    s.transform = p[1] === 'c' ? 'translateX(-50%)' : '';
-  }
   let W = 0, H = 0, DPR = 1;
+  // weathers：各城市的天气（城市键 → 宿主发来的 weather 消息）；weather：画面城市的那一份（天空、太阳、雨雪都按它）
+  const weathers = {};
   let weather = null, preview = 'live', demo = null, paused = false;
+  function pickWeather() {
+    const w = weathers[L.scene] || null;
+    if (w != null) { staleSince = 0; if (staleTm) { clearTimeout(staleTm); staleTm = 0; } }   // 当前画面城市有数据：stale 计时作废（含从无数据的城市切回来的情况）
+    if (w === weather) return;
+    // 新画面城市的天气还没到（第一次用这个城市、也没有缓存）：先留着旧城市的画面接着画，等数据到了再平滑切过去。
+    // 最多等 2 分钟：一直拿不到（断网）就回到默认晴天，别无限期挂着别的城市的天气（卡片和托盘早就换成新城市了）。
+    // 到点用定时器立刻切（没有它就得等下一轮 60 秒刷新，最长拖到近 3 分钟）
+    if (w == null && weather != null) {
+      // 又换到另一个也没数据的城市：从现在重新等，不沿用上一个城市的计时
+      if (!staleSince || staleKey !== L.scene) {
+        staleSince = Date.now(); staleKey = L.scene;
+        if (staleTm) clearTimeout(staleTm);
+        staleTm = setTimeout(() => { staleTm = 0; pickWeather(); }, 120000);
+      }
+      if (Date.now() - staleSince < 120000) return;
+    }
+    weather = w; dayCache.clear(); tgt = targetScene();
+  }
+  let staleSince = 0, staleTm = 0, staleKey = '';
   // 极简模式：fxKind = 宿主让播放的天气动画（start / rain / heavy / thunder / snow / rainbow，null = 不播）；
   // asleep = 天气画面整层已淡出并释放（画布缩成 1×1、主循环停掉），只剩系统壁纸 + 卡片
   let fxKind = null, asleep = false, sleepTm = 0, backdrop = null, backKey = '', backTok = 0;
@@ -299,7 +312,7 @@
   function newDrop(d, initial) {
     d.z = 0.3 + 0.7 * Math.pow(rand(), 0.8);
     d.v = (900 + 700 * d.z) * H / 1080;
-    d.l = (10 + 24 * d.z) * (0.6 + 0.5 * cur.rain) * H / 1080;
+    d.l = (10 + 24 * d.z) * (0.6 + 0.5 * cur.rain + 0.3 * lightRain()) * H / 1080;   // 小雨的雨丝也拉长一点：太短的点画在灰底上看不出是雨
     const slant = Math.abs(cur.windX) * 0.22 * H;
     d.x = rand() * (W + slant) - (cur.windX > 0 ? slant : 0);
     d.y = initial ? rand() * H : -rand() * H * 0.25 - d.l;
@@ -421,7 +434,7 @@
   }
   // 告诉宿主当前的雨雪（任务栏 / 屋檐效果跟着它走）和托盘提示文字。极简模式没在播放时报 0，任务栏和屋檐也一起歇着
   function postScene() {
-    if (!L.primary) return;
+    if (!L.primary) { lastSceneMsg = ''; return; }   // 不归这块屏报了：忘掉上次报的，以后重新轮到它时第一份一定发出去（宿主那边已经是别的屏报的值）
     lastScenePost = simT;
     let text = '';
     if (weather) {
@@ -489,7 +502,9 @@
     const sunV = vis * smooth(-4, 0.5, e);
     const rays = sunV > 0.3 && (1 - smooth(1, 22, e)) < 0.97;   // 与 drawSun 画光芒的条件一致
     lastDaylight = daylight;
-    return { li, t, sp, e, hz, daylight, golden, storm, vis, starA, mp, moonV, sunV, rays, cc: cloudColors(e, daylight, golden, storm) };
+    // 云的颜色：下雨的云是乌云——只要在下雨，至少往乌云色靠一半（毛毛雨按 storm 算只有 0.2 左右，云还是白的），雨越大越暗
+    const rainCloud = Math.max(storm, 0.5 * smooth(0.02, 0.18, cur.rain) + 0.5 * storm);
+    return { li, t, sp, e, hz, daylight, golden, storm, vis, starA, mp, moonV, sunV, rays, cc: cloudColors(e, daylight, golden, rainCloud) };
   }
 
   // 天空画面的"指纹"：只取肉眼分辨得出的精度。指纹没变就不重画，白天晴空一分钟也画不了几次。
@@ -644,7 +659,7 @@
   function cloudColors(e, daylight, golden, storm) {
     let top = mix(hex('#3b4357'), hex('#ffffff'), daylight), bot = mix(hex('#1a1f2c'), hex('#c3cdda'), daylight);
     top = mix(top, hex('#ffd0a4'), golden * 0.7); bot = mix(bot, hex('#8b7693'), golden * 0.6);
-    const sTop = mix(hex('#2a2f38'), hex('#a7afb9'), daylight), sBot = mix(hex('#14171c'), hex('#5f6773'), daylight);
+    const sTop = mix(hex('#2a2f38'), hex('#8f98a4'), daylight), sBot = mix(hex('#14171c'), hex('#4e5662'), daylight);   // 乌云：白天也是铅灰色
     return [mix(top, sTop, storm), mix(bot, sBot, storm)];
   }
 
@@ -799,13 +814,13 @@
     const T = [[0.8, 0.4], [1.1, 0.64], [1.6, 0.96]];   // 画时再乘 globalAlpha（0.5 起，小雨提亮）
     const dark = [70, 80, 100];
     for (let t = 0; t < 3; t++) {
-      const lw = T[t][0] * k * DPR, ow = lw + 2 * DPR, w = Math.ceil(ow + 2), h = 64;
+      const lw = T[t][0] * k * DPR * (1 + 0.4 * lr), ow = lw + 2 * DPR, w = Math.ceil(ow + 2), h = 64;   // 小雨加粗
       const c = rainSpr[t] || (rainSpr[t] = document.createElement('canvas'));
       c.width = w; c.height = h;
       const g = c.getContext('2d');
       // 深色描边：落在亮云上的细雨也能看清
       const og = g.createLinearGradient(0, 0, 0, h);
-      const oa = T[t][1] * (0.18 + 0.32 * lr);
+      const oa = T[t][1] * (0.18 + 0.45 * lr);
       og.addColorStop(0, css(dark, 0)); og.addColorStop(0.35, css(dark, oa * 0.7)); og.addColorStop(1, css(dark, oa));
       g.fillStyle = og;
       g.fillRect((w - ow) / 2, 0, ow, h);
@@ -820,12 +835,13 @@
   }
 
   function drawRain(daylight) {
-    const col = mix([150, 165, 190], [210, 222, 238], daylight);
+    // 白天小雨芯提亮到近白：灰底、乌云上靠亮芯，白云上靠深色描边
+    const col = mix([150, 165, 190], mix([210, 222, 238], [238, 243, 252], lightRain()), daylight);
     const vxk = cur.windX * 0.22, k = H / 1080;
     const spr = rainSprites(col, k);
     // x' = x + s*y：沿雨丝方向剪切，贴图竖直画，落到屏幕上就是斜的
     ctx.setTransform(DPR, 0, vxk * DPR, DPR, 0, 0);
-    ctx.globalAlpha = 0.5 * (1 + 0.75 * lightRain());
+    ctx.globalAlpha = 0.5 * (1 + 0.9 * lightRain());
     // 按层级分三批画：同一张贴图连续绘制，浏览器可以把整批合并成一次提交（雨滴在数组里是乱序的，交替换贴图就合并不了）
     for (let tier = 0; tier < 3; tier++) {
       const s = spr[tier];
@@ -871,16 +887,55 @@
   }
 
   // ------------------------------------------------------------------ 天气卡片
-  let panelHtml = '';
+  // 每张卡片一个固定大小的 .card，按宿主给的位置摆；城市的天气还没到时先显示"正在获取天气…"。
+  // 内容没变就不动 DOM：卡片带毛玻璃，重排一次要重新模糊整块背景
+  const cardEls = new Map();   // id → { el, html, x, y }
   function renderPanel() {
-    if (!(L.panel && L.primary) || !weather) { panel.classList.add('hidden'); return; }
-    placePanel();
-    try {
-      // 内容没变就不动 DOM：卡片带毛玻璃，重排一次要重新模糊整块背景
-      const html = WX.panelHtml(weather, Date.now() + weather.fc.utc_offset_seconds * 1000, previewLabel());
-      if (html !== panelHtml) { panelHtml = html; panel.innerHTML = html; }
-      panel.classList.remove('hidden');
-    } catch (err) { post('log:panel ' + err.message); }
+    const list = L.panel ? L.cards || [] : [];
+    const seen = new Set();
+    for (const c of list) {
+      seen.add(c.id);
+      let e = cardEls.get(c.id);
+      if (!e) {
+        const el = document.createElement('div');
+        el.className = 'card hidden';
+        cardsEl.appendChild(el);
+        e = { el, html: null, x: null, y: null };
+        cardEls.set(c.id, e);
+      }
+      e.gone = false;   // 淡出中又回来了：别让排好的删除把它撤掉
+      const x = c.x == null ? 0 : c.x, y = c.y == null ? 0 : c.y;   // 没有位置的消息不会来；这里只是防御
+      if (x !== e.x || y !== e.y) { e.x = x; e.y = y; e.el.style.left = x + 'px'; e.el.style.top = y + 'px'; }
+      const w = weathers[c.key];
+      let html;
+      try {
+        html = w ? WX.panelHtml(w, Date.now() + w.fc.utc_offset_seconds * 1000, c.key === L.scene ? previewLabel() : '')
+          : '<div class="wait">正在获取天气…</div>';
+        e.err = '';   // 好了：之后再出同样的错要重新记日志
+      } catch (err) {
+        // 数据有问题：卡片照样显示出来（不然新卡片会一直停在淡入前的透明状态），同样的错误连续出现只记一次日志
+        if (e.err !== err.message) { e.err = err.message; post('log:panel ' + err.message); }
+        html = '<div class="wait">天气数据暂时无法显示</div>';
+      }
+      if (html !== e.html) { e.html = html; e.el.innerHTML = html; WX.fitChips(e.el); }
+      if (e.el.classList.contains('hidden')) { void e.el.offsetWidth; e.el.classList.remove('hidden'); }   // 新卡片淡入（先让初始样式生效，过渡才会触发）
+    }
+    // 消失的卡片淡出后再移除（和 1 秒淡入对称）：淡出期间回来了就留着（上面 e.gone = false）
+    for (const [id, e] of cardEls) if (!seen.has(id) && !e.gone)
+    {
+      e.gone = true;
+      e.el.classList.add('hidden');
+      // 只认最后一次淡出排的定时器（来回切换时早先排的那个到点了别提前撤）；只删自己那条（同一 id 可能已经换成新建的卡片）
+      const tok = e.fade = (e.fade || 0) + 1;
+      setTimeout(() => { if (e.gone && e.fade === tok) { e.el.remove(); if (cardEls.get(id) === e) cardEls.delete(id); } }, 1000);
+    }
+  }
+  // 告诉宿主页面的实际视口（CSS 像素）：卡片位置按它换算，系统缩放、浏览器缩放怎么变都和页面一致
+  let lastViewport = '';
+  function reportViewport() {
+    const m = { t: 'viewport', w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 };
+    const k = m.w + 'x' + m.h + '@' + m.dpr;
+    if (k !== lastViewport && host) { lastViewport = k; post(m); }
   }
 
   // ------------------------------------------------------------------ 主循环
@@ -948,6 +1003,7 @@
   function resize() {
     DPR = window.devicePixelRatio || 1;
     W = window.innerWidth; H = window.innerHeight;
+    reportViewport();
     initStars();
     drops.length = 0; flakes.length = 0; firstFill = true;
     if (asleep) return;   // 睡着时不分配画布，醒来时按当时的尺寸重建
@@ -1041,8 +1097,15 @@
       const m = ev.data;
       if (!m || !m.t) return;
       switch (m.t) {
-        case 'layout': Object.assign(L, m); gotLayout = true; drops.length = 0; flakes.length = 0; firstFill = true; renderPanel(); applyBackdrop(); break;
-        case 'weather': weather = m; dayCache.clear(); tgt = targetScene(); renderPanel(); break;
+        case 'layout': {
+          const g0 = L.ground;
+          Object.assign(L, m); gotLayout = true;
+          if (m.keys) for (const k of Object.keys(weathers)) if (!m.keys.includes(k)) delete weathers[k];   // 不再用到的城市（卡片换了城市）：丢掉它的天气数据
+          if (L.ground !== g0) { drops.length = 0; flakes.length = 0; firstFill = true; }   // 地平线变了：雨雪按新的落点重新生成
+          pickWeather(); renderPanel(); applyBackdrop(); reportViewport();
+          break;
+        }
+        case 'weather': weathers[m.key || ''] = m; pickWeather(); renderPanel(); break;
         case 'preview': setPreview(m.mode, m.day); break;
         case 'fx': fxKind = m.kind || null; tgt = targetScene(); break;
         case 'backdrop': backdrop = m; applyBackdrop(); break;
@@ -1063,6 +1126,7 @@
     // 浏览器里直接打开调试：?mode=rain&day=1&data=sample.json&panel=0
     const q = new URLSearchParams(location.search);
     L.panel = q.get('panel') !== '0'; L.primary = true; L.ground = 0.0444;
+    L.scene = 'dbg'; L.cards = [{ id: 'dbg', key: 'dbg', x: Math.max(0, window.innerWidth - 336 - 28), y: 28 }];   // 一张卡片，右上角（尺寸同 .card）
     L.minimal = q.get('minimal') === '1'; fxKind = q.get('fx') || null;   // ?minimal=1&fx=rainbow 调试极简模式
     if (q.get('manual') === '1') {
       // 录制用：停掉 rAF，由外部按固定步长推进虚拟时钟逐帧绘制（截图慢也不影响动画流畅度）
@@ -1081,10 +1145,13 @@
       applyBackdrop(); applyMinimal();
       wake();
     };
-    if (q.get('data')) fetch(q.get('data')).then(r => r.json()).then(m => { weather = m; dayCache.clear(); apply(); firstScene = true; window.__ready = true; });
+    if (q.get('data')) fetch(q.get('data')).then(r => r.json()).then(m => { weathers.dbg = m; pickWeather(); apply(); firstScene = true; window.__ready = true; });
     else { apply(); window.__ready = true; }
   }
   // 每分钟：睡着时只刷新卡片（逐小时预报会随时间滚动）；暂停时补一张最新的静态帧
-  setInterval(() => { if (asleep) renderPanel(); else if (paused) { firstScene = true; update(0.016); draw(); } }, 60000);
+  setInterval(() => {
+    pickWeather();   // 画面城市的天气一直没到（断网）时，这里兜底再推一把兜底定时器（正常情况它到点自己会切）
+    if (asleep) renderPanel(); else if (paused) { firstScene = true; update(0.016); draw(); }
+  }, 60000);
   wake();
 })();

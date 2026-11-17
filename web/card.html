@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>卡片设置</title>
+<style>
+  /* 卡片设置窗口：窗口本身是 Mica 背景，页面透明；控件按 Windows 11 深色风格。改动实时生效、自动保存，没有保存 / 取消按钮 */
+  :root { color-scheme: dark; --fg: #fff; --dim: rgba(255,255,255,.66); --line: rgba(255,255,255,.08); --ctl: rgba(255,255,255,.06); --ctl2: rgba(255,255,255,.1); --acc: #60cdff; --bad: #ff99a4; --warn: #fce100; }
+  html, body { margin: 0; height: 100%; background: transparent; color: var(--fg); user-select: none; cursor: default; }
+  body { font: 13.5px/1.45 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; }
+  main { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 14px 22px 8px; }
+  section { padding: 12px 14px; margin-bottom: 10px; border-radius: 8px; background: rgba(255,255,255,.04); border: 1px solid var(--line); }
+  /* 隐藏卡片：位置、偏移不可调；预览图只变暗，里面其他卡片的框照样能点（切换编辑） */
+  section.off .grid, section.off .offs, section.off .hint.drag { opacity: .4; pointer-events: none; }
+  section.off #thumb .scr { opacity: .6; }
+  h2 { margin: 0 0 8px; font-size: 13.5px; font-weight: 600; }
+  .hint { color: var(--dim); font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  button, input, select {
+    font: inherit; color: var(--fg); background: var(--ctl); border: 1px solid var(--line); border-bottom-color: rgba(255,255,255,.04);
+    border-radius: 5px; height: 32px; box-sizing: border-box; outline: none;
+  }
+  button { padding: 0 14px; cursor: pointer; }
+  button:hover:not(:disabled) { background: var(--ctl2); }
+  button:active:not(:disabled) { background: rgba(255,255,255,.04); color: var(--dim); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--acc); color: #000; border-color: transparent; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #5ab9e8; }
+  button.danger { color: var(--bad); }
+  input, select { padding: 0 10px; }
+  input:focus, select:focus { border-bottom: 2px solid var(--acc); }
+  select option { background: #2b2b2b; }
+
+  /* 卡片页签：所有卡片一排小胶囊，当前编辑的高亮；末尾是唯一的「＋ 新增卡片」 */
+  #tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  #tabs .tab { height: 28px; padding: 0 12px; border-radius: 14px; font-size: 12.5px; display: inline-flex; align-items: center; gap: 5px; }
+  #tabs .tab.on { background: rgba(96,205,255,.2); border-color: var(--acc); color: #fff; font-weight: 600; }
+  #tabs .tab.hid { font-style: italic; color: var(--dim); }
+  #tabs .tab.on.hid { color: #fff; }
+  #tabs .tab svg { width: 12px; height: 12px; flex: none; }
+  #tabs .tab .cloud { color: var(--acc); }
+  #tabs .tab.new { border-style: dashed; }
+
+  /* 分段按钮（自动定位 / 指定城市） */
+  .seg { display: flex; gap: 4px; padding: 3px; border-radius: 7px; background: rgba(0,0,0,.18); }
+  .seg button { flex: 1; height: 30px; border: none; background: transparent; padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .seg button.on { background: var(--ctl2); box-shadow: inset 0 0 0 1px var(--line); font-weight: 600; }
+  #cityBox { margin-top: 10px; }
+  #q { flex: 1; min-width: 0; }
+  #results { margin-top: 6px; max-height: 150px; overflow-y: auto; border-radius: 6px; }
+  #results:empty { display: none; }
+  #results .it { padding: 6px 10px; border-radius: 5px; cursor: pointer; }
+  #results .it:hover { background: var(--ctl2); }
+  #results .it b { font-weight: 600; margin-right: 8px; }
+  #results .msg { padding: 6px 10px; color: var(--dim); }
+  #results .src { padding: 4px 10px 2px; color: var(--dim); font-size: 11px; opacity: .7; }
+  #cur { margin-top: 8px; }
+
+  #screen { flex: 1; min-width: 0; }
+  .note { margin-top: 8px; padding: 7px 10px; border-radius: 6px; font-size: 12.5px; display: flex; align-items: center; gap: 10px; }
+  .note.warn { background: rgba(252,225,0,.1); color: #ffe98a; }
+  .note.bad { background: rgba(255,99,120,.13); color: var(--bad); }
+  .note:empty { display: none; }
+
+  /* 位置：左边缩略图（可拖动卡片、点其他卡片切换），右边 6 个位置按钮 */
+  .pos { display: flex; gap: 14px; align-items: flex-start; }
+  #thumb { position: relative; flex: none; width: 236px; height: 148px; }
+  #thumb .scr { position: absolute; border-radius: 4px; background: linear-gradient(160deg, #3c5b8c, #1d2c4a); box-shadow: 0 0 0 1px rgba(255,255,255,.18); overflow: hidden; }
+  #thumb .tb { position: absolute; background: rgba(0,0,0,.45); }
+  #thumb .box { position: absolute; box-sizing: border-box; border-radius: 3px; background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); font-size: 10px; color: rgba(255,255,255,.8); text-align: center; overflow: hidden; white-space: nowrap; padding-top: 2px; transition: left .2s, top .2s; }
+  #thumb .box .cloud { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; transform: translate(-50%, -50%); color: var(--acc); pointer-events: none; }
+  #thumb .box.me .cloud { color: #fff; }
+  #thumb .box.me { background: rgba(96,205,255,.45); border-color: var(--acc); color: #fff; font-weight: 600; z-index: 1; cursor: move; }
+  #thumb .box.me.drag { transition: none; }
+  #thumb .box.others { cursor: pointer; }
+  #thumb .box.others:hover { background: rgba(255,255,255,.3); }
+  #thumb .box.bad { background: rgba(255,99,120,.35); border: 1px dashed var(--bad); }
+  #thumb .cap { position: absolute; left: 0; right: 0; bottom: -18px; text-align: center; font-size: 11.5px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #thumb .none { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--dim); font-size: 12px; border-radius: 4px; border: 1px dashed var(--line); padding: 10px; }
+  .grid { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .grid button { height: 58px; padding: 4px 2px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 12px; }
+  .grid button.on { background: rgba(96,205,255,.16); border-color: var(--acc); }
+  .grid i { position: relative; width: 30px; height: 19px; border-radius: 2px; border: 1px solid rgba(255,255,255,.5); box-sizing: border-box; }
+  .grid i::after { content: ''; position: absolute; width: 9px; height: 7px; border-radius: 1px; background: currentColor; }
+  .grid button.on i::after { background: var(--acc); }
+  .grid [data-p^="t"] i::after { top: 2px; } .grid [data-p^="b"] i::after { bottom: 2px; }
+  .grid [data-p$="l"] i::after { left: 2px; } .grid [data-p$="r"] i::after { right: 2px; } .grid [data-p$="c"] i::after { left: 9.5px; }
+  .offs { display: flex; gap: 14px; margin-top: 28px; }
+  .off { flex: 1; min-width: 0; }
+  .off label { display: block; margin-bottom: 4px; color: var(--dim); font-size: 12px; }
+  .step { display: flex; min-width: 0; }
+  .step input { width: 0; flex: 1; min-width: 0; text-align: center; border-radius: 0; border-left: none; border-right: none; }
+  .step button { width: 34px; padding: 0; }
+  .step button:first-child { border-radius: 5px 0 0 5px; } .step button:last-child { border-radius: 0 5px 5px 0; }
+  input[type=number]::-webkit-inner-spin-button { display: none; }
+
+  label.chk { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+  label.chk + label.chk { margin-top: 12px; }
+  label.chk input { appearance: none; flex: none; width: 20px; height: 20px; margin: 1px 0 0; padding: 0; border-radius: 4px; border: 1px solid rgba(255,255,255,.6); background: transparent; cursor: pointer; }
+  label.chk input:checked { background: var(--acc) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E") center/14px no-repeat; border-color: var(--acc); }
+  label.chk input:disabled { opacity: .45; cursor: default; }
+  label.chk:has(input:disabled) { cursor: default; }
+
+  footer { display: flex; align-items: center; gap: 8px; padding: 12px 22px 16px; border-top: 1px solid var(--line); background: rgba(0,0,0,.12); }
+  footer .sp { flex: 1; }
+  footer button { min-width: 96px; }
+  #state { font-size: 12px; color: var(--dim); text-align: right; }
+  #state.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <div id="tabs"></div>
+
+  <section>
+    <h2>名称与城市</h2>
+    <div class="row" style="margin-bottom:8px"><input id="name" placeholder="卡片名称（留空用城市名）" spellcheck="false" maxlength="24" style="flex:1"></div>
+    <div class="seg"><button id="mAuto">自动定位</button><button id="mCity">指定城市</button></div>
+    <div id="cityBox">
+      <div class="row"><input id="q" placeholder="输入城市名，如 杭州、Tokyo" spellcheck="false"><button id="go">搜索</button></div>
+      <div id="results"></div>
+    </div>
+    <div id="cur" class="hint"></div>
+  </section>
+
+  <section>
+    <h2>显示在</h2>
+    <div class="row"><select id="screen"></select><button id="identify" title="在每块屏中间显示编号">识别屏幕</button></div>
+    <div class="hint" style="margin-top:6px">天气画面只出现在放了卡片的屏上，没有卡片的屏保持系统壁纸</div>
+    <div id="scrNote" class="note warn"></div>
+  </section>
+
+  <section id="posSec">
+    <h2>位置</h2>
+    <div class="pos">
+      <div id="thumb"></div>
+      <div class="grid">
+        <button data-p="tl"><i></i>左上</button><button data-p="tc"><i></i>顶部居中</button><button data-p="tr"><i></i>右上</button>
+        <button data-p="bl"><i></i>左下</button><button data-p="bc"><i></i>底部居中</button><button data-p="br"><i></i>右下</button>
+      </div>
+    </div>
+    <div class="offs">
+      <div class="off"><label id="lx">离右边 · px</label><div class="step"><button data-d="-10" data-k="x">−</button><input id="ox" type="number" step="1"><button data-d="10" data-k="x">+</button></div></div>
+      <div class="off"><label id="ly">离上边 · px</label><div class="step"><button data-d="-10" data-k="y">−</button><input id="oy" type="number" step="1" min="0"><button data-d="10" data-k="y">+</button></div></div>
+    </div>
+    <div class="hint drag" style="margin-top:8px">也可以直接在预览图上拖动这张卡片；选中后用方向键微调（Shift + 方向键 = 10px）</div>
+    <div id="fitNote" class="note bad"></div>
+  </section>
+
+  <section>
+    <h2>天气画面</h2>
+    <label class="chk"><input type="checkbox" id="scene"><span>全屏天气画面跟随这张卡片的城市<br><span class="hint" id="sceneHint"></span></span></label>
+    <label class="chk"><input type="checkbox" id="hidden"><span>隐藏卡片，只显示天气画面<br><span class="hint">桌面上不显示这张卡片，只用它的城市决定这块屏的全屏天气画面</span></span></label>
+  </section>
+</main>
+<footer>
+  <button id="del" class="danger">删除卡片</button>
+  <div class="sp"></div>
+  <span id="state"></span>
+  <button id="done" class="primary">完成</button>
+</footer>
+<script>
+(() => {
+  'use strict';
+  const host = window.chrome && window.chrome.webview;
+  const post = m => { if (host) host.postMessage(m); };
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const CLOUD = '<svg class="cloud" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 12.5h7a3 3 0 0 0 .3-5.99A4.5 4.5 0 0 0 3.2 7.6 2.5 2.5 0 0 0 4.5 12.5z"/></svg>';
+  const SCENE_HINT = '每块屏恰好有一张卡片负责画面跟随：勾上它，这块屏上原来负责的卡片就换成这张';
+
+  let card = null, autoName = '', fit = null;
+  let gen = 0;   // 宿主改过这张卡片的屏（显示器换了编号）的次数：发出去的编辑带上它，宿主据此认出改之前发出、还带着旧编号的编辑
+  let cityMode = false;   // 指定城市（还没选好城市时也是 true，但不发给宿主）
+  let searching = '';
+
+  // ---------------------------------------------------------------- 发给宿主（宿主收到后放得下就马上保存）
+  let draftTm = 0;
+  function sendDraft(now, extra) {
+    clearTimeout(draftTm);
+    if (!card) return;   // init 还没到（刚打开 / 页面重新载入）：没有可发的，init 到了会用宿主的值重画
+    const go = () => { draftTm = 0; post(Object.assign({ t: 'draft', gen, card: payload() }, extra || {})); };
+    if (now) go(); else draftTm = setTimeout(go, 120);
+  }
+  function payload() {
+    const c = Object.assign({}, card);   // 偏移、名称（syncName；组字中是上次确定下来的，不带拼音）在改的时候就已经写进 card
+    if (!cityMode || c.Lat == null) { c.City = null; c.Lat = null; c.Lon = null; }
+    return c;
+  }
+  // 偏移能调到多大（宿主按所选屏的可用区域算）：再大卡片也已经贴边、不会再动。k = 0 水平 / 1 垂直；居中位置的水平偏移可以往左（负数）
+  // 宿主给的是贴左右 / 上下边的上限，只跟屏有关：居中位置减半；换了屏、新结果还没到时先不限
+  function limOf(k) {
+    if (!fresh() || !fit.lim || fit.scr !== card.Screen) return 4000;
+    return k === 0 && (card.Pos || 'tr')[1] === 'c' ? Math.floor(fit.lim[0] / 2) : fit.lim[k];
+  }
+  function clampOff(k, v) {
+    const m = limOf(k);
+    return Math.max(k === 0 && (card.Pos || 'tr')[1] === 'c' ? -m : 0, Math.min(m, v));
+  }
+  // 换卡片 / 新增 / 关窗口之前：把手上的编辑先发给宿主。名称框总是现取（含输入法还没上屏的字）：预览图里点卡片时
+  // switch 先发、名称框后失焦，失焦那份 draft 到宿主时已经换了卡片会被丢弃，所以这里必须带上；内容没变时宿主只回一个 fit，不写盘
+  function flushThen(m) {
+    composing = false;
+    clearTimeout(draftTm); draftTm = 0;
+    if (card) { syncName(); post({ t: 'draft', gen, card: payload() }); }   // init 还没到时没有可发的
+    post(m);
+  }
+
+  // ---------------------------------------------------------------- 页签
+  // 按钮就地更新，只在卡片增删 / 换顺序时才重建：按下页签时名称框失焦会发 draft，宿主回的 fit 可能改了页签名，
+  // 整体重建的话按住的按钮被换掉，松开时 click 落空，这次点击就丢了
+  function renderTabs() {
+    const el = $('tabs'), list = (fit && fit.cards) || [];
+    const ids = list.map(c => c.id).join('\n');
+    if (el.dataset.ids !== ids || !$('tabNew')) {
+      el.dataset.ids = ids;
+      el.innerHTML = list.map(c => '<button class="tab" data-id="' + esc(c.id) + '"></button>').join('') + '<button class="tab new" id="tabNew">＋ 新增卡片</button>';
+    }
+    const btns = el.querySelectorAll('.tab:not(.new)');
+    list.forEach((c, i) => {
+      const b = btns[i], html = esc(c.name) + (c.scene ? CLOUD : '');
+      b.classList.toggle('on', !!card && c.id === card.Id);
+      b.classList.toggle('hid', !!c.hidden);
+      b.title = c.hidden ? '隐藏卡片：只决定这块屏的天气画面' : '';
+      if (b._html !== html) { b._html = html; b.innerHTML = html; }   // 跟上次写入的比：innerHTML 读回来会被浏览器规范化（svg 自闭合、引号转义），永远对不上
+    });
+    const n = $('tabNew');
+    n.disabled = !!(fit && !fit.addable);
+    n.title = n.disabled ? fit.addHint || '' : '';
+  }
+  let adding = false;   // 已经发出「新增」、新卡片的 init 还没到：双击 / 按住 Enter 连发时不再建第二张
+  $('tabs').onclick = e => {
+    const t = e.target.closest('.tab');
+    if (!t || t.disabled || t.classList.contains('on')) return;
+    if (t.id === 'tabNew') { if (adding) return; adding = true; setTimeout(() => { adding = false; }, 3000); flushThen({ t: 'add' }); }   // 宿主没建成（不回 init）时 3 秒后放开
+    else flushThen({ t: 'switch', id: t.dataset.id });
+  };
+
+  // ---------------------------------------------------------------- 界面
+  function renderCity() {
+    $('mAuto').classList.toggle('on', !cityMode);
+    $('mCity').classList.toggle('on', cityMode);
+    $('mAuto').textContent = autoName ? '自动定位（' + autoName + '）' : '自动定位';
+    $('cityBox').style.display = cityMode ? '' : 'none';
+    const cur = $('cur');
+    if (!cityMode) cur.textContent = '按 IP / 系统位置自动确定城市，换了地方会跟着变';
+    else if (card.Lat != null) cur.innerHTML = '当前：<b>' + esc(card.City || '') + '</b>　' + card.Lat.toFixed(2) + ', ' + card.Lon.toFixed(2);
+    else cur.textContent = '搜索并选择一个城市（选好之前仍按自动定位）';
+  }
+  function renderPos() {
+    const p = card.Pos || 'tr';
+    for (const b of document.querySelectorAll('.grid button')) b.classList.toggle('on', b.dataset.p === p);
+    $('lx').textContent = (p[1] === 'l' ? '离左边' : p[1] === 'r' ? '离右边' : '离中线（正数往右）') + ' · px';
+    $('ly').textContent = (p[0] === 'b' ? '离下边（任务栏上方）' : '离上边') + ' · px';
+    $('ox').min = p[1] === 'c' ? -4000 : 0;
+    $('posSec').classList.toggle('off', !!card.Hidden);
+  }
+  function renderOffsets() { $('ox').value = card.OffsetX; $('oy').value = card.OffsetY; }
+  function renderScene() {
+    // 画面跟随以宿主为准（换屏、删卡片、隐藏卡片都会让它自动转移）；转移不了的打勾 / 不勾并禁用
+    $('hidden').checked = !!card.Hidden;
+    if (!fresh()) return;
+    card.Scene = !!fit.scene;
+    $('scene').checked = card.Scene;
+    $('scene').disabled = !!fit.sceneLock;
+    $('sceneHint').textContent = fit.sceneHint || SCENE_HINT;
+  }
+
+  let screensKey = '';
+  const fresh = () => !!(fit && card && fit.id === card.Id);   // fit 是不是当前这张卡片的（切换后新的 fit 还没到时不是）
+  function renderFit() {
+    if (!fresh()) return;
+    renderTabs();
+    // 屏幕下拉框：内容变了才重建（避免打开着时被关掉）
+    const key = JSON.stringify(fit.screens);
+    const sel = $('screen');
+    if (key !== screensKey) {
+      screensKey = key;
+      sel.innerHTML = fit.screens.map(s => '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>').join('');
+    }
+    sel.value = card.Screen;
+    if (sel.value !== card.Screen) {
+      // 新编号还没出现在下拉里（宿主刚改了屏、新的 fit 还没到）：补一个临时项，别让下拉看起来像在别的屏上。已有就不重复补（连续两次换号）
+      let o = Array.prototype.find.call(sel.options, x => x.value === card.Screen);
+      if (!o) { o = document.createElement('option'); o.value = card.Screen; o.textContent = '显示器（编号刚变，正在刷新）'; sel.appendChild(o); }
+      sel.value = card.Screen;
+    }
+    $('scrNote').textContent = fit.warn || '';
+    $('fitNote').textContent = fit.msg || '';
+    if (!dragging) renderThumb();   // 正在拖：别把手里的框换掉，松手后会按新结果重画
+    renderScene();
+    renderState();
+  }
+  function renderThumb() {
+    const th = $('thumb'), t = fit && fit.thumb;
+    if (!t) { th.innerHTML = '<div class="none">这块显示器现在没有连接</div>'; return; }
+    const k = Math.min(236 / t.w, 148 / t.h), W = t.w * k, H = t.h * k, ox = (236 - W) / 2, oy = (148 - H) / 2;
+    const px = v => (v * k).toFixed(1) + 'px';
+    let h = '<div class="scr" style="left:' + ox.toFixed(1) + 'px;top:' + oy.toFixed(1) + 'px;width:' + W.toFixed(1) + 'px;height:' + H.toFixed(1) + 'px">';
+    const [wx, wy, ww, wh] = t.work;   // 工作区以外（任务栏）画暗一点
+    if (wy > 0.5) h += '<div class="tb" style="left:0;top:0;right:0;height:' + px(wy) + '"></div>';
+    if (wy + wh < t.h - 0.5) h += '<div class="tb" style="left:0;bottom:0;right:0;height:' + px(t.h - wy - wh) + '"></div>';
+    if (wx > 0.5) h += '<div class="tb" style="left:0;top:0;bottom:0;width:' + px(wx) + '"></div>';
+    if (wx + ww < t.w - 0.5) h += '<div class="tb" style="right:0;top:0;bottom:0;width:' + px(t.w - wx - ww) + '"></div>';
+    for (const b of t.boxes)
+      h += '<div class="box ' + (b.me ? 'me' : 'others') + (b.bad ? ' bad' : '') + '" data-id="' + esc(b.id) + '"'
+        + ' style="left:' + px(b.x) + ';top:' + px(b.y) + ';width:' + px(b.w) + ';height:' + px(b.h) + '">'
+        + (b.scene ? CLOUD : '') + esc(b.name) + '</div>';
+    h += '</div><div class="cap">' + (card.Hidden ? '这张卡片已隐藏，不占位置' : esc(t.name) + ' · ' + Math.round(t.w) + '×' + Math.round(t.h) + '（缩放后）') + '</div>';
+    th.innerHTML = h;
+    bindThumb(k, t.work);
+  }
+  // 预览图交互：拖动当前卡片改偏移（换到最近的角）；点其他卡片切换编辑
+  let dragging = false;
+  const thumbGeo = () => { const t = fit && fit.thumb; return t ? [t.w, t.h].concat(t.work).join(',') : ''; };
+  function bindThumb(k, work) {
+    $('thumb').onmousedown = e => {
+      const box = e.target.closest('.box');
+      if (e.button !== 0 || !box || !fresh()) return;   // 只认左键：右键 / 中键不拖动、不切换
+      if (!box.classList.contains('me')) {
+        if (box.dataset.id) { keepArmed = true; flushThen({ t: 'switch', id: box.dataset.id }); }   // 在预览图里选中的：切过去后方向键直接能微调它
+        return;
+      }
+      e.preventDefault();
+      const el = box, rect = $('thumb').querySelector('.scr').getBoundingClientRect();
+      const bw = parseFloat(el.style.width), bh = parseFloat(el.style.height);
+      // 记下按下时抓在框里的位置（框跟着这点走，不跳到鼠标正中）；移动超过几像素才算拖动——点一下是为了用方向键微调，抖 1、2px 不能把卡片挪走
+      const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+      let gx = Math.max(0, Math.min(bw, sx - parseFloat(el.style.left))), gy = Math.max(0, Math.min(bh, sy - parseFloat(el.style.top)));
+      let moved = false;
+      const mine = card;   // 按住期间宿主可能发来 init 换了卡片（外部改了设置、命令行 card 卡片Id）：那时松手不能把这次拖动写到新卡片上
+      const geo = thumbGeo();   // 按住期间屏幕 / 工作区变了（任务栏自动隐藏、改分辨率）：k、work 都是旧的，按它们算偏移会落到别处，这次拖动作废
+      dragging = true;
+      el.classList.add('drag');
+      const end = () => {
+        document.removeEventListener('mousemove', mv);
+        document.removeEventListener('mouseup', up);
+        el.classList.remove('drag');
+        dragging = false;
+      };
+      const mv = ev => {
+        // 左键已经不按着了（拖动中按 Win 键、Alt+Tab 被抢走捕获，松开那一下没送到页面）：这次拖动作废，别让框一直跟着鼠标
+        if (!(ev.buttons & 1)) { end(); renderThumb(); return; }
+        const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+        if (!moved && Math.abs(x - sx) < 4 && Math.abs(y - sy) < 4) return;
+        moved = true;
+        // 拖动中只显示一个跟着鼠标的框；松手时按象限换锚点 + 算偏移
+        el.style.left = Math.max(0, Math.min(rect.width - bw, x - gx)) + 'px';
+        el.style.top = Math.max(0, Math.min(rect.height - bh, y - gy)) + 'px';
+      };
+      const up = ev => {
+        if (ev.button !== 0) return;   // 拖动中按了又松开右键 / 中键：左键还按着，接着拖
+        end();
+        if (!moved || card !== mine || thumbGeo() !== geo) { renderThumb(); return; }   // 按住期间可能来过新的布局结果
+        // 预览图坐标（缩略像素）换回页面 CSS 像素：除以缩放 k；再按卡片中心落在工作区的哪一块定锚点，偏移 = 锚定边到工作区边缘的距离
+        const [wx, wy, ww, wh] = work;
+        const x = parseFloat(el.style.left) / k, y = parseFloat(el.style.top) / k;
+        const cw = parseFloat(el.style.width) / k, ch = parseFloat(el.style.height) / k;
+        const mx = x + cw / 2, my = y + ch / 2;
+        const p = (my < wy + wh / 2 ? 't' : 'b') + (mx < wx + ww / 3 ? 'l' : mx > wx + ww * 2 / 3 ? 'r' : 'c');
+        card.Pos = p;
+        card.OffsetX = Math.round(p[1] === 'l' ? Math.max(0, x - wx) : p[1] === 'r' ? Math.max(0, wx + ww - x - cw) : mx - (wx + ww / 2));
+        card.OffsetY = Math.round(Math.max(0, p[0] === 't' ? y - wy : wy + wh - y - ch));
+        renderPos(); renderOffsets(); sendDraft(true);
+      };
+      document.addEventListener('mousemove', mv);
+      document.addEventListener('mouseup', up);
+    };
+  }
+  // 底部状态：放得下 = 已自动保存；放不下 = 只是预览，没有保存。
+  // fit 还是别的卡片的（刚切换、新的没到）：先空着，别说“已保存”——摆放结果是不是成立并不知道
+  function renderState() {
+    const st = $('state');
+    if (!fresh()) { st.className = ''; st.textContent = ''; }
+    else {
+      st.className = fit.ok ? '' : 'bad';
+      st.textContent = fit.ok ? '改动已自动保存' : '这样摆放不下，没有保存（换卡片或关闭窗口时还原）';
+    }
+    $('del').style.visibility = card && card.Id === 'default' ? 'hidden' : '';
+  }
+  function renderAll() {
+    $('name').value = card.Name || '';
+    renderCity(); renderPos(); renderOffsets(); renderFit();   // fit 是这张的：renderFit 里已经画了底部状态
+    // 换了卡片、新卡片的 fit 还没到：底部状态先空着；画面跟随勾选框显示的还是上一张的状态，先禁用（fit 到了 renderScene 会按宿主的值重设）
+    if (!fresh()) { renderState(); $('scene').disabled = true; }
+  }
+
+  // ---------------------------------------------------------------- 城市
+  $('mAuto').onclick = () => { if (!cityMode) return; cityMode = false; renderCity(); sendDraft(true); };
+  $('mCity').onclick = () => {
+    if (cityMode) return;
+    cityMode = true; renderCity();
+    if (card.Lat != null) sendDraft(true); else $('q').focus();
+  };
+  // 输入法组字期间（拼音还没选词）不发：否则 "bei"、"beijing" 这些中间值会被当成名称保存，桌面和设置文件里先变成拼音
+  let composing = false;
+  $('name').addEventListener('compositionstart', () => { composing = true; });
+  const syncName = () => { if (card) card.Name = $('name').value.trim() || null; };
+  $('name').addEventListener('compositionend', () => { composing = false; syncName(); sendDraft(false); });
+  $('name').addEventListener('input', e => { if (!e.isComposing && !composing) { syncName(); sendDraft(false); } });
+  $('name').addEventListener('blur', () => { composing = false; syncName(); sendDraft(true); });
+  function search() {
+    const q = $('q').value.trim();
+    if (!q) return;
+    searching = q;
+    $('results').innerHTML = '<div class="msg">正在搜索…</div>';
+    post({ t: 'search', q });
+  }
+  $('go').onclick = search;
+  $('q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
+  function onSearch(m) {
+    if (m.q !== searching) return;
+    const r = $('results');
+    if (m.error) { r.innerHTML = '<div class="msg">搜索失败：' + esc(m.error) + '</div>'; return; }
+    if (!m.items || !m.items.length) { r.innerHTML = '<div class="msg">没有找到「' + esc(m.q) + '」，换个写法试试：中文、拼音或英文都行，外国城市用英文名更容易搜到（如 Seoul）</div>'; return; }
+    r.innerHTML = m.items.map((it, i) => '<div class="it" data-i="' + i + '"><b>' + esc(it.name) + '</b><span class="hint">' + esc(it.detail) + '</span></div>').join('')
+      + '<div class="src">地名数据：© OpenStreetMap 贡献者、GeoNames</div>';
+    r.onclick = e => {
+      const el = e.target.closest('.it');
+      if (!el) return;
+      const it = m.items[+el.dataset.i];
+      card.City = it.name; card.Lat = it.lat; card.Lon = it.lon;
+      r.innerHTML = ''; $('q').value = '';
+      renderCity(); sendDraft(true);
+    };
+  }
+
+  // ---------------------------------------------------------------- 屏幕 / 位置
+  $('screen').onchange = () => { card.Screen = $('screen').value; sendDraft(true); };
+  $('identify').onclick = () => post({ t: 'identify' });
+  for (const b of document.querySelectorAll('.grid button'))
+    b.onclick = () => {
+      const p = b.dataset.p, was = card.Pos || 'tr';
+      if (p === was) return;
+      // 换到居中：水平偏移归零；从居中换到两侧：负数偏移没有意义，回到默认边距
+      if (p[1] === 'c' && was[1] !== 'c') card.OffsetX = 0;
+      else if (p[1] !== 'c' && (was[1] === 'c' || card.OffsetX < 0)) card.OffsetX = 28;
+      card.Pos = p;
+      renderPos(); renderOffsets(); sendDraft(true);
+    };
+  for (const b of document.querySelectorAll('.step button'))
+    b.onclick = () => {
+      const k = b.dataset.k === 'x' ? 0 : 1, inp = $(k === 0 ? 'ox' : 'oy');
+      const v = clampOff(k, (Math.round(Number(inp.value)) || 0) + Number(b.dataset.d));
+      inp.value = v;
+      if (k === 0) card.OffsetX = v; else card.OffsetY = v;
+      sendDraft(false);
+    };
+  for (const id of ['ox', 'oy'])
+    $(id).addEventListener('input', () => {
+      // 清空、写了非数字：先不动，失焦时显示回实际生效的值
+      const n = Math.round(Number($(id).value));
+      if ($(id).value === '' || !isFinite(n)) return;
+      if (id === 'ox') card.OffsetX = clampOff(0, n); else card.OffsetY = clampOff(1, n);
+      sendDraft(false);
+    });
+  for (const id of ['ox', 'oy']) $(id).addEventListener('blur', renderOffsets);   // 清空或超范围：回到实际生效的值
+
+  // 选中卡片后（点过预览图），方向键微调偏移
+  let armed = false, keepArmed = false;   // keepArmed：在预览图里点别的卡片切换，新卡片的 init 到了也保持 armed
+  document.addEventListener('mousedown', e => {
+    // 只认左键；预览图上的右键 / 中键什么都不做（也不让焦点离开名称框，免得失焦把没上屏的拼音交上去）
+    if (e.button !== 0) { if (e.target.closest('#thumb')) e.preventDefault(); return; }
+    armed = !!e.target.closest('#thumb');
+    // 拖框时按下被 preventDefault，焦点不会自己离开刚才的按钮 / 输入框：让出来，方向键才落到页面上
+    if (armed && document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  });
+  document.addEventListener('keydown', e => {
+    if (!armed || !card || card.Hidden || e.target !== document.body) return;   // 焦点在按钮、页签、输入框上（如按 Tab 挪过去）时不微调
+    const step = e.shiftKey ? 10 : 1;
+    const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+    const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+    if (!dx && !dy) return;
+    e.preventDefault();
+    const p = card.Pos || 'tr';
+    if (dx) {
+      // 水平方向键按"卡片往哪边挪"换算成偏移：左/右锚点是离边距离（往里为正），居中是离中线偏移（往右为正）
+      card.OffsetX = clampOff(0, card.OffsetX + (p[1] === 'r' ? -dx : dx));
+    }
+    if (dy) card.OffsetY = clampOff(1, card.OffsetY + (p[0] === 't' ? dy : -dy));
+    renderOffsets(); sendDraft(false);
+  });
+
+  // ---------------------------------------------------------------- 天气画面
+  // 画面跟随只在点勾选框时发给宿主（带 scene 字段），其余时候以宿主为准
+  $('scene').onchange = () => sendDraft(true, { scene: $('scene').checked });
+  $('hidden').onchange = () => { card.Hidden = $('hidden').checked; renderPos(); sendDraft(true); };
+
+  // ---------------------------------------------------------------- 底部按钮
+  $('done').onclick = () => flushThen({ t: 'close' });
+  let delArm = 0;
+  $('del').onclick = () => {
+    if (!delArm) { $('del').textContent = '确认删除？'; delArm = setTimeout(() => { delArm = 0; $('del').textContent = '删除卡片'; }, 3000); return; }
+    clearTimeout(delArm); delArm = 0;
+    post({ t: 'delete' });
+  };
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || e.isComposing) return;
+    if (e.target.id === 'q' && ($('q').value || $('results').innerHTML)) { $('q').value = ''; $('results').innerHTML = ''; searching = ''; return; }
+    flushThen({ t: 'close' });
+  });
+  // 只给能打字的框留右键菜单（剪切 / 复制 / 粘贴）；别处（含勾选框）弹的是整页菜单，有「重新加载」「另存为」「打印」
+  document.addEventListener('contextmenu', e => { const t = e.target; if (!(t.tagName === 'INPUT' && /^(text|search|number)$/.test(t.type))) e.preventDefault(); });
+
+  // ---------------------------------------------------------------- 宿主消息
+  // init 还没到（刚打开、渲染进程崩溃后重新载入）：页面上的操作一律拦下——各处理函数都要读写 card，勾选框也别先变了样
+  for (const type of ['click', 'change', 'input'])
+    document.addEventListener(type, e => { if (!card) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+  if (host) host.addEventListener('message', ev => {
+    const m = ev.data;
+    if (!m || !m.t) return;
+    if (m.t === 'init') {
+      clearTimeout(draftTm); draftTm = 0;
+      composing = false;   // 组字中途被换掉名称框的值不一定有 compositionend：不复位的话之后打的字一直发不出去
+      card = m.card; autoName = m.autoName || ''; gen = m.gen || 0;
+      $('results').innerHTML = ''; $('q').value = ''; searching = ''; armed = keepArmed; keepArmed = false; adding = false;
+      clearTimeout(delArm); delArm = 0; $('del').textContent = '删除卡片';
+      cityMode = card.Lat != null && card.Lon != null;
+      renderAll();
+      // 新的 fit 还没到：别按旧 fit 的卡片列表重画页签（被删的卡片会闪回来），只把高亮挪过去，列表等新 fit 到了再画
+      if (!fresh()) for (const t of document.querySelectorAll('#tabs .tab')) t.classList.toggle('on', t.dataset.id === card.Id);
+    } else if (m.t === 'autoname') {
+      autoName = m.name || ''; renderCity();   // 自动定位有结果了（打开设置窗口时可能还没定下来）
+    } else if (m.t === 'screen') {
+      // 显示器换了编号，宿主把这张卡片挪到了新编号：只改屏，正在输入、搜索的内容都不动
+      gen = m.gen;
+      if (card && card.Id === m.id) { card.Screen = m.screen; renderFit(); }
+    } else if (m.t === 'fit') { fit = m; if (card) renderFit(); }
+    else if (m.t === 'search') onSearch(m);
+    else if (m.t === 'flush') flushThen({ t: 'close' });   // 点了标题栏 × 等：把还没发出去的编辑交上去再关
+  });
+  post({ t: 'ready' });
+})();
+</script>
+</body>
+</html>

@@ -89,6 +89,7 @@ const WX = (() => {
   }
 
   const hm = s => (s || '').slice(11, 16);
+  const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
   const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
   function panelHtml(w, localMs, previewLabel) {
@@ -127,12 +128,12 @@ const WX = (() => {
     const upd = new Date(w.ts + fc.utc_offset_seconds * 1000).toISOString().slice(11, 16);
     const src = { gps: '定位', ip: 'IP 定位', manual: '手动' }[w.loc.src] || '';
     return `
-      <div class="loc">${Icons.pin}<span>${w.loc.name || '当前位置'}</span>${previewLabel ? `<span class="tag">预览 · ${previewLabel}</span>` : ''}<span class="src">${src}</span></div>
+      <div class="loc">${Icons.pin}<span>${w.loc.name ? esc(w.loc.name) : '当前位置'}</span>${previewLabel ? `<span class="tag">预览 · ${previewLabel}</span>` : ''}<span class="src">${src}</span></div>
       <div class="now"><div class="big">${Icons.svg(now.kind, day)}</div>
         <div class="temp">${r(c.temperature_2m)}°</div>
         <div class="desc"><b>${now.text}</b><span>最高 ${r(d.temperature_2m_max[di])}° 最低 ${r(d.temperature_2m_min[di])}°</span></div></div>
       <div class="chips">
-        ${aqi ? `<span class="chip" style="color:${aqi.color}"><i style="background:${aqi.color}"></i><span style="color:#fff">空气 ${aqi.text} ${aqi.value}</span></span>` : ''}
+        ${aqi ? `<span class="chip" style="color:${aqi.color}"><i style="background:${aqi.color}"></i><span class="aqit" style="color:#fff" data-short="${aqi.text}">空气 ${aqi.text} ${aqi.value}</span></span>` : ''}
         <span class="chip">体感 ${r(c.apparent_temperature)}°</span>
         <span class="chip">湿度 ${r(c.relative_humidity_2m)}%</span>
         <span class="chip">${wind(c.wind_speed_10m, c.wind_direction_10m)}</span>
@@ -142,5 +143,26 @@ const WX = (() => {
       <div class="foot"><span>日出 ${hm(d.sunrise[di])} · 日落 ${hm(d.sunset[di])}</span><span>${upd} 更新</span></div>`;
   }
 
-  return { info, scene, chinaAqi, aqiLevel, wind, panelHtml };
+  /** 卡片里的四个标签尽量排成一行：一行放不下就按当前宽度估算能放下的字号（一次设定 + 校验），校验不过再半档半档收（每档一次强制重排）；
+   *  还放不下先把空气标签缩成级别名（「空气 轻度污染 145」→「轻度污染」，颜色不变）；实在放不下才换行（卡片高度固定，换两行会把五日预报顶进底部的日出日落行）。root 是卡片元素，要在它插入页面后调用。 */
+  function fitChips(root) {
+    const el = root && root.querySelector('.chips');
+    if (!el) return;
+    el.classList.remove('wrap');
+    el.style.fontSize = '';
+    const shrink = () => {
+      let fs = parseFloat(getComputedStyle(el).fontSize) || 12;
+      if (el.scrollWidth <= el.clientWidth + 0.5) return;
+      // 文字宽度约和字号成正比（标签的内边距、间距不缩）：按一次测量估算，估出来的字号只会偏大不会偏小，后面校验收尾
+      fs = Math.max(10, Math.min(fs, Math.floor(fs * el.clientWidth / el.scrollWidth * 2) / 2));
+      el.style.fontSize = fs + 'px';
+      while (el.scrollWidth > el.clientWidth + 0.5 && fs > 10) { fs -= 0.5; el.style.fontSize = fs + 'px'; }
+    };
+    shrink();
+    const aqi = el.querySelector('.aqit');
+    if (el.scrollWidth > el.clientWidth + 0.5 && aqi && aqi.dataset.short) { aqi.textContent = aqi.dataset.short; el.style.fontSize = ''; shrink(); }
+    if (el.scrollWidth > el.clientWidth + 0.5) { el.style.fontSize = ''; el.classList.add('wrap'); }
+  }
+
+  return { info, scene, chinaAqi, aqiLevel, wind, panelHtml, fitChips };
 })();

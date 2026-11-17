@@ -44,6 +44,9 @@ const SCENES = {
   day:     ['mode=partly&day=1', 10, 12, 4.8],   // 48 秒的一天快进，压成 10 秒
 };
 
+// 卡片新建时带 .hidden（透明），按真实时间淡入，不受 __step 控制：等它完全显示出来再截图（页面上没有卡片时直接通过）
+const CARDS_SHOWN = `[...document.querySelectorAll('#cards .card')].every(c => !c.classList.contains('hidden') && getComputedStyle(c).opacity === '1')`;
+
 const server = http.createServer((req, res) => {
   const p = path.join(root, decodeURIComponent(req.url.split('?')[0]));
   if (!p.startsWith(root) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { res.writeHead(404); return res.end(); }
@@ -67,6 +70,7 @@ for (const name of names.length ? names.filter(n => SCENES[n]) : Object.keys(SCE
   await page.waitForFunction('window.__ready === true');
   const dt = speed / fps;
   if (name !== 'day') await page.evaluate(() => { for (let k = 0; k < 60; k++) window.__step(1 / 20); });   // 先跑 3 秒让雨雪铺满
+  await page.waitForFunction(CARDS_SHOWN);
   const n = Math.round(secs * fps);
   for (let i = 0; i < n; i++) {
     await page.evaluate(d => window.__step(d), dt);
@@ -84,7 +88,9 @@ if (!names.length || names.includes('card')) {
   await page.goto(`http://127.0.0.1:${port}/web/index.html?manual=1&data=/docs/sample-london.json&at=12:30`);
   await page.waitForFunction('window.__ready === true');
   await page.evaluate(() => { for (let k = 0; k < 20; k++) window.__step(1 / 20); });
-  const box = await (await page.$('#panel')).boundingBox();
+  const el = await page.waitForSelector('#cards .card');
+  await page.waitForFunction(CARDS_SHOWN);
+  const box = await el.boundingBox();
   const pad = 24;
   await page.screenshot({ path: path.join(outDir, 'card.png'), clip: { x: box.x - pad, y: box.y - pad, width: box.width + pad * 2, height: box.height + pad * 2 }, captureBeyondViewport: false });
   console.log('card -> docs/card.png');
