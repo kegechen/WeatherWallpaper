@@ -16,19 +16,22 @@ namespace WeatherWallpaper
         public const string DefaultId = "default", PrimaryScreen = "primary";
         public const string AwayPrefix = "away:";   // Screen = away:原编号：那块显示器不在了、原编号已经是另一块屏（见 App.HealScreens），按没接上处理
         public static readonly string[] Positions = { "tl", "tc", "tr", "bl", "bc", "br" };
+        public const int DefaultOffset = 28;                  // 默认离屏幕边缘的距离（卡片设置里拖动时也吸附到它）
 
         public string Id { get; set; }
         public string Name { get; set; }                      // 卡片名称（空 = 默认卡片 / 城市名）
         public string Screen { get; set; } = PrimaryScreen;   // primary = 始终在主屏；否则为显示器的设备名 \\.\DISPLAYn
         public string Monitor { get; set; }                   // 那块显示器的硬件 ID（自动维护）：DISPLAYn 换了号时按它找回原来的屏
         public string Pos { get; set; } = "tr";               // tl 左上 / tc 顶部居中 / tr 右上 / bl 左下 / bc 底部居中 / br 右下
-        public int OffsetX { get; set; } = 28;                // 离屏幕左右边缘的距离（居中位置为相对中线的偏移），CSS 像素
-        public int OffsetY { get; set; } = 28;                // 离屏幕上边缘（底部位置为离任务栏）的距离
+        public int OffsetX { get; set; } = DefaultOffset;     // 离屏幕左右边缘的距离（居中位置为相对中线的偏移），CSS 像素
+        public int OffsetY { get; set; } = DefaultOffset;     // 离屏幕上边缘（底部位置为离任务栏）的距离
         public string City { get; set; }                      // City / Lat / Lon 都为 null = 自动定位
         public double? Lat { get; set; }
         public double? Lon { get; set; }
         public bool Scene { get; set; }                       // 这块屏的全屏天气画面跟随这张卡片的城市
-        public bool Hidden { get; set; }                      // 隐藏卡片，只显示天气画面：不画出来，但这块屏的天气城市由它决定
+        public bool Hidden { get; set; }                      // 只显示天气画面：卡片不画出来，但这块屏的天气城市由它决定
+        // 隐藏这张卡片（相当于暂时删掉，不用删了再加）：不显示、不占位置、不取天气、不参与天气画面，也不让它的屏显示天气壁纸。默认卡片不能隐藏
+        public bool Off { get; set; }
 
         public bool IsDefault() => Id == DefaultId;
         public bool IsAuto() => !(Lat.HasValue && Lon.HasValue);
@@ -42,6 +45,8 @@ namespace WeatherWallpaper
         public void Normalize()
         {
             if (string.IsNullOrWhiteSpace(Id)) Id = NewId();
+            if (Id == DefaultId) Off = false;   // 默认卡片和不能删除一样，也不能隐藏（托盘面板显示的就是它的天气）
+            if (Off) Scene = false;
             Name = string.IsNullOrWhiteSpace(Name) ? null : Cut(Name.Trim(), 24);
             if (string.IsNullOrWhiteSpace(Screen)) Screen = PrimaryScreen;
             if (Screen == PrimaryScreen || string.IsNullOrWhiteSpace(Monitor)) Monitor = null;
@@ -86,7 +91,7 @@ namespace WeatherWallpaper
         // 每次播放天气动画的秒数（极简模式播放、雨后彩虹、效果预览共用）。声明成 object：用户手写成字符串、小数或超出 int 的大数时，按 int 反序列化会让整个文件读取失败；
         // 这里什么值都先收下，加载后由 NormalizePlaySeconds 校验，不合法就回到默认值
         public object PlaySeconds { get; set; } = DefaultPlaySeconds;
-        public bool AutoUpdate { get; set; } = true;   // 启动后及每天自动检查更新
+        public bool AutoUpdate { get; set; } = true;   // 启动时及之后每 12 小时自动检查更新
         public string SkipVersion { get; set; }        // 用户选择"跳过此版本"的版本号
 
         public static string AppDataDir => Dir(Environment.SpecialFolder.ApplicationData);
@@ -174,7 +179,7 @@ namespace WeatherWallpaper
                 }
             }
             else if (m != CardSpec.PrimaryScreen && all.Any(x => x.DeviceName == m && !x.Primary)) { def.Screen = m; def.Monitor = CardLayout.MonitorOf(m); }
-            // 旧版在菜单里关掉了「显示天气卡片」：新版没有这个菜单了，换成隐藏卡片（天气画面照旧），想要哪张卡片时在卡片设置里取消隐藏
+            // 旧版在菜单里关掉了「显示天气卡片」：新版没有这个菜单了，换成只显示天气画面的卡片（Hidden，天气画面照旧），想要哪张卡片时在卡片设置里取消勾选「只显示天气画面」
             if (!ShowPanel)
             {
                 foreach (var c in Cards) c.Hidden = true;
@@ -185,11 +190,13 @@ namespace WeatherWallpaper
 
         /// <summary>
         /// 每块屏恰好有一张卡片负责"全屏天气画面跟随"（Scene = true）：没有的补上这块屏的第一张，有多张的只留一张。
-        /// 隐藏卡片就是用来提供天气画面的：同屏有隐藏卡片时总是它。否则 prefer = 刚被用户勾选的那张（同一块屏上有多张标记时留它）。
+        /// 只显示天气画面的卡片（Hidden）就是用来提供天气画面的：同屏有它时总是它。否则 prefer = 刚被用户勾选的那张（同一块屏上有多张标记时留它）。
+        /// 隐藏（Off）的卡片不参与：不拿画面跟随，这块屏的画面交给其他卡片。
         /// </summary>
         public static void NormalizeScenes(IList<CardSpec> cards, string prefer = null)
         {
-            foreach (var g in cards.GroupBy(CardLayout.GroupKey))
+            foreach (var c in cards) if (c.Off) c.Scene = false;
+            foreach (var g in cards.Where(c => !c.Off).GroupBy(CardLayout.GroupKey))
             {
                 var list = g.ToList();
                 var pick = list.FirstOrDefault(c => c.Hidden) ?? list.FirstOrDefault(c => c.Id == prefer && c.Scene) ?? list.FirstOrDefault(c => c.Scene) ?? list[0];
@@ -292,7 +299,8 @@ namespace WeatherWallpaper
                 "Screen 所在屏（primary = 主屏，或显示器设备名；away: 开头 = 原来那块显示器没接上）；Monitor 显示器硬件 ID（自动维护，不用改）；Pos 位置：tl 左上 / tc 顶部居中 / tr 右上 / bl 左下 / bc 底部居中 / br 右下；" +
                 "OffsetX / OffsetY 离屏幕边缘的距离，单位像素（按 100% 缩放计）；City / Lat / Lon 都为 null = 自动定位；" +
                 "Name 卡片名称；Scene = true 表示这块屏的全屏天气画面跟随这张卡片的城市（每块屏恰好一张，没有会自动补上）；" +
-                "Hidden = true 隐藏卡片、只显示天气画面（这块屏的天气城市由它决定）",
+                "Hidden = true 不画卡片、只显示天气画面（这块屏的天气城市由它决定）；" +
+                "Off = true 隐藏这张卡片（默认卡片除外）：不显示、不占位置、不更新天气，也不决定天气画面，相当于暂时删掉，改回 false 即恢复",
             ["Fps"] = "帧率：30 或 60",
             ["TaskbarFx"] = "任务栏雨雪效果：true 开 / false 关",
             ["ShowPanel"] = "桌面天气卡片总开关：true 显示 / false 全部隐藏（隐藏后可左键点托盘图标查看）",

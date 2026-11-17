@@ -25,7 +25,9 @@ namespace WeatherWallpaper
     {
         const string Repo = "kegechen/WeatherWallpaper";
         const string MirrorLatest = "https://gh.ifly.qzz.io/WeatherWallpaper/releases/latest";
-        public const string ReleasePage = "https://github.com/" + Repo + "/releases/latest";
+        public const string RepoPage = "https://github.com/" + Repo;
+        public const string ReleasePage = RepoPage + "/releases/latest";
+        public const string IssuesPage = RepoPage + "/issues";
 
         static readonly HttpClient http = CreateClient();
         static HttpClient CreateClient()

@@ -9,22 +9,25 @@ using Microsoft.Web.WebView2.Core;
 namespace WeatherWallpaper
 {
     /// <summary>
-    /// 卡片设置窗口（新增 / 编辑共用）：带标题栏的普通窗口，Mica 背景，内容是 web/card.html，
+    /// 网页做内容的设置类窗口（卡片设置 web/card.html、关于 web/about.html）：带标题栏的普通窗口，Mica 背景，
     /// 和宿主用 JSON 消息往来（页面就绪前发的消息先排队）。
+    /// 点 × 时先发 {"t":"flush"} 让页面把还没发出来的编辑交上来，页面回 close（宿主调 CloseNow）后再关。
     /// </summary>
-    class CardWindow : Form
+    class PageWindow : Form
     {
-        const int CssW = 940, CssH = 900;   // 内容全部放得下不用滚动；屏幕矮时按工作区收小（页面可滚动）
         readonly CoreWebView2Environment env;
+        readonly string page;
         CoreWebView2Controller ctl;
         bool ready, closing, flushing;   // flushing：点了 ×，正在等页面把防抖中的编辑交上来
         readonly List<string> pending = new List<string>();
         public Action<string> OnMessage;   // 页面发来的 JSON
         public Action Reloaded;            // 页面重新加载过（状态已丢）：宿主重发 init / fit
 
-        public CardWindow(CoreWebView2Environment env, string title)
+        /// <param name="cssW">内容大小（页面 CSS 像素，按所在屏的缩放换算）：内容全部放得下不用滚动；屏幕矮时按工作区收小（页面可滚动）</param>
+        public PageWindow(CoreWebView2Environment env, string title, string page, int cssW, int cssH)
         {
             this.env = env;
+            this.page = page;
             Text = title;
             Icon = Program.AppIcon;
             FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -35,7 +38,7 @@ namespace WeatherWallpaper
             var scr = Screen.FromPoint(Cursor.Position);
             float k = Native.ScaleOf(scr);
             var wa = scr.WorkingArea;
-            ClientSize = new Size((int)Math.Min(CssW * k, wa.Width - 40 * k), (int)Math.Min(CssH * k, wa.Height - 60 * k));
+            ClientSize = new Size((int)Math.Min(cssW * k, wa.Width - 40 * k), (int)Math.Min(cssH * k, wa.Height - 60 * k));
             Location = new Point(wa.X + (wa.Width - Width) / 2, wa.Y + Math.Max(0, (wa.Height - Height) / 2));
         }
 
@@ -66,7 +69,7 @@ namespace WeatherWallpaper
                 ctl.Bounds = ClientRectangle;
                 var wv = ctl.CoreWebView2;
                 WebHost.Configure(wv);
-                // 名称框、城市搜索框要能右键剪切 / 复制 / 粘贴：页面自己拦了输入框以外的右键（card.html 的 contextmenu），这里不再全局关掉；
+                // 名称框、城市搜索框要能右键剪切 / 复制 / 粘贴：页面自己拦了输入框以外的右键（card.html、about.html 的 contextmenu），这里不再全局关掉；
                 // 同时关掉开发者工具，菜单里不出现「检查」
                 wv.Settings.AreDefaultContextMenusEnabled = true;
                 wv.Settings.AreDevToolsEnabled = false;
@@ -90,14 +93,14 @@ namespace WeatherWallpaper
                 };
                 wv.ProcessFailed += (o, ev) =>
                 {
-                    Log.Write("card window: webview process failed " + ev.ProcessFailedKind);
+                    Log.Write(page + ": webview process failed " + ev.ProcessFailedKind);
                     if (ev.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited || ev.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)
                         BeginInvoke((Action)(() => { try { if (!IsDisposed) ctl?.CoreWebView2.Reload(); } catch { } }));   // 重新载入后页面会再发 ready → Reloaded
                 };
-                wv.Navigate("https://wallpaper.local/card.html");
+                wv.Navigate("https://wallpaper.local/" + page);
                 if (ContainsFocus) ctl.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
             }
-            catch (Exception ex) { Log.Write("card window init failed: " + ex); }
+            catch (Exception ex) { Log.Write(page + " window init failed: " + ex); }
         }
 
         public void Post(string json)
@@ -105,13 +108,13 @@ namespace WeatherWallpaper
             if (IsDisposed) return;
             if (!ready || ctl == null)
             {
-                // 页面就绪前（WebView2 冷启动要一两秒，这期间布局可能变好几次）：init / fit 各只留最后一份
-                foreach (var head in new[] { "{\"t\":\"fit\"", "{\"t\":\"init\"" })
+                // 页面就绪前（WebView2 冷启动要一两秒，这期间布局、下载进度可能变好几次）：init / fit / about 这些整份状态各只留最后一份
+                foreach (var head in new[] { "{\"t\":\"fit\"", "{\"t\":\"init\"", "{\"t\":\"about\"" })
                     if (json.StartsWith(head)) pending.RemoveAll(j => j.StartsWith(head));
                 pending.Add(json);
                 return;
             }
-            try { ctl.CoreWebView2.PostWebMessageAsJson(json); } catch (Exception ex) { Log.Write("card window post: " + ex.Message); }
+            try { ctl.CoreWebView2.PostWebMessageAsJson(json); } catch (Exception ex) { Log.Write(page + " post: " + ex.Message); }
         }
 
         /// <summary>页面已经把编辑都交上来了（「完成」、Esc），或者程序要退出：直接关。</summary>

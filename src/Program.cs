@@ -329,7 +329,7 @@ namespace WeatherWallpaper
             return w;
         }
 
-        /// <summary>天气跟着卡片走：放了卡片（含隐藏卡片、设置窗口里正在编辑的那张）的屏才显示天气壁纸，其余屏只有系统壁纸。</summary>
+        /// <summary>天气跟着卡片走：放了卡片（含只显示天气画面的卡片、设置窗口里正在编辑的那张；隐藏（Off）的不算）的屏才显示天气壁纸，其余屏只有系统壁纸。</summary>
         List<Screen> WallScreens()
         {
             var cards = EffectiveCards();
@@ -1048,6 +1048,7 @@ namespace WeatherWallpaper
                     PlayFx(fa.Length > 0 ? fa[0].ToLowerInvariant() : "start", fa.Length > 1 ? fa[1] : null);
                     break;
                 case "card": OpenCardSettings(arg == "" ? CardSpec.DefaultId : arg == "new" ? null : arg); break;   // card [Id|new]：打开卡片设置
+                case "about": OpenAbout(); break;
                 case "rebuild": RebuildNow(); break;
                 case "quit": Quit(); break;
                 case "checkupdate": CheckUpdate(arg == "manual"); break;
@@ -1140,47 +1141,55 @@ namespace WeatherWallpaper
             };
             menu.Items.Add(pv);
 
+            // 菜单按常见托盘程序的习惯排：常用操作 → 显示相关的开关（细项收进子菜单）→ 系统相关（开机自启）→ 更新 / 关于 → 退出。
+            // 检查更新、自动检查更新、设置文件、日志目录这些不常用的放进「关于」窗口
+            var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
+            minimal.Click += (s, e) => { settings.Minimal = minimal.Checked; settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch(); };
+            menu.Items.Add(minimal);
+
+            var look = new ToolStripMenuItem("显示效果");
             var fx = new ToolStripMenuItem("任务栏雨雪效果") { CheckOnClick = true };
             fx.Click += (s, e) => { settings.TaskbarFx = fx.Checked; settings.Save(); ConfigureOverlay(); };
+            var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
+            wfx.Click += (s, e) => { settings.WindowFx = wfx.Checked; settings.Save(); Watch(); };
+            var fps60 = new ToolStripMenuItem("高帧率（60 FPS）") { CheckOnClick = true };
+            fps60.Click += (s, e) => { settings.Fps = fps60.Checked ? 60 : 30; settings.Save(); overlay.SetFps(settings.Fps); ConfigureOverlay(); };
             // 省内存模式不再作为常规选项：想省资源用极简模式（静止时 CPU / GPU 为 0，内存也更低）；settings.json 里的 LowMemory 仍然有效。
             // 只在已经开着时显示这一项，让以前开过的人能直接在菜单里关掉
             var lowMem = new ToolStripMenuItem("省内存模式") { CheckOnClick = true };
             lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); ApplyFlyoutMode(); };
-            var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
-            wfx.Click += (s, e) => { settings.WindowFx = wfx.Checked; settings.Save(); Watch(); };
-            var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
-            minimal.Click += (s, e) => { settings.Minimal = minimal.Checked; settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch(); };
-            var status = new ToolStripMenuItem("状态") { Enabled = false };
-            var fps60 = new ToolStripMenuItem("高帧率（60 FPS）") { CheckOnClick = true };
-            fps60.Click += (s, e) => { settings.Fps = fps60.Checked ? 60 : 30; settings.Save(); overlay.SetFps(settings.Fps); ConfigureOverlay(); };
+            var status = new ToolStripMenuItem("状态") { Enabled = false };   // 当前帧率 / 暂停原因，和这些开关放一起看
+            look.DropDownItems.Add(fx); look.DropDownItems.Add(wfx); look.DropDownItems.Add(fps60); look.DropDownItems.Add(lowMem);
+            look.DropDownItems.Add(new ToolStripSeparator());
+            look.DropDownItems.Add(status);
+            look.DropDownOpening += (s, e) =>
+            {
+                lowMem.Checked = settings.LowMemory; lowMem.Visible = settings.LowMemory;
+                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx;
+                fps60.Checked = settings.Fps >= 60;
+                status.Text = "当前：" + (perfText == "" ? "启动中" : perfText);
+            };
+            menu.Items.Add(look);
+
             var startup = new ToolStripMenuItem("开机自启") { CheckOnClick = true };
             startup.Click += (s, e) => SetAutoStart(startup.Checked);
-            menu.Items.Add(minimal);
-            menu.Items.Add(fx); menu.Items.Add(wfx); menu.Items.Add(fps60); menu.Items.Add(lowMem); menu.Items.Add(startup);
+            menu.Items.Add(startup);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(status);
+
+            // 有新版本时才出现（加粗）；平时检查更新在「关于」里
+            updateItem = new ToolStripMenuItem("更新", null, (s, e) => { if (newer != null) PromptUpdate(newer); }) { Visible = false };
+            updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
+            menu.Items.Add(updateItem);
+            menu.Items.Add("关于天气壁纸…", null, (s, e) => OpenAbout());
             menu.Items.Add(new ToolStripSeparator());
-            updateItem = new ToolStripMenuItem("检查更新", null, (s, e) => { if (newer != null) PromptUpdate(newer); else CheckUpdate(true); });
-            var autoUpd = new ToolStripMenuItem("自动检查更新") { CheckOnClick = true };
-            autoUpd.Click += (s, e) => { settings.AutoUpdate = autoUpd.Checked; settings.Save(); };
-            menu.Items.Add(updateItem); menu.Items.Add(autoUpd);
-            menu.Items.Add("编辑设置文件…", null, (s, e) => OpenSettingsFile());
-            menu.Items.Add("打开日志目录", null, (s, e) => System.Diagnostics.Process.Start("explorer.exe", Settings.LocalDir));
-            menu.Opening += (s, e) =>
-            {
-                autoUpd.Checked = settings.AutoUpdate;
-                if (newer == null) updateItem.Text = "检查更新（当前 " + Updater.CurrentText + "）";
-            };
             menu.Items.Add("退出", null, (s, e) => Quit());
 
             menu.Opening += (s, e) =>
             {
-                lowMem.Checked = settings.LowMemory; lowMem.Visible = settings.LowMemory;
-                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx;
                 minimal.Checked = settings.Minimal;
                 minimal.Text = "极简模式（平时只显示卡片，天气变化时播放 " + settings.PlaySecondsValue() + " 秒）";
-                status.Text = "当前：" + (perfText == "" ? "启动中" : perfText);
-                fps60.Checked = settings.Fps >= 60; startup.Checked = IsAutoStart();
+                startup.Checked = IsAutoStart();
+                updateItem.Visible = installing || NewerOffered;   // 正在更新时显示进度
             };
             tray.ContextMenuStrip = menu;
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ToggleFlyout(); };
@@ -1246,12 +1255,18 @@ namespace WeatherWallpaper
 
         // ---------------------------------------------------------------- 卡片设置窗口
         // 改动实时生效、自动保存（像 Windows 设置）：放得下就写进设置；放不下的改动只在桌面上预览、页面上标红，关窗口或换卡片时丢弃
-        CardWindow cardWin;
+        PageWindow cardWin;
         CardSpec draft;   // 正在编辑的卡片（放不下时和设置里的那张不一样）
         readonly WinTimer cardSaveTimer = new WinTimer { Interval = 500 };   // 拖动、方向键、打字时连续改动：合并成一次写盘
 
-        /// <summary>参与布局的卡片：设置里的卡片，正在编辑的那张换成编辑中的样子。</summary>
-        List<CardSpec> EffectiveCards()
+        /// <summary>
+        /// 参与显示的卡片：设置里的卡片，正在编辑的那张换成编辑中的样子。隐藏（Off）的卡片不算——
+        /// 不显示、不占位置、不取天气、不决定天气画面，它的屏上没有别的卡片时也不显示天气壁纸。
+        /// </summary>
+        List<CardSpec> EffectiveCards() => AllCards().Where(c => !c.Off).ToList();
+
+        /// <summary>所有卡片，含隐藏（Off）的（卡片设置的页签、预览图、摆放检查要按原来的顺序看到它们）。</summary>
+        List<CardSpec> AllCards()
         {
             var list = settings.Cards.Select(c => c.Clone()).ToList();   // 副本：NormalizeScenes 会改写 Scene
             if (draft != null)
@@ -1268,10 +1283,11 @@ namespace WeatherWallpaper
                 else
                 {
                     // 和 CommitDraft 一致：取消勾选的（哪怕还没提交）把画面跟随交给同屏的另一张，
-                    // 否则 NormalizeScenes 会还给排在第一的 draft，页面勾选框又被勾上，和 draft.Scene 对不上
+                    // 否则 NormalizeScenes 会还给排在第一的 draft，页面勾选框又被勾上，和 draft.Scene 对不上。
+                    // 刚隐藏（Off）的也走这里（Off 的 Scene 总是 false）：画面跟随交给同屏没隐藏的卡片
                     var key = CardLayout.GroupKey(draft);
-                    var other = list.FirstOrDefault(k => k.Id != draft.Id && CardLayout.GroupKey(k) == key && k.Scene)
-                             ?? list.FirstOrDefault(k => k.Id != draft.Id && CardLayout.GroupKey(k) == key);
+                    var other = list.FirstOrDefault(k => k.Id != draft.Id && !k.Off && CardLayout.GroupKey(k) == key && k.Scene)
+                             ?? list.FirstOrDefault(k => k.Id != draft.Id && !k.Off && CardLayout.GroupKey(k) == key);
                     if (other != null) { other.Scene = true; prefer = other.Id; }
                 }
             }
@@ -1294,7 +1310,7 @@ namespace WeatherWallpaper
             if (cardWin == null)
             {
                 draft = (settings.Cards.FirstOrDefault(c => c.Id == id) ?? settings.Cards[0]).Clone();
-                cardWin = new CardWindow(env, "卡片设置 · 天气壁纸") { OnMessage = OnCardMessage };
+                cardWin = new PageWindow(env, "卡片设置 · 天气壁纸", "card.html", 900, 680) { OnMessage = OnCardMessage };
                 cardWin.Reloaded = () => { if (cardWin != null && draft != null) { cardWin.Post(CardInitJson()); cardWin.Post(CardFitJson()); } };
                 cardWin.FormClosed += (s, e) =>
                 {
@@ -1353,7 +1369,7 @@ namespace WeatherWallpaper
             if (gone != null)
             {
                 // 删掉的是这块屏负责"画面跟随"的卡片：交给这块屏剩下的第一张；这块屏没有卡片了，它的天气壁纸也随之关掉
-                var keep = gone.Scene ? settings.Cards.FirstOrDefault(k => k != gone && CardLayout.GroupKey(k) == CardLayout.GroupKey(gone)) : null;
+                var keep = gone.Scene ? settings.Cards.FirstOrDefault(k => k != gone && !k.Off && CardLayout.GroupKey(k) == CardLayout.GroupKey(gone)) : null;
                 settings.Cards.Remove(gone);
                 if (keep != null) { keep.Scene = true; Log.Write("scene moved to: " + keep.Id); }
                 Settings.NormalizeScenes(settings.Cards, keep?.Id);
@@ -1403,12 +1419,16 @@ namespace WeatherWallpaper
                         var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
                         c.Scene = saved != null && saved.Scene && CardLayout.GroupKey(saved) == CardLayout.GroupKey(c);
                     }
+                    if (c.Off) c.Scene = false;   // 隐藏的卡片不拿画面跟随（刚隐藏的那一下 draft.Scene 还是 true）
                     // 什么都没改（如输入框失焦、拖完又落回原处）：不重排、不写盘，只把当前结果再发一遍让页面复位
                     if (Js.Serialize(c) == Js.Serialize(draft)) { cardWin.Post(CardFitJson()); return; }
-                    bool city = c.LocKey() != draft.LocKey() || c.City != draft.City;
+                    // 换了城市，或者隐藏 / 重新显示（隐藏的卡片不取天气，显示出来时它的城市太久没更新就马上去取）。
+                    // 只有真改了城市才按这张卡片的城市名定地名：只是隐藏 / 显示的话，同一地点的其他卡片的地名不变
+                    bool cityEdit = c.LocKey() != draft.LocKey() || c.City != draft.City;
+                    bool city = cityEdit || c.Off != draft.Off;
                     draft = c;
                     if (Fit(c).Ok) CommitDraft();
-                    if (city) SyncCities(true, c);   // 换了城市：马上去取新城市的天气，桌面上的卡片跟着变
+                    if (city) SyncCities(true, cityEdit ? c : null);   // 换了城市：马上去取新城市的天气，桌面上的卡片跟着变
                     UpdateLayout();
                     break;
                 case "search": SearchCity(d.ContainsKey("q") ? Convert.ToString(d["q"]) : ""); break;
@@ -1453,8 +1473,8 @@ namespace WeatherWallpaper
             if (CardLayout.GroupKey(old) != CardLayout.GroupKey(c)) { if (!c.Hidden) { c.Scene = false; prefer = null; } }   // 换了屏：不抢那块屏原来的画面跟随（那块屏没别的卡片时会自动给它）
             else if (!c.Scene && old.Scene)
             {
-                // 取消勾选：交给同屏的另一张（只有它一张时 NormalizeScenes 会还给它）
-                var other = settings.Cards.FirstOrDefault(k => k.Id != c.Id && CardLayout.GroupKey(k) == CardLayout.GroupKey(c));
+                // 取消勾选、或者隐藏了：交给同屏另一张没隐藏的（只有它一张时 NormalizeScenes 会还给它，隐藏了就没人拿、这块屏也不显示天气壁纸了）
+                var other = settings.Cards.FirstOrDefault(k => k.Id != c.Id && !k.Off && CardLayout.GroupKey(k) == CardLayout.GroupKey(c));
                 if (other != null) { other.Scene = true; prefer = other.Id; }
             }
             settings.Cards[i] = c;
@@ -1472,7 +1492,7 @@ namespace WeatherWallpaper
             // 文件刚被外部改过（还没重新加载）：Save 不写、改为重新加载，以文件为准——卡片设置里还没写盘的改动让位，窗口会换成文件里的样子
             if (!settings.Save()) return;
             Log.Write("cards saved: " + string.Join(" | ", settings.Cards.Select(c => c.Id + " " + c.Screen + " " + c.Pos + " " + c.LocKey()
-                + (c.Hidden ? " hidden" : "") + (c.Scene ? " scene" : ""))));
+                + (c.Hidden ? " hidden" : "") + (c.Off ? " off" : "") + (c.Scene ? " scene" : ""))));
         }
 
         async void SearchCity(string q)
@@ -1495,39 +1515,46 @@ namespace WeatherWallpaper
             public string Msg, Warn;
             public Screen Target;
             public ScreenArea Area;
-            public List<CardSpec> On;   // 这块屏上要摆位置的卡片（不含隐藏卡片）
+            public List<CardSpec> On;   // 这块屏上要摆位置的卡片（不含只显示天气画面的、隐藏的）
             public RectangleF?[] Rects;
         }
 
         /// <summary>
         /// 这张卡片在它选的屏上放不放得下：和这块屏上的其他卡片一起按顺序排一遍（与桌面上的布局同一套算法）。
-        /// 放不下、或者会把这块屏上别的卡片挤掉 → 不保存。隐藏卡片不占位置，总放得下。
+        /// 放不下、或者会把这块屏上别的卡片挤掉 → 不保存。只显示天气画面的、隐藏的卡片不占位置，总放得下。
         /// </summary>
         FitResult Fit(CardSpec c)
         {
             var f = new FitResult();
             var target = CardLayout.Resolve(c.Screen);
-            if (target == null) { f.Ok = true; f.Warn = "这块显示器现在没有连接，接回来后卡片和天气画面会出现在它上面"; return f; }
-            var list = EffectiveCards();
+            if (target == null)
+            {
+                f.Ok = true;
+                f.Warn = c.Off ? "这块显示器现在没有连接；这张卡片已隐藏，接回来后也不会显示，重新显示后才会出现在它上面"
+                    : "这块显示器现在没有连接，接回来后卡片和天气画面会出现在它上面";
+                return f;
+            }
+            var list = AllCards();   // 含隐藏的：c 是刚取消隐藏的那张时，要按它在列表里原来的顺序排
             int at = list.FindIndex(k => k.Id == c.Id);
             if (at >= 0) list[at] = c.Clone(); else list.Add(c.Clone());
             f.Target = target;
             f.Area = AreaOf(target);
-            f.On = list.Where(k => SameScreen(k.Screen, target) && !k.Hidden).ToList();
+            f.On = list.Where(k => SameScreen(k.Screen, target) && !k.Hidden && !k.Off).ToList();
             f.Rects = CardLayout.Place(f.Area.Work, f.On);
             int me = f.On.FindIndex(k => k.Id == c.Id);
             if (me >= 0)
             {
                 // 只算这次改动造成的：改之前（设置里的样子）放得下、现在放不下的卡片。本来就放不下的（换了分辨率、缩放）不算，
                 // 不然这块屏上的卡片（包括这张自己）连名称、城市都改不了
-                var before = settings.Cards.Where(k => SameScreen(k.Screen, target) && !k.Hidden).ToList();
+                var before = settings.Cards.Where(k => SameScreen(k.Screen, target) && !k.Hidden && !k.Off).ToList();
                 var br = CardLayout.Place(f.Area.Work, before);
                 var placed = new HashSet<string>(before.Where((k, i) => br[i].HasValue).Select(k => k.Id));
                 if (!f.Rects[me].HasValue)
                 {
-                    // 本来就放不下、这次也没挪它（只改了名称、城市等）：照常保存，只提示；挪到了另一个同样放不下的地方 → 不保存
+                    // 本来就放不下、这次也没挪它（只改了名称、城市等）：照常保存，只提示；挪到了另一个同样放不下的地方、或者刚取消隐藏 → 不保存
                     var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
-                    bool samePlace = saved != null && saved.Screen == c.Screen && saved.Pos == c.Pos && saved.OffsetX == c.OffsetX && saved.OffsetY == c.OffsetY && saved.Hidden == c.Hidden;
+                    bool samePlace = saved != null && saved.Screen == c.Screen && saved.Pos == c.Pos && saved.OffsetX == c.OffsetX && saved.OffsetY == c.OffsetY
+                        && saved.Hidden == c.Hidden && saved.Off == c.Off;
                     if (samePlace && !placed.Contains(c.Id))
                         f.Warn = ScreenName(target) + " 现在放不下这张卡片，桌面上暂时不显示：换个位置、减小偏移，或者换一块屏";
                     else f.Msg = ScreenName(target) + " 已经放不下这张卡片了：换个位置、减小偏移，或者换一块屏";
@@ -1556,22 +1583,24 @@ namespace WeatherWallpaper
         {
             if (draft == null) return "{\"t\":\"noop\"}";
             var f = Fit(draft);
-            var eff = EffectiveCards();
-            var mine = eff.FirstOrDefault(k => k.Id == draft.Id) ?? draft;
+            var everyCard = AllCards();   // 含隐藏（Off）的：页签、预览图里的虚线框要用
+            var eff = everyCard.Where(k => !k.Off).ToList();
+            var mine = everyCard.FirstOrDefault(k => k.Id == draft.Id) ?? draft;
             var all = Screen.AllScreens;
-            var others = eff.Where(k => k.Id != draft.Id).ToList();
-            int room = Settings.MaxCards - settings.Cards.Count;   // 按设置里的卡片数算（正在编辑的这张也占一个名额；Free 摆放时已把它算进去）
+            var others = everyCard.Where(k => k.Id != draft.Id && !k.Hidden && !k.Off).ToList();   // 占位置的其他卡片
+            int room = Settings.MaxCards - settings.Cards.Count;   // 按设置里的卡片数算（正在编辑的这张也占一个名额；Free 摆放时已把它算进去；隐藏的卡片也占名额）
             var screens = new List<object> { new { id = CardSpec.PrimaryScreen, label = "主屏（始终跟随主屏）" } };
             for (int i = 0; i < all.Length; i++)
             {
                 var s = all[i];
                 // 按正在编辑的这张卡片的位置和偏移往里塞，和真选过去时的判断一致
-                int free = CardLayout.Free(AreaOf(s).Work, others.Where(k => SameScreen(k.Screen, s) && !k.Hidden).ToList(), draft);
+                int free = CardLayout.Free(AreaOf(s).Work, others.Where(k => SameScreen(k.Screen, s)).ToList(), draft);
                 // 这张本来就在这块屏上：Free 把它占的位置也算成了空位，"还能再放"要扣掉，新增受总数名额限制；
                 // 别的屏：Free 里的第一张就是这张挪过去（不占名额），后面的才是新增
-                // 隐藏卡片不占位置：在本屏 Free 没把它算进去，不用扣；也不是"挪过去"，没有那 +1
+                // 只显示天气画面的、隐藏的卡片不占位置：在本屏 Free 没把它算进去，不用扣。别的屏和可见卡片一样算上"这张挪过去"
+                // （隐藏的以后要显示在那块屏上也得有它的位置；名额用满时也不至于每块屏都显示"放满了"、看着像挪不过去）
                 free = !SameScreen(draft.Screen, s) ? Math.Min(room + 1, free)
-                    : draft.Hidden ? Math.Min(room, free) : Math.Min(room, free - 1);
+                    : draft.Hidden || draft.Off ? Math.Min(room, free) : Math.Min(room, free - 1);
                 free = Math.Max(0, free);
                 var b = s.Bounds;
                 screens.Add(new
@@ -1588,6 +1617,17 @@ namespace WeatherWallpaper
             if (f.Target != null)
             {
                 var boxes = new List<object>();
+                // 隐藏（Off）的卡片：画成虚线框 + 闭眼（排在前面，被正常的卡片盖住），位置是"重新显示出来会摆在哪"——
+                // 就按点「显示卡片」时的判断（Fit）排一遍：放不下、或者会把别的卡片挤掉（显示不了）就标红，画在它期望的位置
+                foreach (var k in everyCard.Where(x => x.Off && !x.Hidden && SameScreen(x.Screen, f.Target)))
+                {
+                    var probe = k.Clone();
+                    probe.Off = false;
+                    var pf = Fit(probe);
+                    int at = pf.On == null ? -1 : pf.On.FindIndex(x => x.Id == k.Id);
+                    var r = (at >= 0 ? pf.Rects[at] : null) ?? CardLayout.Desired(f.Area.Work, probe);
+                    boxes.Add(new { id = k.Id, x = r.X, y = r.Y, w = r.Width, h = r.Height, me = k.Id == draft.Id, bad = !pf.Ok, off = true, scene = false, name = CardName(k) });
+                }
                 for (int i = 0; i < f.On.Count; i++)
                 {
                     var k = f.On[i];
@@ -1595,17 +1635,19 @@ namespace WeatherWallpaper
                     var r = f.Rects[i] ?? (me ? CardLayout.Desired(f.Area.Work, k) : (RectangleF?)null);
                     if (r == null) continue;
                     var ek = eff.FirstOrDefault(x => x.Id == k.Id) ?? k;
-                    boxes.Add(new { id = k.Id, x = r.Value.X, y = r.Value.Y, w = r.Value.Width, h = r.Value.Height, me, bad = !f.Rects[i].HasValue, scene = ek.Scene, name = CardName(k) });
+                    boxes.Add(new { id = k.Id, x = r.Value.X, y = r.Value.Y, w = r.Value.Width, h = r.Value.Height, me, bad = !f.Rects[i].HasValue, off = false, scene = ek.Scene, name = CardName(k) });
                 }
                 var wk = f.Area.Work;
                 thumb = new { w = f.Area.Size.Width, h = f.Area.Size.Height, work = new[] { wk.X, wk.Y, wk.Width, wk.Height }, boxes, name = ScreenName(f.Target) };
             }
 
-            // 画面跟随勾选框：这块屏只有这一张 / 这张是隐藏卡片 → 一定是它（打勾禁用）；同屏有隐藏卡片 → 一定是那张（不勾禁用）
+            // 画面跟随勾选框：这块屏只有这一张 / 这张只显示天气画面 → 一定是它（打勾禁用）；同屏有只显示天气画面的卡片 → 一定是那张（不勾禁用）；
+            // 这张隐藏了 → 不参与（不勾禁用）
             var group = eff.Where(k => CardLayout.GroupKey(k) == CardLayout.GroupKey(draft)).ToList();
-            var hid = group.FirstOrDefault(k => k.Hidden && k.Scene && k.Id != draft.Id);   // 这块屏上拿着画面跟随的隐藏卡片（NormalizeScenes 让第一张隐藏卡片拿）
-            string sceneHint = hid != null ? "这块屏的天气画面由隐藏卡片「" + CardName(hid) + "」决定"
-                : draft.Hidden ? "隐藏卡片就是用来决定这块屏的天气画面的"
+            var hid = group.FirstOrDefault(k => k.Hidden && k.Scene && k.Id != draft.Id);   // 这块屏上拿着画面跟随的、只显示天气画面的卡片（NormalizeScenes 让第一张这样的卡片拿）
+            string sceneHint = draft.Off ? "这张卡片已隐藏，不参与天气画面；重新显示后才能设置"
+                : hid != null ? "这块屏的天气画面由只显示天气画面的卡片「" + CardName(hid) + "」决定"
+                : draft.Hidden ? "这张卡片只显示天气画面，就是用来决定这块屏的天气画面的"
                 : group.Count <= 1 ? "这块屏上只有这一张卡片，天气画面一定跟随它" : null;
 
             // 和 AddCard 同样的条件：新增时会丢掉正在编辑的卡片放不下、没保存的改动，所以按设置里的样子算
@@ -1614,12 +1656,16 @@ namespace WeatherWallpaper
             try { draft = null; canAdd = settings.Cards.Count < Settings.MaxCards && NewCard() != null; }
             finally { draft = keep; }
             string addHint = settings.Cards.Count >= Settings.MaxCards ? "最多 " + Settings.MaxCards + " 张卡片" : !canAdd ? "所有屏幕都放不下新卡片了" : null;
-            var cards = eff.Select(k => new { id = k.Id, name = CardName(k), scene = k.Scene, hidden = k.Hidden }).ToList();
+            var cards = everyCard.Select(k => new { id = k.Id, name = CardName(k), scene = k.Scene, hidden = k.Hidden, off = k.Off }).ToList();
             var warn = string.Join("；", new[] { f.Warn, !settings.ShowPanel ? "设置文件里 ShowPanel 为 false：桌面上不显示任何卡片（只有天气画面），改成 true 才显示" : null }.Where(s => s != null));
             // 偏移能调到多大：再大卡片也已经贴边、不会再动（方向键、± 按到这里为止）。按左右 / 上下贴边算，居中位置页面自己减半；
             // 只跟所选的屏有关（scr），页面换了屏、新结果还没到时不用它
             int[] lim = f.Area == null ? null : new[] { (int)Math.Max(0, f.Area.Work.Width - CardLayout.W), (int)Math.Max(0, f.Area.Work.Height - CardLayout.H) };
-            return Js.Serialize(new { t = "fit", id = draft.Id, scr = draft.Screen, ok = f.Ok, msg = f.Msg ?? "", warn, lim, scene = mine.Scene, sceneLock = sceneHint != null, sceneHint = sceneHint ?? "", addable = addHint == null, addHint = addHint ?? "", cards, screens, thumb });
+            // 设置里保存的位置：页面在放不下（没保存）时点「隐藏卡片」，先换回它再隐藏——没保存的改动作废，和换卡片、关窗口一样
+            var stored = settings.Cards.FirstOrDefault(k => k.Id == draft.Id);
+            var saved = stored == null ? null : new { scr = stored.Screen, pos = stored.Pos, x = stored.OffsetX, y = stored.OffsetY };
+            // 拖动吸附用：卡片间距、默认边距（页面 CSS 像素），和这边的排版一致
+            return Js.Serialize(new { t = "fit", id = draft.Id, scr = draft.Screen, ok = f.Ok, msg = f.Msg ?? "", warn, lim, scene = mine.Scene, sceneLock = sceneHint != null, sceneHint = sceneHint ?? "", addable = addHint == null, addHint = addHint ?? "", cards, screens, thumb, saved, gap = CardLayout.Gap, margin = CardSpec.DefaultOffset });
         }
 
         // ---------------------------------------------------------------- 设置文件
@@ -1691,6 +1737,7 @@ namespace WeatherWallpaper
             if (rebuildWalls) RebuildNow();   // 排着的重建、等着的 restore 一并处理，别过后再来一遍
             else { ConfigureOverlay(); if (minimal) UpdateBackdrops(false); }
             ApplyFlyoutMode();
+            PostAbout();   // 「自动检查更新」可能在文件里改了
             Watch();
         }
 
@@ -1698,48 +1745,67 @@ namespace WeatherWallpaper
         UpdateInfo newer;
         ToolStripMenuItem updateItem;
         bool checking, installing;
+        string updError, installError, installText;   // 上次检查失败的原因 / 上次自动更新失败的原因 / 正在下载安装的进度（「关于」里显示）
+        DateTime lastCheck;             // 上次检查成功的时间（MinValue = 还没查过）
         readonly WinTimer updateTimer = new WinTimer();
 
         void StartUpdateTimer()
         {
-            updateTimer.Interval = 60 * 1000;   // 启动 1 分钟后查一次，之后每 12 小时
+            // 启动 1 分钟后查一次；之后每小时看一眼，离上次查到满 12 小时才再查——按钟表时间算，电脑睡眠、休眠过也不会一拖好几天；
+            // 查失败了（没联网）下个小时再试
+            updateTimer.Interval = 60 * 1000;
             updateTimer.Tick += (s, e) =>
             {
-                updateTimer.Interval = 12 * 3600 * 1000;
-                if (settings.AutoUpdate && !Updater.IsDevBuild) CheckUpdate(false);
+                updateTimer.Interval = 3600 * 1000;
+                if (settings.AutoUpdate && !Updater.IsDevBuild && (DateTime.Now - lastCheck).Duration() >= TimeSpan.FromHours(12)) CheckUpdate(false);
             };
             updateTimer.Start();
         }
 
-        string UpdateJson() => newer == null || settings.SkipVersion == newer.Version.ToString() ? "{\"t\":\"update\",\"tag\":null}"
+        /// <summary>有要提示的新版本：查到了，而且不是用户选了「跳过此版本」的那个（托盘菜单、弹出面板只提示这种；「关于」里跳过的也照样显示）。</summary>
+        bool NewerOffered => newer != null && settings.SkipVersion != newer.Version.ToString();
+
+        string UpdateJson() => !NewerOffered ? "{\"t\":\"update\",\"tag\":null}"
             : "{\"t\":\"update\",\"tag\":" + WeatherService.JsonStr(newer.Tag) + ",\"cur\":" + WeatherService.JsonStr(Updater.CurrentText) + "}";
 
+        /// <summary>检查更新。manual：命令行 checkupdate manual，结果用对话框告诉用户；「关于」里点的不弹框，结果显示在窗口里。</summary>
         async void CheckUpdate(bool manual)
         {
             if (checking) return;
             checking = true;
+            updError = null;
+            PostAbout();
             try
             {
                 var info = await Updater.Check();
+                lastCheck = DateTime.Now;
                 Log.Write("update: latest " + info.Tag + ", current " + Updater.Current);
                 if (info.Version <= Updater.Current)
                 {
+                    SetNewer(null);   // 之前查到的新版本又撤了
                     if (manual) MessageBox.Show("已经是最新版本（v" + Updater.Current + "）。", "天气壁纸", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-                // 不弹托盘通知，只在右键菜单（加粗）和左键弹出面板里提示
-                newer = info;
-                updateItem.Text = "发现新版本 " + info.Tag + "，点击更新（当前 " + Updater.CurrentText + "）";
-                updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
-                flyout?.Post(UpdateJson());
+                // 不弹托盘通知，只在右键菜单（加粗）、左键弹出面板和「关于」里提示
+                SetNewer(info);
                 if (manual) PromptUpdate(info);
             }
             catch (Exception ex)
             {
+                updError = ex.Message;
                 Log.Write("update check: " + ex.Message);
                 if (manual) MessageBox.Show("检查更新失败：" + ex.Message + "\n\n可以稍后再试，或直接打开发布页：\n" + Updater.ReleasePage, "天气壁纸", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
-            finally { checking = false; }
+            finally { checking = false; PostAbout(); }
+        }
+
+        /// <summary>记下查到的新版本（null = 没有）：右键菜单里的更新项只在有新版本时出现（菜单弹出时按 newer 决定显示）。</summary>
+        void SetNewer(UpdateInfo info)
+        {
+            if (info?.Tag != newer?.Tag) installError = null;   // 换了版本：上一个版本的安装失败不再相关
+            newer = info;
+            if (info != null) updateItem.Text = "发现新版本 " + info.Tag + "，点击更新（当前 " + Updater.CurrentText + "）";
+            flyout?.Post(UpdateJson());
         }
 
         async void PromptUpdate(UpdateInfo info)
@@ -1755,7 +1821,7 @@ namespace WeatherWallpaper
             }
             var res = MessageBox.Show("发现新版本 " + info.Tag + "（当前 v" + Updater.Current + "）。\n\n是否现在下载并更新？完成后会自动重新启动。\n选\"否\"跳过此版本，\"取消\"下次再说。",
                 "天气壁纸 · 更新", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information);
-            if (res == DialogResult.No) { settings.SkipVersion = info.Version.ToString(); settings.Save(); flyout?.Post(UpdateJson()); return; }
+            if (res == DialogResult.No) { settings.SkipVersion = info.Version.ToString(); settings.Save(); flyout?.Post(UpdateJson()); PostAbout(); return; }
             if (res != DialogResult.Yes) return;
             await InstallUpdate(info);
         }
@@ -1765,15 +1831,21 @@ namespace WeatherWallpaper
             if (installing) return;
             if (Updater.IsDevBuild) { Log.Write("update: dev build, skipped"); return; }
             installing = true;
+            installError = null;
+            installText = "正在准备更新 " + info.Tag + " …";
+            PostAbout();
             try
             {
-                var progress = new Progress<string>(t => { updateItem.Text = t; tray.Text = "天气壁纸 · " + t; });
+                var progress = new Progress<string>(t => { updateItem.Text = t; tray.Text = "天气壁纸 · " + t; installText = t; PostAbout(); });
                 await Updater.Install(info, progress);
                 Quit();   // 让出文件给安装程序；装完由安装包重新拉起
             }
             catch (Exception ex)
             {
                 installing = false;
+                installError = "自动更新失败：" + ex.Message;
+                PostAbout();
+                tray.Text = "天气壁纸";   // 下载进度留在托盘提示上会让人以为还在更新
                 updateItem.Text = "更新到 " + info.Tag + "（当前 " + Updater.CurrentText + "）";
                 Log.Write("update install: " + ex);
                 if (MessageBox.Show("自动更新失败：" + ex.Message + "\n\n是否打开下载页手动安装？", "天气壁纸 · 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
@@ -1785,6 +1857,119 @@ namespace WeatherWallpaper
         {
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url, args ?? "") { UseShellExecute = true }); }
             catch (Exception ex) { Log.Write("open url: " + ex.Message); }
+        }
+
+        // ---------------------------------------------------------------- 关于
+        // 版本、项目地址、检查更新（含自动检查开关）、设置文件和日志目录。页面是 web/about.html
+        PageWindow aboutWin;
+        static string aboutIcon;   // 程序图标（PNG data URL），第一次打开时生成
+
+        void OpenAbout()
+        {
+            if (env == null) return;
+            if (aboutWin == null)
+            {
+                aboutWin = new PageWindow(env, "关于 · 天气壁纸", "about.html", 460, 620) { MinimizeBox = false, OnMessage = OnAboutMessage };
+                aboutWin.Reloaded = () => { PostAboutIcon(); PostAbout(); };
+                aboutWin.FormClosed += (s, e) => aboutWin = null;
+                PostAboutIcon();
+                PostAbout();
+                aboutWin.Show();
+                Native.SetForegroundWindow(aboutWin.Handle);
+            }
+            else if (aboutWin.WindowState == FormWindowState.Minimized) aboutWin.WindowState = FormWindowState.Normal;
+            aboutWin.Activate();
+        }
+
+        void PostAbout() { if (aboutWin != null) aboutWin.Post(AboutJson()); }
+
+        // 图标几十 KB，单独一条消息，每次页面加载只发一次（状态消息在下载更新时会随进度频繁刷新）
+        void PostAboutIcon()
+        {
+            if (string.IsNullOrEmpty(aboutIcon)) aboutIcon = IconPng(128);   // 取不到（""）不缓存，下次打开再试
+            aboutWin?.Post(Js.Serialize(new { t = "icon", src = aboutIcon }));
+        }
+
+        string AboutJson()
+        {
+            // 更新状态：正在安装 > 正在检查 > 有新版本 > 上次检查失败 > 已是最新 > 还没查过
+            var state = installing ? "installing" : checking ? "checking" : newer != null ? "newer" : updError != null ? "error" : lastCheck != DateTime.MinValue ? "latest" : "idle";
+            return Js.Serialize(new
+            {
+                t = "about",
+                ver = Updater.CurrentText,
+                kind = Updater.IsDevBuild ? "从源码构建，不自动更新" : Updater.Installed ? "安装版" : "便携版",
+                dev = Updater.IsDevBuild,
+                auto = settings.AutoUpdate,
+                state,
+                tag = newer?.Tag,
+                skipped = newer != null && settings.SkipVersion == newer.Version.ToString(),
+                // 有新版本时只显示自动更新失败的原因（之后某次后台检查没连上不算，新版本照样有效）
+                msg = installing ? installText : state == "newer" ? installError : updError,
+                at = lastCheck == DateTime.MinValue ? null : lastCheck.ToString(lastCheck.Date == DateTime.Today ? "HH:mm" : "M 月 d 日 HH:mm"),
+                repo = Updater.RepoPage,
+            });
+        }
+
+        /// <summary>
+        /// 内嵌 app.ico 里 size×size 那一帧的 PNG（data URL），取不到返回 ""。128 / 256 两帧在 ico 里本来就是 PNG（见 tools/make-icon.ps1），
+        /// 直接从 ico 目录里按偏移取出来——System.Drawing.Icon 读 PNG 帧不可靠。
+        /// </summary>
+        static string IconPng(int size)
+        {
+            try
+            {
+                byte[] b;
+                using (var s = typeof(Program).Assembly.GetManifestResourceStream("WeatherWallpaper.app.ico"))
+                using (var ms = new MemoryStream())
+                {
+                    if (s == null) return "";
+                    s.CopyTo(ms);
+                    b = ms.ToArray();
+                }
+                int n = b.Length >= 6 ? BitConverter.ToUInt16(b, 4) : 0;
+                for (int i = 0; i < n && 6 + 16 * i + 16 <= b.Length; i++)
+                {
+                    int e = 6 + 16 * i, w = b[e] == 0 ? 256 : b[e];
+                    int len = BitConverter.ToInt32(b, e + 8), off = BitConverter.ToInt32(b, e + 12);
+                    if (w == size && off > 0 && len > 8 && off + len <= b.Length && b[off] == 0x89 && b[off + 1] == (byte)'P')
+                        return "data:image/png;base64," + Convert.ToBase64String(b, off, len);
+                }
+            }
+            catch (Exception ex) { Log.Write("about icon: " + ex.Message); }
+            return "";
+        }
+
+        void OnAboutMessage(string json)
+        {
+            Dictionary<string, object> d;
+            try { d = Js.Deserialize<Dictionary<string, object>>(json); } catch { return; }
+            if (d == null || aboutWin == null) return;
+            switch (d.ContainsKey("t") ? d["t"] as string : null)
+            {
+                case "close": aboutWin.CloseNow(); break;
+                case "check": CheckUpdate(false); break;
+                case "install":   // 「关于」里点的「立即更新」：用户已经明确要更新，不再弹确认框
+                    if (newer == null || installing) break;
+                    if (Updater.IsDevBuild) OpenUrl(Updater.ReleasePage);   // 源码构建的版本不覆盖，去下载页
+                    else { var _ = InstallUpdate(newer); }
+                    break;
+                case "auto":
+                    settings.AutoUpdate = d.ContainsKey("on") && d["on"] is bool && (bool)d["on"];
+                    settings.Save();
+                    PostAbout();
+                    break;
+                case "open":
+                    switch (d.ContainsKey("what") ? d["what"] as string : null)
+                    {
+                        case "repo": OpenUrl(Updater.RepoPage); break;
+                        case "releases": OpenUrl(Updater.ReleasePage); break;
+                        case "issues": OpenUrl(Updater.IssuesPage); break;
+                        case "settings": OpenSettingsFile(); break;
+                        case "logs": OpenUrl("explorer.exe", "\"" + Settings.LocalDir + "\""); break;
+                    }
+                    break;
+            }
         }
 
         int quitStage;   // 0 = 没在退出，1 = 等卡片设置窗口交上编辑后关掉，2 = 正在退出
@@ -1811,6 +1996,7 @@ namespace WeatherWallpaper
             overlay.Dispose();
             eaves.Dispose();
             flyout?.Dispose();
+            aboutWin?.CloseNow();
             shell.DestroyHandle();
             DesktopHost.RestoreSystemWallpaper();
             ExitThread();

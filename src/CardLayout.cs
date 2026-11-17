@@ -44,6 +44,7 @@ namespace WeatherWallpaper
     static class CardLayout
     {
         public const float W = 336, H = 480, Gap = 12;   // 与 style.css 里 .card 的尺寸一致
+        const float Tol = 0.6f;                          // 判断重叠的容差，见 Scan
 
         /// <summary>卡片所在屏的分组键：屏存在 = 它的 DeviceName，屏不在（拔掉了）= 保存的标识。</summary>
         public static string GroupKey(CardSpec c)
@@ -88,7 +89,8 @@ namespace WeatherWallpaper
 
         /// <summary>
         /// 把所有卡片分到正在显示壁纸的屏上并排好位置。卡片和它的屏绑定：所在屏不存在（拔掉了）→ 这张卡片就不显示，接回来自动恢复。
-        /// 隐藏卡片（只显示天气画面）不占位置；放不下 → Rect=null 暂时隐藏，也不挪去别的屏。
+        /// 只显示天气画面的卡片（Hidden）不占位置；放不下 → Rect=null 暂时隐藏，也不挪去别的屏。
+        /// 隐藏（Off）的卡片不要传进来（调用方用 EffectiveCards，已经去掉了）。
         /// </summary>
         public static List<CardPlace> Arrange(IList<CardSpec> cards, IList<Screen> shown, Func<Screen, ScreenArea> area)
         {
@@ -115,7 +117,7 @@ namespace WeatherWallpaper
             while (n < Settings.MaxCards)
             {
                 var probe = like != null ? like.Clone() : new CardSpec();
-                probe.Id = "probe"; probe.Hidden = false;
+                probe.Id = "probe"; probe.Hidden = false; probe.Off = false;
                 list.Add(probe);
                 var r = Place(work, list);
                 if (!r[r.Length - 1].HasValue) break;
@@ -195,9 +197,11 @@ namespace WeatherWallpaper
                 if (y < area.Top - 0.5f || y + H > area.Bottom + 0.5f) return null;
                 bool hit = false;
                 float next = up ? float.MaxValue : float.MinValue;
+                // 容差 Tol：偏移是整数 CSS 像素，工作区却可能是小数（125% 缩放下 1392 物理像素高 = 1113.6）——
+                // 按偏移算回来的位置和"正好挨着、留 Gap"差不到半像素，不能算重叠（卡片设置里吸附到挨着另一张时就是这样）
                 foreach (var q in placed)
                 {
-                    if (x < q.Right + Gap - 0.01f && x + W > q.Left - Gap + 0.01f && y < q.Bottom + Gap - 0.01f && y + H > q.Top - Gap + 0.01f)
+                    if (x < q.Right + Gap - Tol && x + W > q.Left - Gap + Tol && y < q.Bottom + Gap - Tol && y + H > q.Top - Gap + Tol)
                     {
                         hit = true;
                         next = up ? Math.Min(next, q.Top - Gap - H) : Math.Max(next, q.Bottom + Gap);

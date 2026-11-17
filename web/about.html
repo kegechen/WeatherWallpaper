@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>关于</title>
+<style>
+  /* 关于窗口：和卡片设置同一套 Windows 11 深色风格（窗口是 Mica 背景，页面透明） */
+  :root { color-scheme: dark; --fg: #fff; --dim: rgba(255,255,255,.66); --line: rgba(255,255,255,.08); --ctl: rgba(255,255,255,.06); --ctl2: rgba(255,255,255,.1); --acc: #60cdff; --ok: #6ccb5f; --bad: #ff99a4; }
+  html, body { margin: 0; height: 100%; background: transparent; color: var(--fg); user-select: none; cursor: default; }
+  body { font: 13.5px/1.45 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; }
+  main { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 20px 20px 8px; }
+  button { font: inherit; color: var(--fg); background: var(--ctl); border: 1px solid var(--line); border-bottom-color: rgba(255,255,255,.04); border-radius: 5px; height: 32px; padding: 0 14px; box-sizing: border-box; outline: none; cursor: pointer; white-space: nowrap; }
+  button:hover:not(:disabled) { background: var(--ctl2); }
+  button:active:not(:disabled) { background: rgba(255,255,255,.04); color: var(--dim); }
+  button:disabled { opacity: .45; cursor: default; }
+  button:focus-visible { box-shadow: 0 0 0 2px var(--acc); }
+  button.primary { background: var(--acc); color: #000; border-color: transparent; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #5ab9e8; }
+
+  .head { display: flex; align-items: center; gap: 16px; margin: 0 4px 18px; }
+  .head img { width: 64px; height: 64px; flex: none; }
+  .head img[src=""] { visibility: hidden; }
+  .head h1 { margin: 0; font-size: 22px; font-weight: 600; line-height: 1.25; }
+  .head .ver { margin-top: 2px; color: var(--dim); }
+  .head .desc { margin-top: 2px; color: var(--dim); font-size: 12.5px; }
+
+  /* 设置项卡片：一行一项，左边图标 + 标题 / 说明，右边按钮 */
+  .group { border-radius: 8px; background: rgba(255,255,255,.04); border: 1px solid var(--line); margin-bottom: 12px; overflow: hidden; }
+  .item { display: flex; align-items: center; gap: 12px; min-height: 46px; box-sizing: border-box; padding: 8px 14px; }
+  .item + .item { border-top: 1px solid var(--line); }
+  .item .ic { width: 20px; height: 20px; flex: none; color: var(--dim); display: flex; align-items: center; justify-content: center; }
+  .item .ic svg { width: 18px; height: 18px; }
+  .item .tx { flex: 1; min-width: 0; }
+  .item .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .sub { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+  .item.link { cursor: pointer; }
+  .item.link:hover { background: rgba(255,255,255,.04); }
+  .item.link .go { width: 14px; height: 14px; flex: none; color: var(--dim); }
+
+  #upd .ic.ok { color: var(--ok); }
+  #upd .ic.new { color: var(--acc); }
+  #upd .ic.bad { color: var(--bad); }
+  #upd .sub.bad { color: var(--bad); white-space: normal; }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  label.chk { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
+  label.chk input { appearance: none; flex: none; width: 20px; height: 20px; margin: 0; padding: 0; border-radius: 4px; border: 1px solid rgba(255,255,255,.6); background: transparent; cursor: pointer; }
+  label.chk input:checked { background: var(--acc) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E") center/14px no-repeat; border-color: var(--acc); }
+  label.chk input:focus-visible { box-shadow: 0 0 0 2px var(--acc); }
+
+  .credits { margin: 4px 4px 0; color: var(--dim); font-size: 11.5px; line-height: 1.6; }
+  footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 20px 16px; border-top: 1px solid var(--line); background: rgba(0,0,0,.12); }
+  footer button { min-width: 96px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="head">
+    <img id="icon" src="" alt="">
+    <div>
+      <h1>天气壁纸</h1>
+      <div class="ver" id="ver">&nbsp;</div>
+      <div class="desc">实时天气动态壁纸 + 桌面天气卡片</div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="item" id="upd">
+      <div class="ic" id="updIc"></div>
+      <div class="tx"><div class="tt" id="updT">&nbsp;</div><div class="sub" id="updS"></div></div>
+      <button id="updBtn">检查更新</button>
+    </div>
+    <div class="item">
+      <label class="chk"><input type="checkbox" id="auto"><span>自动检查更新<br><span class="sub" id="autoS">&nbsp;</span></span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="item link" data-open="repo" title="在浏览器里打开">
+      <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5M9.2 2.8 6.8 13.2"/></svg></div>
+      <div class="tx"><div class="tt">项目主页（GitHub）</div><div class="sub" id="repo">&nbsp;</div></div>
+      <svg class="go" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2.5h4v4M13.5 2.5 7 9M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3"/></svg>
+    </div>
+    <div class="item link" data-open="releases" title="每个版本改了什么，以及安装包和便携版下载">
+      <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M3 1.8h7l3 3v9.4H3z"/><path d="M5.5 7h5M5.5 9.5h5M5.5 12h3" stroke-linecap="round"/></svg></div>
+      <div class="tx"><div class="tt">更新日志与下载</div></div>
+      <svg class="go" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2.5h4v4M13.5 2.5 7 9M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3"/></svg>
+    </div>
+    <div class="item link" data-open="issues" title="在 GitHub Issues 里提交问题或建议">
+      <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M2 3h12v8H7.5L4.5 13.5V11H2z"/><path d="M8 5v3M8 9.6v.1" stroke-linecap="round"/></svg></div>
+      <div class="tx"><div class="tt">问题反馈与建议</div></div>
+      <svg class="go" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2.5h4v4M13.5 2.5 7 9M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3"/></svg>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="item">
+      <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M1.8 3.5h4.5l1.5 1.5h6.4v8.2H1.8z"/></svg></div>
+      <div class="tx"><div class="tt">高级</div></div>
+      <button data-open="settings" title="用记事本打开 settings.json，保存后立即生效">设置文件</button>
+      <button data-open="logs" title="反馈问题时可以附上里面的 log.txt">日志目录</button>
+    </div>
+  </div>
+
+  <div class="credits">天气和空气质量：Open-Meteo · 城市搜索：Photon（© OpenStreetMap 贡献者）、Open-Meteo 地理编码（GeoNames） · 地名：BigDataCloud</div>
+</main>
+<footer>
+  <button id="ok" class="primary">确定</button>
+</footer>
+<script>
+(() => {
+  'use strict';
+  const host = window.chrome && window.chrome.webview;
+  const post = m => { if (host) host.postMessage(m); };
+  const $ = id => document.getElementById(id);
+  const IC = {
+    check: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3"/></svg>',
+    spin: '<svg class="spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 2a6 6 0 1 1-6 6"/></svg>',
+    ok: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2l2 2 3.6-4"/></svg>',
+    up: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M8 11V5.2M5.4 7.6 8 5l2.6 2.6"/></svg>',
+    bad: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8 14.6 13.6H1.4z"/><path d="M8 6.2v3.3M8 11.6v.1"/></svg>',
+  };
+  let st = null;
+
+  function render() {
+    if (!st) return;
+    $('ver').textContent = '版本 ' + st.ver + (st.kind ? ' · ' + st.kind : '');
+    $('repo').textContent = (st.repo || '').replace(/^https?:\/\//, '');
+    const ic = $('updIc'), t = $('updT'), s = $('updS'), b = $('updBtn');
+    const at = st.at ? '上次检查：' + st.at : '';
+    let icon = 'check', cls = '', title = '检查更新', sub = st.auto ? '还没有检查过' : '自动检查已关闭', btn = '检查更新', primary = false, busy = false, subBad = false;
+    if (st.state === 'installing') { icon = 'spin'; title = '正在更新'; sub = st.msg || ''; btn = '立即更新'; busy = true; }
+    else if (st.state === 'checking') { icon = 'spin'; title = '正在检查更新…'; sub = at; busy = true; }
+    else if (st.state === 'newer') {
+      icon = 'up'; cls = 'new'; title = '发现新版本 ' + st.tag + (st.skipped ? '（已选择跳过）' : '');
+      // 自动更新失败过：把原因显示出来，按钮仍可重试
+      if (st.msg) { sub = st.msg; subBad = true; } else sub = st.dev ? '开发版不自动更新，可以去下载页手动安装' : '下载后自动安装并重新启动，设置都会保留';
+      btn = st.dev ? '打开下载页' : '立即更新'; primary = true;
+    }
+    else if (st.state === 'error') { icon = 'bad'; cls = 'bad'; title = '检查更新失败'; sub = st.msg || ''; subBad = true; btn = '重试'; }
+    else if (st.state === 'latest') { icon = 'ok'; cls = 'ok'; title = '已是最新版本'; sub = at; }
+    ic.className = 'ic ' + cls;
+    if (ic._icon !== icon) { ic._icon = icon; ic.innerHTML = IC[icon]; }
+    t.textContent = title;
+    s.textContent = sub;
+    s.className = 'sub' + (subBad ? ' bad' : '');
+    b.textContent = btn;
+    b.className = primary ? 'primary' : '';
+    b.disabled = busy;
+    b.dataset.act = st.state === 'newer' ? 'install' : 'check';
+    $('auto').checked = !!st.auto;
+    // 有新版本时只在托盘菜单、天气面板和这里提示，不弹窗
+    $('autoS').textContent = st.dev ? '开发版（从源码构建）不自动检查' : '启动时检查一次，之后每 12 小时一次，不弹窗打扰';
+  }
+
+  $('updBtn').onclick = () => {
+    if (!st) return;
+    const act = $('updBtn').dataset.act;
+    if (act === 'check') { st.state = 'checking'; render(); }   // 先转起来，宿主的结果到了再按它的画
+    post({ t: act });
+  };
+  $('auto').onchange = () => post({ t: 'auto', on: $('auto').checked });
+  document.addEventListener('click', e => {
+    const o = e.target.closest('[data-open]');
+    if (o) post({ t: 'open', what: o.dataset.open });
+  });
+  $('ok').onclick = () => post({ t: 'close' });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' || (e.key === 'Enter' && e.target === document.body)) post({ t: 'close' }); });
+  document.addEventListener('contextmenu', e => e.preventDefault());
+
+  if (host) host.addEventListener('message', ev => {
+    const m = ev.data;
+    if (!m || !m.t) return;
+    if (m.t === 'about') { st = m; render(); }
+    else if (m.t === 'icon') $('icon').src = m.src || '';   // 程序图标：每次页面加载宿主单独发一次
+    else if (m.t === 'flush') post({ t: 'close' });   // 点了标题栏 ×：这里没有要交的编辑，直接关
+  });
+  post({ t: 'ready' });
+})();
+</script>
+</body>
+</html>
