@@ -88,6 +88,10 @@ namespace WeatherWallpaper
         public bool DevTools { get; set; }
         public bool LowMemory { get; set; }            // 省内存模式：背景半分辨率 + 渐变缓存 + 颜色量化（默认关，画面略软）
         public bool Minimal { get; set; }              // 极简模式：平时只显示系统壁纸 + 天气卡片，天气有明显变化时才播放一小段天气动画
+        public bool OverlayWall { get; set; }          // 壁纸叠加：系统壁纸常驻垫底，天空那层半透明，云、日月、雨雪浮在壁纸上（和极简模式互斥）
+        // 天空那层的不透明度（壁纸叠加时）：和 PlaySeconds 一样声明成 object，手写成字符串 / 小数 / 巨大值也不会让整个文件读失败
+        public object SkyOpacity { get; set; } = DefaultSkyOpacity;    // 壁纸叠加时天空那层的不透明度（0.05–1，默认 0.45）
+        public object CloudAlpha { get; set; } = DefaultCloudAlpha;    // 壁纸叠加时云的不透明度（0.1–1，默认 0.72）
         // 每次播放天气动画的秒数（极简模式播放、雨后彩虹、效果预览共用）。声明成 object：用户手写成字符串、小数或超出 int 的大数时，按 int 反序列化会让整个文件读取失败；
         // 这里什么值都先收下，加载后由 NormalizePlaySeconds 校验，不合法就回到默认值
         public object PlaySeconds { get; set; } = DefaultPlaySeconds;
@@ -108,6 +112,9 @@ namespace WeatherWallpaper
         static PropertyInfo[] Props => props ?? (props = typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => !Legacy.Contains(p.Name)).ToArray());
 
         public const int DefaultPlaySeconds = 30, MinPlaySeconds = 5, MaxPlaySeconds = 3600, MaxCards = 8;
+        // 壁纸叠加时天空那层的不透明度：0.45 ≈ 天气看得清、壁纸也透得出来；1 = 和普通模式一样完全遮住
+        public const double DefaultSkyOpacity = 0.45, MinSkyOpacity = 0.05, MaxSkyOpacity = 1;
+        public const double DefaultCloudAlpha = 0.72, MinCloudAlpha = 0.1, MaxCloudAlpha = 1;
 
         public CardSpec DefaultCard() => Cards[0];
 
@@ -207,6 +214,37 @@ namespace WeatherWallpaper
         /// <summary>播放秒数（已校验，总在 5–3600 之间）。</summary>
         public int PlaySecondsValue() => PlaySeconds is int n ? n : DefaultPlaySeconds;
 
+        /// <summary>天空那层的不透明度（已校验，总在 0.05–1 之间）。JavaScriptSerializer 读回来的数可能是 int / long / decimal / double 中的任意一种。</summary>
+        public double SkyOpacityValue() => OpacityValue(SkyOpacity, DefaultSkyOpacity, MinSkyOpacity, MaxSkyOpacity);
+
+        /// <summary>云的不透明度（已校验，总在 0.1–1 之间）。</summary>
+        public double CloudAlphaValue() => OpacityValue(CloudAlpha, DefaultCloudAlpha, MinCloudAlpha, MaxCloudAlpha);
+
+        /// <summary>把 object 里的数读成范围内的 double；接受数字和数字字符串（命令行调参 / 手写文件），不是数、NaN 都用默认值。</summary>
+        static double OpacityValue(object o, double def, double min, double max)
+        {
+            double v;
+            switch (o)
+            {
+                case double d: v = d; break;
+                case decimal m: v = (double)m; break;
+                case int i: v = i; break;
+                case long l: v = l; break;
+                case string t:
+                    if (!double.TryParse(t.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v)) return def;
+                    break;
+                default: return def;
+            }
+            return double.IsNaN(v) ? def : Math.Max(min, Math.Min(max, v));
+        }
+
+        /// <summary>校验两档不透明度：接受数字和数字字符串，不是数、超出范围都回到默认值再夹回去（所有加载路径的统一入口）。</summary>
+        public void NormalizeOpacities()
+        {
+            SkyOpacity = OpacityValue(SkyOpacity, DefaultSkyOpacity, MinSkyOpacity, MaxSkyOpacity);
+            CloudAlpha = OpacityValue(CloudAlpha, DefaultCloudAlpha, MinCloudAlpha, MaxCloudAlpha);
+        }
+
         /// <summary>
         /// 把 PlaySeconds 规整成合法的 int：接受整数、小数（四舍五入）和数字字符串；
         /// null、布尔、非数字、超出 5–3600（含超出 int / long 范围的大数）一律回到默认 30。
@@ -221,8 +259,8 @@ namespace WeatherWallpaper
             PlaySeconds = !double.IsNaN(v) && v >= MinPlaySeconds && v <= MaxPlaySeconds ? (int)Math.Round(v) : DefaultPlaySeconds;
         }
 
-        static readonly System.Text.RegularExpressions.Regex PlaySecondsNum =
-            new System.Text.RegularExpressions.Regex(@"(""PlaySeconds""\s*:\s*)(-?[0-9][0-9.eE+-]*)");
+        static readonly System.Text.RegularExpressions.Regex BoundedNums =
+            new System.Text.RegularExpressions.Regex(@"(""(?:PlaySeconds|SkyOpacity|CloudAlpha)""\s*:\s*)(-?[0-9][0-9.eE+-]*)");
 
         public static Settings Load()
         {
@@ -241,8 +279,8 @@ namespace WeatherWallpaper
             return s;
         }
 
-        // 超出 double 范围的数字（如 1e400）连 JSON 解析都过不去，会让整个文件读取失败：先换成 null，按默认值处理
-        static string FixNumbers(string text) => PlaySecondsNum.Replace(text, m => double.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.Float,
+        // 有范围约束的数字字段（PlaySeconds / SkyOpacity / CloudAlpha）里超出 double 范围的数字（如 1e400）连 JSON 解析都过不去，会让整个文件读取失败：先换成 null，按默认值处理
+        static string FixNumbers(string text) => BoundedNums.Replace(text, m => double.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out _) ? m.Value : m.Groups[1].Value + "null");
 
         /// <summary>这份内容能不能读成设置（和 TryLoad 同一套解析，但不做整理、迁移，不记日志）。</summary>
@@ -282,6 +320,8 @@ namespace WeatherWallpaper
                         legacy = s.Cards == null && s.Monitors != null;   // 旧版每次保存都会写 Monitors；新版不写。手动删掉 Cards 的新文件不算旧版
                     }
                     s.NormalizePlaySeconds();
+                    s.NormalizeOpacities();
+                    if (s.OverlayWall && s.Minimal) s.Minimal = false;   // 手改文件把互斥的两项都写成 true：按「打开壁纸叠加会关掉极简模式」处理（所有加载路径都从这走，托盘 / 命令行入口各自也照应）
                     s.NormalizeCards();
                     if (legacy) s.MigrateMonitors();
                     return s;
@@ -310,6 +350,12 @@ namespace WeatherWallpaper
             ["LowMemory"] = "省内存模式：true 开 / false 关。开启后约少 30–50 MB，代价是背景画面略软、渐变可能有极细微色带，托盘面板每次打开要等约 1 秒",
             ["Minimal"] = "极简模式：true 开 / false 关。开启后平时只显示你原来的系统壁纸和天气卡片，几乎不占 CPU / GPU；" +
                 "启动时、转雨 / 下雪 / 雷雨 / 暴雨、雨后转晴（彩虹）时播放一小段天气动画（桌面被挡住或人不在时等你回来再播）",
+            ["OverlayWall"] = "壁纸叠加：true 开 / false 关。开启后保留你原来的系统壁纸当底，天空那层半透明，云、太阳、月亮、雨雪浮在壁纸上，" +
+                "能在看到壁纸的同时看到天气效果。和极简模式互斥（开启壁纸叠加会关掉极简模式）",
+            ["SkyOpacity"] = "壁纸叠加时天空那层的不透明度：" + MinSkyOpacity + "–" + MaxSkyOpacity + " 的小数，如 " + DefaultSkyOpacity +
+                "（越小壁纸越清楚、天气越淡；1 = 和普通模式一样完全遮住）",
+            ["CloudAlpha"] = "壁纸叠加时云的不透明度：" + MinCloudAlpha + "–" + MaxCloudAlpha + " 的小数，如 " + DefaultCloudAlpha +
+                "（越小云越透，壁纸从云后面露出来的越多）",
             ["PlaySeconds"] = "每次播放天气动画的时长（极简模式的天气变化播放、雨后彩虹、托盘「效果预览」都用它），单位秒，" + MinPlaySeconds + "–" + MaxPlaySeconds + " 的整数，如 30；写错按默认 " + DefaultPlaySeconds + " 秒",
             ["AutoUpdate"] = "自动检查更新：true / false",
             ["SkipVersion"] = "已选择跳过的版本号，null = 不跳过",

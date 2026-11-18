@@ -1,17 +1,42 @@
 'use strict';
 // 天气壁纸渲染器：天空 / 太阳 / 月亮 / 星空 / 云 / 雨 / 雪 / 雷电 / 雾
 (() => {
-  // 分层（自下而上）：sky 天空（不透明；内容变了才重画）→ cloud 云（半分辨率，有云才存在）
-  // → veil 压暗 / 雾霾（CSS 渐变）→ fx 雨雪闪电（按设定帧率）
-  const cvs = document.getElementById('sky'), cldCvs = document.getElementById('cloud'), fxCvs = document.getElementById('fx');
+  // 分层（自下而上）：backdrop 系统壁纸底图（仅壁纸叠加）→ sky 天空（不透明；内容变了才重画）
+  // → cloud 云（半分辨率，有云才存在）→ veil 压暗 / 雾霾（CSS 渐变）→ fx 雨雪闪电（按设定帧率）
+  // 壁纸叠加模式（L.overlayWall）：底图常驻，天空画布改成带 alpha，天空渐变只画很淡的一层，日月云雨照常不透明——
+  // 壁纸从天空的空隙里透出来，太阳月亮云还是实心的，整体像"浮动在壁纸上的一层天气"
+  let cvs = document.getElementById('sky');
+  const cldCvs = document.getElementById('cloud'), fxCvs = document.getElementById('fx');
   const veil = document.getElementById('veil');
   const sceneEl = document.getElementById('scene'), backEl = document.getElementById('backdrop');
-  const bctx = cvs.getContext('2d', { alpha: false }), cctx = cldCvs.getContext('2d'), fctx = fxCvs.getContext('2d');
+  // 天空画布默认不透明（合成器可以跳过混合）。壁纸叠加时换成带 alpha 的画布，见 syncSkyAlpha
+  let bctx = cvs.getContext('2d', { alpha: false });
+  const cctx = cldCvs.getContext('2d'), fctx = fxCvs.getContext('2d');
   let ctx = bctx;
   const cardsEl = document.getElementById('cards');
   const host = window.chrome && window.chrome.webview;
   const post = m => { if (host) host.postMessage(m); };
   window.onerror = (msg, src, line) => post('log:' + msg + ' @' + line);
+
+  // 天空画布：普通模式用不透明画布（合成器可以跳过混合，省一点 GPU）；壁纸叠加时换成带 alpha 的画布。
+  // canvas 的 alpha 属性在第一次 getContext 时定死、之后改不了，只能整个换一个画布元素。
+  let skyHasAlpha = false;
+  // 底图消息到了没有：壁纸叠加在拿到第一份底图之前天空先按不透明画，免得启动那一下露出黑底（带图时解码期间底下是纯色近似垫着）
+  let backReady = false;
+  /// 换成带 / 不带 alpha 的天空画布。返回 true = 换了，调用方要 resize()（按当前尺寸重新分配、重画）。
+  function syncSkyAlpha() {
+    const want = !!L.overlayWall;
+    if (want === skyHasAlpha) return false;
+    skyHasAlpha = want;
+    const old = cvs, nc = document.createElement('canvas');
+    nc.id = old.id;
+    old.parentNode.replaceChild(nc, old);
+    cvs = nc;
+    bctx = cvs.getContext('2d', { alpha: want });
+    cvs.addEventListener('contextrestored', resize);
+    skySigLast = ''; lastSky = -1e9;
+    return true;
+  }
 
   const TAU = Math.PI * 2, RAD = Math.PI / 180;
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -63,7 +88,9 @@
   function prng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
   // cards：这块屏上的卡片 [{id, key, x, y}]（位置由宿主算好，CSS 像素）；scene：全屏天气画面跟着哪个城市（城市键）
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, scene: '', cards: [] };
+  // overlayWall：壁纸叠加——天空半透明、系统壁纸常驻垫底；skyOpacity：天空那层的不透明度（0.05–1）；
+  // cloudAlpha：云的不透明度（极简模式不叠壁纸时恒为 1）
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, scene: '', cards: [] };
 
   let W = 0, H = 0, DPR = 1;
   // weathers：各城市的天气（城市键 → 宿主发来的 weather 消息）；weather：画面城市的那一份（天空、太阳、雨雪都按它）
@@ -511,7 +538,7 @@
   // 星星闪烁、日芒缓慢转动是仅有的持续动画，按 0.3 / 0.5 秒一档计入指纹。
   function skySig(st) {
     const q = v => Math.round(v * 200);
-    return [bgK, W, H, Math.round(L.ground * 1000), L.lowmem ? 1 : 0, Math.round(st.e * 8),
+    return [bgK, W, H, Math.round(L.ground * 1000), L.lowmem ? 1 : 0, Math.round(st.e * 8), L.overlayWall ? q(L.skyOpacity) : 0,
       q(cur.cloud), q(cur.fog), q(cur.dark), q(cur.rain), q(cur.thunder), q(cur.bow), Math.round(st.sp.x), Math.round(st.sp.y),
       st.moonV > 0 ? q(st.moonV) + ':' + Math.floor(st.t / 30000) : 0,
       st.rays ? Math.floor(simT / 0.5) : 0, st.starA > 0.01 ? Math.floor(simT / 0.3) : 0].join();
@@ -522,6 +549,9 @@
     ctx = bctx;
     const { li, t, sp, e, hz, daylight, golden, storm, vis, starA, moonV } = st;
     skySigLast = skySig(st);
+    // 壁纸叠加：天空底色只占 skyA，壁纸从里面透出来；日月、云、雨雪照常不透明（天气效果本身要看得清）
+    const skyA = L.overlayWall && backReady ? clamp(L.skyOpacity, 0.05, 1) : 1;
+    if (skyHasAlpha) ctx.clearRect(0, 0, W, H);   // 带 alpha 的画布不会自动擦掉上一帧
 
     // 天空
     let [top, mid, bot] = skyAt(e);
@@ -530,10 +560,10 @@
     const darkK = 1 - cur.dark * 0.55;
     top = mix(top, ovTop, ovAmt).map(v => v * darkK); mid = mix(mid, ovMid, ovAmt).map(v => v * darkK); bot = mix(bot, ovBot, ovAmt).map(v => v * (1 - cur.dark * 0.4));
     const sg = ctx.createLinearGradient(0, 0, 0, hz);
-    sg.addColorStop(0, css(top)); sg.addColorStop(0.55, css(mid)); sg.addColorStop(1, css(bot));
+    sg.addColorStop(0, css(top, skyA)); sg.addColorStop(0.55, css(mid, skyA)); sg.addColorStop(1, css(bot, skyA));
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
     ctx.fillStyle = sg; ctx.fillRect(0, 0, W, hz);
-    ctx.fillStyle = css(bot); ctx.fillRect(0, hz - 1, W, H - hz + 1);
+    ctx.fillStyle = css(bot, skyA); ctx.fillRect(0, hz - 1, W, H - hz + 1);
 
     // 日出日落地平线辉光
     const glowAmt = smooth(-11, -1, e) * (1 - smooth(4, 14, e)) * (1 - ovAmt * 0.8);
@@ -544,7 +574,7 @@
       const R = W * 0.75;
       const gg = ctx.createRadialGradient(0, 0, 0, 0, 0, R);
       const gc = mix(hex('#ff6a2b'), hex('#ffb066'), smooth(-4, 6, e));
-      gg.addColorStop(0, css(gc, 0.65 * glowAmt)); gg.addColorStop(0.35, css(gc, 0.25 * glowAmt)); gg.addColorStop(1, css(gc, 0));
+      gg.addColorStop(0, css(gc, 0.65 * glowAmt * skyA)); gg.addColorStop(0.35, css(gc, 0.25 * glowAmt * skyA)); gg.addColorStop(1, css(gc, 0));
       ctx.fillStyle = gg; ctx.fillRect(-R, -R, 2 * R, 2 * R);
       ctx.restore();
     }
@@ -567,11 +597,11 @@
     // 雨后彩虹（画在天空层，云层盖在上面会自然挡住一部分）
     if (cur.bow > 0.01) drawRainbow(st);
 
-    // 阴天时顶部压一层云色（云画布盖在它上面）
+    // 阴天时顶部压一层云色（云画布盖在它上面）。壁纸叠加时这层也按 skyA 减淡：不然阴天会把壁纸整片盖灰
     const cc = st.cc, ov = smooth(0.65, 1, cur.cloud);
     if (ov > 0.01) {
       const og = ctx.createLinearGradient(0, 0, 0, hz * 0.85);
-      og.addColorStop(0, css(cc[1], ov * 0.8)); og.addColorStop(0.6, css(mix(cc[0], cc[1], 0.5), ov * 0.35)); og.addColorStop(1, css(cc[0], 0));
+      og.addColorStop(0, css(cc[1], ov * 0.8 * skyA)); og.addColorStop(0.6, css(mix(cc[0], cc[1], 0.5), ov * 0.35 * skyA)); og.addColorStop(1, css(cc[0], 0));
       ctx.fillStyle = og; ctx.fillRect(0, 0, W, hz);
     }
   }
@@ -585,12 +615,14 @@
     ctx.clearRect(0, 0, W, H);
     recolorSprites(st.cc[0], st.cc[1], performance.now());
     const sx = W / 1920;
+    // 壁纸叠加：云也半透明一点，壁纸从云后面透出来（云太实的话整片天就又被盖住了）
+    const cloudA = L.overlayWall && backReady && !L.minimal ? clamp(L.cloudAlpha, 0.1, 1) : 1;
     for (const layer of [3, 0, 1, 2]) {   // 层云垫底，然后由远及近
       for (const c of clouds) {
         if (c.layer !== layer || c.a < 0.01) continue;
         const w = SW * c.sc * sx, h = SH * c.sc * sx, x = c.fx * W;
         if (x > W || x + w < 0) continue;   // 在屏幕外的不画
-        ctx.globalAlpha = c.a;
+        ctx.globalAlpha = c.a * cloudA;
         ctx.drawImage(sprites[c.spr], x, c.fy * H, w, h);
       }
     }
@@ -598,11 +630,11 @@
     if (cur.fog > 0.01) {
       const fc = mix(hex('#3a3f47'), hex('#d5d9de'), st.daylight);
       const fg = ctx.createLinearGradient(0, H * 0.15, 0, H);
-      fg.addColorStop(0, css(fc, cur.fog * 0.25)); fg.addColorStop(1, css(fc, cur.fog * 0.75));
+      fg.addColorStop(0, css(fc, cur.fog * 0.25 * cloudA)); fg.addColorStop(1, css(fc, cur.fog * 0.75 * cloudA));
       ctx.fillStyle = fg; ctx.fillRect(0, 0, W, H);
       for (let i = 0; i < 5; i++) {
         const x = ((simT * (6 + i * 3) / W + i * 0.27) % 1.6 - 0.4) * W;
-        ctx.globalAlpha = cur.fog * 0.55;
+        ctx.globalAlpha = cur.fog * 0.55 * cloudA;
         ctx.drawImage(sprites[8 + i % 4], x, H * (0.45 + i * 0.09), W * 0.9, H * 0.35);
       }
       ctx.globalAlpha = 1;
@@ -617,12 +649,14 @@
   }
   function updateVeil() {
     const parts = [];
+    // 壁纸叠加时压暗也减淡一些：雨天的阴沉还在，但底下的壁纸不至于被整片压黑
+    const k = L.overlayWall && backReady ? 0.5 + 0.5 * clamp(L.skyOpacity, 0.05, 1) : 1;
     const aqi = aqiNow();
     if (aqi > 100) {
       const ha = Math.min(0.3, (aqi - 100) / 500);
-      parts.push(`linear-gradient(rgba(190,175,150,${(ha * 0.4).toFixed(3)}),rgba(190,175,150,${ha.toFixed(3)}))`);
+      parts.push(`linear-gradient(rgba(190,175,150,${(ha * 0.4 * k).toFixed(3)}),rgba(190,175,150,${(ha * k).toFixed(3)}))`);
     }
-    if (cur.dark > 0.01) parts.push(`linear-gradient(rgba(6,8,14,${(cur.dark * 0.5).toFixed(3)}),rgba(6,8,14,${(cur.dark * 0.15).toFixed(3)}))`);
+    if (cur.dark > 0.01) parts.push(`linear-gradient(rgba(6,8,14,${(cur.dark * 0.5 * k).toFixed(3)}),rgba(6,8,14,${(cur.dark * 0.15 * k).toFixed(3)}))`);
     const key = parts.join(',');
     if (key !== veilKey) { veilKey = key; veil.style.background = key; }
   }
@@ -1022,7 +1056,8 @@
   // 平时天气画面整层淡出后"睡着"：三张画布缩成 1×1、主循环停掉，页面上只剩系统壁纸底图 + 卡片，CPU / GPU 基本为 0。
   // 宿主让播放（fx）、或者在看效果预览时醒来：按当前天气立刻画好一帧再淡入，播完再淡出睡回去。
   const FADE_MS = 1500;
-  function sceneWanted() { return !L.minimal || !!fxKind || preview !== 'live' || dayDemo; }
+  // 壁纸叠加不是极简模式：天气画面一直显示（只是天空半透明），所以始终要画
+  function sceneWanted() { return !L.minimal || L.overlayWall || !!fxKind || preview !== 'live' || dayDemo; }
   function applyMinimal() {
     if (!gotLayout) return;
     if (sceneWanted()) {
@@ -1054,8 +1089,13 @@
     postScene();
   }
   // 底图画进一张不透明画布后立即丢掉图片：显存里只留一份整屏纹理（CSS 背景图会同时占着解码缓存和光栅瓦片两份）
+  // 极简模式和壁纸叠加都要垫系统壁纸：极简模式是"平时只有它"，壁纸叠加是"它从半透明的天空里透出来"
   function applyBackdrop() {
-    const b = L.minimal ? backdrop || {} : null;
+    const b = L.minimal || L.overlayWall ? backdrop || {} : null;
+    const hadReady = backReady;
+    // 壁纸叠加：底图还没到 / 没有底图时天空画不透明（不然揭掉天空就露出 WebView2 的黑底）
+    backReady = !!(b && (b.url || b.color));
+    if (backReady !== hadReady) { skySigLast = ''; lastSky = -1e9; }   // 天空那层要按新的不透明度重画
     backEl.style.display = b ? 'block' : 'none';   // 样式表默认 display:none
     const key = b ? (b.color || '') + '|' + (b.url || '') : '';
     if (key === backKey) return;
@@ -1102,6 +1142,7 @@
           Object.assign(L, m); gotLayout = true;
           if (m.keys) for (const k of Object.keys(weathers)) if (!m.keys.includes(k)) delete weathers[k];   // 不再用到的城市（卡片换了城市）：丢掉它的天气数据
           if (L.ground !== g0) { drops.length = 0; flakes.length = 0; firstFill = true; }   // 地平线变了：雨雪按新的落点重新生成
+          if (syncSkyAlpha()) { resize(); frame(performance.now()); }   // 切换壁纸叠加：天空画布整个换掉，重新分配后马上画一帧——别让合成器拿到一张空白的新画布
           pickWeather(); renderPanel(); applyBackdrop(); reportViewport();
           break;
         }
@@ -1128,6 +1169,11 @@
     L.panel = q.get('panel') !== '0'; L.primary = true; L.ground = 0.0444;
     L.scene = 'dbg'; L.cards = [{ id: 'dbg', key: 'dbg', x: Math.max(0, window.innerWidth - 336 - 28), y: 28 }];   // 一张卡片，右上角（尺寸同 .card）
     L.minimal = q.get('minimal') === '1'; fxKind = q.get('fx') || null;   // ?minimal=1&fx=rainbow 调试极简模式
+    // ?overlay=1&sky=0.45&back=图片URL 调试壁纸叠加（back 模拟宿主发来的系统壁纸底图；不填用灰色渐变占位）
+    L.overlayWall = q.get('overlay') === '1';
+    const sv = parseFloat(q.get('sky')); if (!isNaN(sv)) L.skyOpacity = clamp(sv, 0.05, 1);   // 写 0 夹到最小值，不当缺参
+    const cv = parseFloat(q.get('cloud')); if (!isNaN(cv)) L.cloudAlpha = clamp(cv, 0.1, 1);
+    if (L.overlayWall) backdrop = { url: q.get('back') || null, color: '#5b6470' };
     if (q.get('manual') === '1') {
       // 录制用：停掉 rAF，由外部按固定步长推进虚拟时钟逐帧绘制（截图慢也不影响动画流畅度）
       let vt = performance.now();
@@ -1142,6 +1188,7 @@
       const at = /^(\d+):(\d+)$/.exec(q.get('at') || '');   // ?at=13:00 固定当地时间
       if (at && !dayDemo) demo = { base: dayInfo(Date.now(), locInfo()).mid + (at[1] * 60 + +at[2]) * 60000, start: performance.now(), speed: 1 };
       tgt = targetScene();
+      if (syncSkyAlpha()) resize();
       applyBackdrop(); applyMinimal();
       wake();
     };

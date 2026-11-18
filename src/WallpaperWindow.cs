@@ -14,7 +14,7 @@ namespace WeatherWallpaper
         public bool Primary { get; }
         public string DeviceName { get; }
         public bool Ready { get; private set; }
-        public string BackdropJson;   // 极简模式底图消息：页面 ready 时由宿主在 layout 之后补发
+        public string BackdropJson;   // 系统壁纸底图消息（极简模式 / 壁纸叠加）：页面 ready 时由宿主在 layout 之后补发
         public string SceneKey = "";  // 这块屏的全屏天气画面跟着哪个城市（城市分组键）
         public string LayoutSent;     // 上次发给页面的布局（UpdateLayout 只在变化时发）
         public string FxSent;         // 上次发给页面的极简模式播放类型（只在变化时发）

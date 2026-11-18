@@ -127,7 +127,7 @@ namespace WeatherWallpaper
                 // 换壁纸（幻灯片每次切换）也走这里：工作区没变就不用重排
                 var wa = string.Join("|", Screen.AllScreens.Select(x => x.DeviceName + x.WorkingArea));
                 if (wa != lastWorkAreas) { lastWorkAreas = wa; ConfigureOverlay(); }
-                if (settings.Minimal) UpdateBackdrops(true);
+                if (NeedsBackdrop) UpdateBackdrops(true);
             };
             cardSaveTimer.Tick += (s, e) => FlushCardSave();
             SystemEvents.PowerModeChanged += (s, e) =>
@@ -366,7 +366,7 @@ namespace WeatherWallpaper
                     + (add.Count > 0 ? " +" + string.Join(",", add.Select(s => s.DeviceName)) : "") + (gone.Count > 0 ? " -" + string.Join(",", gone.Select(w => w.DeviceName)) : ""));
                 DesktopHost.FixZOrder(walls.Select(w => w.Handle).ToList());
                 ConfigureOverlay();   // 里面会 UpdateLayout（syncingWalls 挡住重入）
-                if (add.Count > 0) UpdateBackdrops(false);   // 新窗口要底图（极简模式）；已有屏的底图有缓存文件，不会重新生成
+                if (add.Count > 0) UpdateBackdrops(false);   // 新窗口要底图（极简模式 / 壁纸叠加）；已有屏的底图有缓存文件，不会重新生成
             }
             finally { syncingWalls = false; }
             return true;
@@ -460,6 +460,8 @@ namespace WeatherWallpaper
             return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", Inv)
                 + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel)
                 + ",\"fps\":" + w.Fps + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
+                + ",\"overlayWall\":" + B(settings.OverlayWall) + ",\"skyOpacity\":" + settings.SkyOpacityValue().ToString("F3", Inv)
+                + ",\"cloudAlpha\":" + settings.CloudAlphaValue().ToString("F3", Inv)
                 + ",\"scene\":" + WeatherService.JsonStr(w.SceneKey) + ",\"cards\":[" + cards + "]"
                 + ",\"keys\":[" + string.Join(",", cities.Keys.Select(WeatherService.JsonStr)) + "]}";   // 还在用的城市：页面据此丢掉不再用的天气数据
         }
@@ -681,7 +683,7 @@ namespace WeatherWallpaper
             // walls 为空时要判一次"是一张卡片都不在已连接的屏上，还是壁纸没建好 / 在排队重建"：FxStep 和下面的 perfText 都要用，算一次传下去
             var emptyScreens = walls.Count == 0 ? WallScreens() : null;
             FxStep(emptyScreens);
-            if (settings.Minimal && ++backdropCheck >= 43) { backdropCheck = 0; CheckBackdrops(); }   // 约 30 秒查一次（幻灯片放映换图不一定有广播）
+            if (NeedsBackdrop && ++backdropCheck >= 43) { backdropCheck = 0; CheckBackdrops(); }   // 约 30 秒查一次（幻灯片放映换图不一定有广播）
 
             if (locked) perfText = "已暂停（锁屏）";
             else if (walls.Count == 0) perfText = emptyScreens.Count == 0 ? "没有显示天气壁纸（已连接的屏上都没有卡片）" : "正在准备桌面…";
@@ -690,20 +692,37 @@ namespace WeatherWallpaper
             else perfText = $"{minFps} FPS" + (reasons.Count > 0 ? "（" + string.Join("，", reasons) + "）" : minFps < settings.Fps ? "（桌面大部分被遮挡）" : "");
         }
 
-        // ---------------------------------------------------------------- 极简模式：系统壁纸做底
+        /// <summary>
+        /// 开 / 关壁纸叠加：和极简模式互斥（极简模式平时不画天气，同时开着等于没有天气可叠）。
+        /// 打开时自动关掉极简模式，反过来打开极简模式时由那边的菜单项负责关掉壁纸叠加——两边的开关互相照应。
+        /// </summary>
+        void SetOverlayWall(bool on)
+        {
+            settings.OverlayWall = on;
+            if (on) settings.Minimal = false;
+            settings.Save();
+            ConfigureOverlay();
+            UpdateBackdrops(false);
+            Watch();
+        }
+
+        // ---------------------------------------------------------------- 极简模式 / 壁纸叠加：系统壁纸做底
         readonly WinTimer backdropTimer = new WinTimer { Interval = 1000 };
         int backdropGen, backdropCheck, backdropFails;
         string backdropKeys = "", backdropProbe;
         DateTime backdropRetryAt;
 
+        /// <summary>需要系统壁纸底图的模式：极简模式（平时只有它）和壁纸叠加（它从半透明的天空里透出来）。</summary>
+        bool NeedsBackdrop => settings.Minimal || settings.OverlayWall;
+
         /// <summary>
-        /// 极简模式下把每块屏的系统壁纸缩放好交给页面垫底；onlyIfChanged = 只在壁纸设置变了时才重新生成（定时检查用）。
-        /// 非极简模式下通知页面撤掉底图。
+        /// 把每块屏的系统壁纸缩放好交给页面垫底（极简模式 / 壁纸叠加）；onlyIfChanged = 只在壁纸设置变了时才重新生成（定时检查用）。
+        /// 两种模式都关时通知页面撤掉底图。
         /// </summary>
         async void UpdateBackdrops(bool onlyIfChanged)
         {
             var list = walls.ToList();
-            if (!settings.Minimal)
+            if (!NeedsBackdrop)
             {
                 ++backdropGen;   // 作废还在生成中的底图
                 backdropKeys = "";
@@ -1049,6 +1068,19 @@ namespace WeatherWallpaper
                     break;
                 case "card": OpenCardSettings(arg == "" ? CardSpec.DefaultId : arg == "new" ? null : arg); break;   // card [Id|new]：打开卡片设置
                 case "about": OpenAbout(); break;
+                case "overlay":   // overlay [on|off|<天空不透明度>|<天空> <云>]：壁纸叠加，直接写设置并立即生效（测试 / 调参用）
+                    var ov = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (ov.Length == 1 && (ov[0] == "on" || ov[0] == "off")) SetOverlayWall(ov[0] == "on");
+                    else if (ov.Length > 0)
+                    {
+                        settings.SkyOpacity = ov[0];
+                        if (ov.Length > 1) settings.CloudAlpha = ov[1];
+                        settings.NormalizeOpacities();
+                        settings.OverlayWall = true; settings.Minimal = false;
+                        settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch();
+                        Log.Write("overlay: sky " + settings.SkyOpacityValue().ToString("F2", Inv) + ", cloud " + settings.CloudAlphaValue().ToString("F2", Inv));
+                    }
+                    break;
                 case "rebuild": RebuildNow(); break;
                 case "quit": Quit(); break;
                 case "checkupdate": CheckUpdate(arg == "manual"); break;
@@ -1144,8 +1176,18 @@ namespace WeatherWallpaper
             // 菜单按常见托盘程序的习惯排：常用操作 → 显示相关的开关（细项收进子菜单）→ 系统相关（开机自启）→ 更新 / 关于 → 退出。
             // 检查更新、自动检查更新、设置文件、日志目录这些不常用的放进「关于」窗口
             var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
-            minimal.Click += (s, e) => { settings.Minimal = minimal.Checked; settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch(); };
+            minimal.Click += (s, e) =>
+            {
+                settings.Minimal = minimal.Checked;
+                if (settings.Minimal) settings.OverlayWall = false;   // 两者互斥：开极简模式就关掉壁纸叠加
+                settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch();
+            };
             menu.Items.Add(minimal);
+
+            // 壁纸叠加：系统壁纸常驻，天空半透明，云/日月/雨雪浮在壁纸上。和极简模式互斥（理由见互斥处理）
+            var overlayWall = new ToolStripMenuItem("壁纸叠加（保留系统壁纸，天气半透明地浮在上面）") { CheckOnClick = true };
+            overlayWall.Click += (s, e) => SetOverlayWall(overlayWall.Checked);
+            menu.Items.Add(overlayWall);
 
             var look = new ToolStripMenuItem("显示效果");
             var fx = new ToolStripMenuItem("任务栏雨雪效果") { CheckOnClick = true };
@@ -1188,6 +1230,8 @@ namespace WeatherWallpaper
             {
                 minimal.Checked = settings.Minimal;
                 minimal.Text = "极简模式（平时只显示卡片，天气变化时播放 " + settings.PlaySecondsValue() + " 秒）";
+                minimal.Enabled = !settings.OverlayWall;   // 两者互斥：壁纸叠加开着时极简模式不能再选
+                overlayWall.Checked = settings.OverlayWall;
                 startup.Checked = IsAutoStart();
                 updateItem.Visible = installing || NewerOffered;   // 正在更新时显示进度
             };
@@ -1718,7 +1762,7 @@ namespace WeatherWallpaper
             if (n.Same(settings)) { if (n.NeedsSave()) settings.Save(); return; }   // 整理后和内存一样，但文件本身要整理（如超过 8 张、缺默认卡片）：写回
             bool rebuildWalls = n.Layered != settings.Layered || n.DevTools != settings.DevTools;   // 别叫 walls：会遮住同名字段（壁纸窗口列表）
             bool cards = Js.Serialize(n.Cards) != Js.Serialize(settings.Cards);
-            bool minimal = n.Minimal != settings.Minimal;
+            bool backdrop = n.Minimal != settings.Minimal || n.OverlayWall != settings.OverlayWall;
             cardSaveTimer.Stop();   // 以文件为准：排着的卡片合并写盘作废，别过后拿 CopyFrom 之后的内存再写一遍
             settings.CopyFrom(n);
             if (n.NeedsSave()) settings.Save();   // 补了卡片 Id 等：写回，下次重新加载时 Id 不变
@@ -1735,7 +1779,7 @@ namespace WeatherWallpaper
             overlay.SetFps(settings.Fps);
             if (cards) SyncCities();
             if (rebuildWalls) RebuildNow();   // 排着的重建、等着的 restore 一并处理，别过后再来一遍
-            else { ConfigureOverlay(); if (minimal) UpdateBackdrops(false); }
+            else { ConfigureOverlay(); if (backdrop) UpdateBackdrops(false); }
             ApplyFlyoutMode();
             PostAbout();   // 「自动检查更新」可能在文件里改了
             Watch();
