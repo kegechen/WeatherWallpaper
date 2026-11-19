@@ -1229,6 +1229,8 @@ namespace WeatherWallpaper
             fx.Click += (s, e) => { settings.TaskbarFx = fx.Checked; settings.Save(); ConfigureOverlay(); };
             var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
             wfx.Click += (s, e) => { settings.WindowFx = wfx.Checked; settings.Save(); Watch(); };
+            var festive = new ToolStripMenuItem("节日效果") { CheckOnClick = true };
+            festive.Click += (s, e) => { settings.Festive = festive.Checked; settings.Save(); UpdateLayout(); };
             var fps60 = new ToolStripMenuItem("高帧率（60 FPS）") { CheckOnClick = true };
             fps60.Click += (s, e) => { settings.Fps = fps60.Checked ? 60 : 30; settings.Save(); overlay.SetFps(settings.Fps); ConfigureOverlay(); };
             // 省内存模式不再作为常规选项：想省资源用极简模式（静止时 CPU / GPU 为 0，内存也更低）；settings.json 里的 LowMemory 仍然有效。
@@ -1236,22 +1238,17 @@ namespace WeatherWallpaper
             var lowMem = new ToolStripMenuItem("省内存模式") { CheckOnClick = true };
             lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); ApplyFlyoutMode(); };
             var status = new ToolStripMenuItem("状态") { Enabled = false };   // 当前帧率 / 暂停原因，和这些开关放一起看
-            look.DropDownItems.Add(fx); look.DropDownItems.Add(wfx); look.DropDownItems.Add(fps60); look.DropDownItems.Add(lowMem);
+            look.DropDownItems.Add(fx); look.DropDownItems.Add(wfx); look.DropDownItems.Add(festive); look.DropDownItems.Add(fps60); look.DropDownItems.Add(lowMem);
             look.DropDownItems.Add(new ToolStripSeparator());
             look.DropDownItems.Add(status);
             look.DropDownOpening += (s, e) =>
             {
                 lowMem.Checked = settings.LowMemory; lowMem.Visible = settings.LowMemory;
-                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx;
+                fx.Checked = settings.TaskbarFx; wfx.Checked = settings.WindowFx; festive.Checked = settings.Festive;
                 fps60.Checked = settings.Fps >= 60;
                 status.Text = "当前：" + (perfText == "" ? "启动中" : perfText);
             };
             menu.Items.Add(look);
-
-            // 节日效果：到了节日桌面自动换上应景的装饰；雪人、流星这些彩蛋也归它管
-            var festive = new ToolStripMenuItem("节日效果") { CheckOnClick = true };
-            festive.Click += (s, e) => { settings.Festive = festive.Checked; settings.Save(); UpdateLayout(); };
-            menu.Items.Add(festive);
             menu.Items.Add(pv);
 
             var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
@@ -1284,7 +1281,6 @@ namespace WeatherWallpaper
 
             menu.Opening += (s, e) =>
             {
-                festive.Checked = settings.Festive;
                 minimal.Checked = settings.Minimal;
                 minimal.Text = "极简模式（平时只显示卡片，天气变化时播放 " + settings.PlaySecondsValue() + " 秒）";
                 // 普通模式 / 壁纸叠加 / 极简模式三种状态可以任意直接切换：勾选哪个就切到哪个（打开一个自动关掉另一个），取消勾选回到普通模式
