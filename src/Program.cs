@@ -90,6 +90,11 @@ namespace WeatherWallpaper
         // 天气预览的时长与极简模式每次播放的时长是同一个设置（PlaySeconds）；一天快进固定 48 秒走完一遍后恢复
         const int DayDemoSeconds = 49;
         bool locked;
+        // 自定义效果（见 Effects）：当前的文件列表，跟着 layout 发给页面
+        List<KeyValuePair<string, long>> effects = new List<KeyValuePair<string, long>>();
+        string effectsJson = "[]";
+        FileSystemWatcher effectsWatcher;
+        readonly WinTimer effectsRescan = new WinTimer { Interval = 600 };
         string perfText = "";
         readonly PerfMonitor perf = new PerfMonitor();
         static readonly JavaScriptSerializer Js = new JavaScriptSerializer();
@@ -112,7 +117,10 @@ namespace WeatherWallpaper
                 if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.ConsoleDisconnect || e.Reason == SessionSwitchReason.RemoteDisconnect)
                 { locked = true; Log.Write("session: lock (" + e.Reason + ")"); }
                 else if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.ConsoleConnect || e.Reason == SessionSwitchReason.RemoteConnect)
-                { locked = false; Log.Write("session: unlock (" + e.Reason + ")"); }
+                {
+                    locked = false; Log.Write("session: unlock (" + e.Reason + ")");
+                    foreach (var w in walls) w.Post("{\"t\":\"unlock\"}");   // 国庆节当天解锁时升旗（页面自己按天、按屏只升一次）
+                }
                 Watch();
             };
             SystemEvents.UserPreferenceChanged += (s, e) =>
@@ -141,6 +149,7 @@ namespace WeatherWallpaper
             };
             StartUpdateTimer();
             WatchSettings();
+            WatchEffects();
             Init();
         }
 
@@ -461,8 +470,9 @@ namespace WeatherWallpaper
                 + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel)
                 + ",\"fps\":" + w.Fps + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
                 + ",\"overlayWall\":" + B(settings.OverlayWall) + ",\"skyOpacity\":" + settings.SkyOpacityValue().ToString("F3", Inv)
-                + ",\"cloudAlpha\":" + settings.CloudAlphaValue().ToString("F3", Inv)
-                + ",\"scene\":" + WeatherService.JsonStr(w.SceneKey) + ",\"cards\":[" + cards + "]"
+                + ",\"cloudAlpha\":" + settings.CloudAlphaValue().ToString("F3", Inv) + ",\"festive\":" + B(settings.Festive)
+                + ",\"scene\":" + WeatherService.JsonStr(w.SceneKey) + ",\"screen\":" + WeatherService.JsonStr(w.DeviceName) + ",\"cards\":[" + cards + "]"
+                + ",\"effects\":" + effectsJson
                 + ",\"keys\":[" + string.Join(",", cities.Keys.Select(WeatherService.JsonStr)) + "]}";   // 还在用的城市：页面据此丢掉不再用的天气数据
         }
         static string B(bool b) => b ? "true" : "false";
@@ -693,8 +703,8 @@ namespace WeatherWallpaper
         }
 
         /// <summary>
-        /// 开 / 关壁纸叠加：和极简模式互斥（极简模式平时不画天气，同时开着等于没有天气可叠）。
-        /// 打开时自动关掉极简模式，反过来打开极简模式时由那边的菜单项负责关掉壁纸叠加——两边的开关互相照应。
+        /// 开 / 关壁纸叠加：它和极简模式是普通模式的两个变体，同时只能开一个（极简模式平时不画天气，没有天气可叠）。
+        /// 打开时自动关掉极简模式，反过来打开极简模式时由那边的菜单项负责关掉壁纸叠加——两边的开关互相照应，勾哪个直接切到哪个。
         /// </summary>
         void SetOverlayWall(bool on)
         {
@@ -1081,6 +1091,10 @@ namespace WeatherWallpaper
                         Log.Write("overlay: sky " + settings.SkyOpacityValue().ToString("F2", Inv) + ", cloud " + settings.CloudAlphaValue().ToString("F2", Inv));
                     }
                     break;
+                case "festive":   // festive [on|off]：节日装饰与彩蛋开关（不带参数 = 切换）
+                    settings.Festive = arg == "" ? !settings.Festive : arg != "off";
+                    settings.Save(); UpdateLayout();
+                    break;
                 case "rebuild": RebuildNow(); break;
                 case "quit": Quit(); break;
                 case "checkupdate": CheckUpdate(arg == "manual"); break;
@@ -1128,7 +1142,6 @@ namespace WeatherWallpaper
             var menu = new ContextMenuStrip();
 
             menu.Items.Add("立即刷新天气", null, (s, e) => RefreshAll(true));
-            menu.Items.Add("卡片设置…", null, (s, e) => OpenCardSettings(CardSpec.DefaultId));   // 新增、切换、删除卡片都在设置窗口里
             menu.Items.Add(new ToolStripSeparator());
 
             var pv = new ToolStripMenuItem("效果预览");
@@ -1138,7 +1151,7 @@ namespace WeatherWallpaper
                 new[] { "clear", "晴天" }, new[] { "sunrise", "晴 · 日出" }, new[] { "sunset", "晴 · 日落" }, new[] { "night", "晴 · 夜晚" },
                 new[] { "partly", "多云" }, new[] { "cloudy", "阴天" }, new[] { "fog", "雾" }, null,
                 new[] { "drizzle", "毛毛雨" }, new[] { "rain", "中雨" }, new[] { "heavy", "暴雨" }, new[] { "thunder", "雷阵雨" }, new[] { "snow", "雪" },
-                new[] { "rainbow", "雨后彩虹" }, null,
+                new[] { "rainbow", "雨后彩虹" },
             };
             ToolStripMenuItem liveIt = null;
             foreach (var m in modes)
@@ -1155,6 +1168,41 @@ namespace WeatherWallpaper
                 pv.DropDownItems.Add(it);
                 if (key == "live") liveIt = it;
             }
+            // 节日装饰单独收进一个子菜单（预览里不管「节日装饰与彩蛋」开没开都照常演示）
+            var festPv = new ToolStripMenuItem("节日");
+            foreach (var m in new[]
+            {
+                new[] { "cny", "春节（灯笼 · 烟花）" }, new[] { "lantern", "元宵节（花灯 · 烟花）" }, new[] { "dragon", "端午节（粽子 · 艾草）" },
+                new[] { "midautumn", "中秋节（灯笼 · 月饼 · 玉兔）" }, new[] { "national", "国庆节（国旗）" }, new[] { "newyear", "跨年（烟花）" },
+                new[] { "halloween", "万圣节（南瓜灯 · 蝙蝠）" }, new[] { "xmas", "圣诞节（圣诞树 · 雪人 · 雪橇）" }, new[] { "easter", "复活节（彩蛋 · 兔子）" },
+            })
+            {
+                var key = m[0];
+                var it = new ToolStripMenuItem(m[1]) { Tag = key };
+                it.Click += (s, e) => SetPreview(key, previewDay);
+                festPv.DropDownItems.Add(it);
+            }
+            pv.DropDownItems.Add(festPv);
+            // 自定义效果：effects 文件夹里的每个脚本一项（每次打开「效果预览」时按当前文件列表重建），末尾是「打开效果文件夹」
+            var userPv = new ToolStripMenuItem("自定义效果");
+            Action fillUser = () =>
+            {
+                foreach (var o in userPv.DropDownItems.Cast<ToolStripItem>().ToList()) o.Dispose();   // Dispose 会把它从菜单里拿掉
+                foreach (var ef in effects)
+                {
+                    var key = "user:" + ef.Key;
+                    var it = new ToolStripMenuItem(ef.Key) { Tag = key, Checked = preview == key };
+                    it.Click += (s, e) => SetPreview(key, previewDay);
+                    userPv.DropDownItems.Add(it);
+                }
+                if (effects.Count == 0) userPv.DropDownItems.Add(new ToolStripMenuItem("（文件夹里还没有效果脚本）") { Enabled = false });
+                userPv.DropDownItems.Add(new ToolStripSeparator());
+                userPv.DropDownItems.Add("打开效果文件夹（照着里面的示例写自己的效果）…", null, (s, e) => OpenEffectsDir());
+                userPv.Checked = preview.StartsWith("user:", StringComparison.Ordinal);
+            };
+            fillUser();
+            pv.DropDownItems.Add(userPv);
+            pv.DropDownItems.Add(new ToolStripSeparator());
             var dayIt = new ToolStripMenuItem("一天快进演示（按上面所选天气，48 秒一遍）");
             dayIt.Click += (s, e) => SetPreview(preview, !previewDay);
             pv.DropDownItems.Add(dayIt);
@@ -1162,7 +1210,10 @@ namespace WeatherWallpaper
             pv.DropDownItems.Add(pvTip);
             pv.DropDownOpening += (s, e) =>
             {
-                foreach (var o in pv.DropDownItems.OfType<ToolStripMenuItem>()) if (o.Tag is string) o.Checked = (string)o.Tag == preview;
+                foreach (var o in pv.DropDownItems.OfType<ToolStripMenuItem>().Concat(festPv.DropDownItems.OfType<ToolStripMenuItem>()))
+                    if (o.Tag is string) o.Checked = (string)o.Tag == preview;
+                festPv.Checked = festPv.DropDownItems.OfType<ToolStripMenuItem>().Any(o => o.Checked);
+                fillUser();
                 dayIt.Checked = previewDay;
                 // 极简模式：「当前天气」只在真正播放时打勾；平时桌面上是系统壁纸，什么都不勾
                 if (settings.Minimal && preview == "live" && !previewDay && !AnyFx()) liveIt.Checked = false;
@@ -1171,25 +1222,9 @@ namespace WeatherWallpaper
                 var left = (int)Math.Ceiling((previewUntil - DateTime.Now).TotalSeconds);
                 pvTip.Text = previewTimer.Enabled && left > 0 ? $"{left} 秒后{back}" : $"预览 {settings.PlaySecondsValue()} 秒后自动{back}";
             };
-            menu.Items.Add(pv);
-
-            // 菜单按常见托盘程序的习惯排：常用操作 → 显示相关的开关（细项收进子菜单）→ 系统相关（开机自启）→ 更新 / 关于 → 退出。
+            // 菜单按常见托盘程序的习惯排：常用操作（刷新）→ 各种效果（效果设置 / 节日 / 预览 / 两个显示模式）→ 系统相关（自启 / 卡片 / 关于）→ 退出。
             // 检查更新、自动检查更新、设置文件、日志目录这些不常用的放进「关于」窗口
-            var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
-            minimal.Click += (s, e) =>
-            {
-                settings.Minimal = minimal.Checked;
-                if (settings.Minimal) settings.OverlayWall = false;   // 两者互斥：开极简模式就关掉壁纸叠加
-                settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch();
-            };
-            menu.Items.Add(minimal);
-
-            // 壁纸叠加：系统壁纸常驻，天空半透明，云/日月/雨雪浮在壁纸上。和极简模式互斥（理由见互斥处理）
-            var overlayWall = new ToolStripMenuItem("壁纸叠加（保留系统壁纸，天气半透明地浮在上面）") { CheckOnClick = true };
-            overlayWall.Click += (s, e) => SetOverlayWall(overlayWall.Checked);
-            menu.Items.Add(overlayWall);
-
-            var look = new ToolStripMenuItem("显示效果");
+            var look = new ToolStripMenuItem("效果设置");
             var fx = new ToolStripMenuItem("任务栏雨雪效果") { CheckOnClick = true };
             fx.Click += (s, e) => { settings.TaskbarFx = fx.Checked; settings.Save(); ConfigureOverlay(); };
             var wfx = new ToolStripMenuItem("窗口顶边雨滴 / 积雪（屋檐）") { CheckOnClick = true };
@@ -1213,24 +1248,46 @@ namespace WeatherWallpaper
             };
             menu.Items.Add(look);
 
+            // 节日效果：到了节日桌面自动换上应景的装饰；雪人、流星这些彩蛋也归它管
+            var festive = new ToolStripMenuItem("节日效果") { CheckOnClick = true };
+            festive.Click += (s, e) => { settings.Festive = festive.Checked; settings.Save(); UpdateLayout(); };
+            menu.Items.Add(festive);
+            menu.Items.Add(pv);
+
+            var minimal = new ToolStripMenuItem("极简模式") { CheckOnClick = true };   // 文字在菜单弹出时按 PlaySeconds 填
+            minimal.Click += (s, e) =>
+            {
+                settings.Minimal = minimal.Checked;
+                if (settings.Minimal) settings.OverlayWall = false;   // 两者互斥：开极简模式就关掉壁纸叠加
+                settings.Save(); ConfigureOverlay(); UpdateBackdrops(false); Watch();
+            };
+            menu.Items.Add(minimal);
+
+            // 壁纸叠加：普通模式的变体——系统壁纸常驻，天空半透明，云/日月/雨雪浮在壁纸上
+            var overlayWall = new ToolStripMenuItem("壁纸叠加") { CheckOnClick = true };
+            overlayWall.Click += (s, e) => SetOverlayWall(overlayWall.Checked);
+            menu.Items.Add(overlayWall);
+
+            menu.Items.Add(new ToolStripSeparator());
             var startup = new ToolStripMenuItem("开机自启") { CheckOnClick = true };
             startup.Click += (s, e) => SetAutoStart(startup.Checked);
             menu.Items.Add(startup);
-            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("卡片设置…", null, (s, e) => OpenCardSettings(CardSpec.DefaultId));   // 新增、切换、隐藏、删除卡片都在设置窗口里
 
             // 有新版本时才出现（加粗）；平时检查更新在「关于」里
             updateItem = new ToolStripMenuItem("更新", null, (s, e) => { if (newer != null) PromptUpdate(newer); }) { Visible = false };
             updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
             menu.Items.Add(updateItem);
-            menu.Items.Add("关于天气壁纸…", null, (s, e) => OpenAbout());
+            menu.Items.Add("关于", null, (s, e) => OpenAbout());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (s, e) => Quit());
 
             menu.Opening += (s, e) =>
             {
+                festive.Checked = settings.Festive;
                 minimal.Checked = settings.Minimal;
                 minimal.Text = "极简模式（平时只显示卡片，天气变化时播放 " + settings.PlaySecondsValue() + " 秒）";
-                minimal.Enabled = !settings.OverlayWall;   // 两者互斥：壁纸叠加开着时极简模式不能再选
+                // 普通模式 / 壁纸叠加 / 极简模式三种状态可以任意直接切换：勾选哪个就切到哪个（打开一个自动关掉另一个），取消勾选回到普通模式
                 overlayWall.Checked = settings.OverlayWall;
                 startup.Checked = IsAutoStart();
                 updateItem.Visible = installing || NewerOffered;   // 正在更新时显示进度
@@ -1716,6 +1773,13 @@ namespace WeatherWallpaper
         FileSystemWatcher settingsWatcher;
         readonly WinTimer settingsReload = new WinTimer { Interval = 400 };
 
+        /// <summary>在资源管理器里打开自定义效果文件夹（不在了就重新建上、放回示例）。</summary>
+        void OpenEffectsDir()
+        {
+            Effects.EnsureDir();
+            OpenUrl("explorer.exe", "\"" + Effects.Dir + "\"");
+        }
+
         /// <summary>用记事本打开 settings.json（格式化成多行便于编辑），保存后自动重新加载。</summary>
         void OpenSettingsFile()
         {
@@ -1736,6 +1800,48 @@ namespace WeatherWallpaper
             // 写盘时发现文件被外部改过（Save 没写）：排一次重新加载，以文件为准（监视器漏了事件也不会一直卡在"写不进去"）
             Settings.ExternalChange += () => { if (quitStage == 0) { settingsReload.Stop(); settingsReload.Start(); } };
             settingsWatcher.EnableRaisingEvents = true;
+        }
+
+        /// <summary>
+        /// 自定义效果文件夹：增删、改了 .js 就重新扫一遍，列表变了通过 layout 告诉页面（页面整页重载、重新加载脚本）。
+        /// 监视整个设置目录（含子目录）而不是 effects 本身：effects 文件夹被删掉再建回来也照样能收到
+        /// </summary>
+        void WatchEffects()
+        {
+            Effects.EnsureDir();
+            effects = Effects.Scan();
+            effectsJson = Effects.Json(effects);
+            if (effects.Count > 0) Log.Write("effects: " + string.Join(", ", effects.Select(e => e.Key)));
+            var dir = Effects.Dir;
+            var ui = SynchronizationContext.Current;
+            effectsRescan.Tick += (s, e) => { effectsRescan.Stop(); if (quitStage == 0) RescanEffects(); };
+            try
+            {
+                effectsWatcher = new FileSystemWatcher(Settings.AppDataDir) { IncludeSubdirectories = true, InternalBufferSize = 64 * 1024, NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName | NotifyFilters.DirectoryName };
+                Action<string> h = p =>
+                {
+                    if (p == null || !p.StartsWith(dir, StringComparison.OrdinalIgnoreCase)) return;   // settings.json 之类的不管
+                    ui?.Post(_ => { effectsRescan.Stop(); effectsRescan.Start(); }, null);              // 编辑器保存时往往连着来好几个事件：合并成一次
+                };
+                effectsWatcher.Changed += (s, e) => h(e.FullPath);
+                effectsWatcher.Created += (s, e) => h(e.FullPath);
+                effectsWatcher.Deleted += (s, e) => h(e.FullPath);
+                effectsWatcher.Renamed += (s, e) => { h(e.FullPath); h(e.OldFullPath); };
+                // 卡片拖动等高频写盘可能挤爆监视缓冲（事件被丢）：出了错就补扫一次，最多晚 600 毫秒，不会一直丢
+                effectsWatcher.Error += (s, e) => { Log.Write("effects watch: " + e.GetException().Message); ui?.Post(_ => { effectsRescan.Stop(); effectsRescan.Start(); }, null); };
+                effectsWatcher.EnableRaisingEvents = true;
+            }
+            catch (Exception ex) { Log.Write("effects watch: " + ex.Message); }
+        }
+
+        void RescanEffects()
+        {
+            var list = Effects.Scan();
+            var j = Effects.Json(list);
+            if (j == effectsJson) return;
+            effects = list; effectsJson = j;
+            Log.Write("effects changed: " + (list.Count == 0 ? "(none)" : string.Join(", ", list.Select(e => e.Key))));
+            UpdateLayout();
         }
 
         int reloadRetries;   // 文件被占着读不出来时，连着重读的次数
@@ -2011,6 +2117,7 @@ namespace WeatherWallpaper
                         case "issues": OpenUrl(Updater.IssuesPage); break;
                         case "settings": OpenSettingsFile(); break;
                         case "logs": OpenUrl("explorer.exe", "\"" + Settings.LocalDir + "\""); break;
+                        case "effects": OpenEffectsDir(); break;
                     }
                     break;
             }
@@ -2031,7 +2138,7 @@ namespace WeatherWallpaper
                 return;
             }
             quitStage = 2;
-            watchTimer.Stop(); weatherTimer.Stop(); updateTimer.Stop(); settingsWatcher?.Dispose();
+            watchTimer.Stop(); weatherTimer.Stop(); updateTimer.Stop(); settingsWatcher?.Dispose(); effectsWatcher?.Dispose(); effectsRescan.Stop();
             tray.Visible = false;
             draft = null;
             FlushCardSave();

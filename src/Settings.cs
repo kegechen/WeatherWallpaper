@@ -84,6 +84,7 @@ namespace WeatherWallpaper
         public bool TaskbarFx { get; set; } = true;
         public bool ShowPanel { get; set; } = true;    // 所有卡片的总开关
         public bool WindowFx { get; set; } = true;     // 窗口顶边"屋檐"雨滴 / 积雪
+        public bool Festive { get; set; } = true;      // 节日装饰与彩蛋（灯笼、烟花、圣诞树、雪人、流星…）
         public string Layered { get; set; } = "auto"; // auto / on / off：24H2 桌面结构下是否给壁纸窗口加 WS_EX_LAYERED
         public bool DevTools { get; set; }
         public bool LowMemory { get; set; }            // 省内存模式：背景半分辨率 + 渐变缓存 + 颜色量化（默认关，画面略软）
@@ -345,6 +346,8 @@ namespace WeatherWallpaper
             ["TaskbarFx"] = "任务栏雨雪效果：true 开 / false 关",
             ["ShowPanel"] = "桌面天气卡片总开关：true 显示 / false 全部隐藏（隐藏后可左键点托盘图标查看）",
             ["WindowFx"] = "窗口顶边雨滴 / 积雪（屋檐）：true / false",
+            ["Festive"] = "节日装饰与彩蛋：true 开 / false 关。按天气所在城市的当地日期，春节、元宵、端午、中秋、国庆、万圣节、圣诞节、复活节挂上应景的装饰" +
+                "（灯笼、粽子、月饼、国旗、南瓜灯、圣诞树、彩蛋兔子），春节、元宵、国庆、跨年的夜里放烟花；平时下雪下久了地上会堆起雪人，晴朗的夜里偶尔划过一颗流星",
             ["Layered"] = "兼容选项，一般不用改：auto / on / off",
             ["DevTools"] = "开发调试用：true 允许打开 WebView2 开发者工具",
             ["LowMemory"] = "省内存模式：true 开 / false 关。开启后约少 30–50 MB，代价是背景画面略软、渐变可能有极细微色带，托盘面板每次打开要等约 1 秒",

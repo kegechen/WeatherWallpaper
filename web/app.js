@@ -90,7 +90,7 @@
   // cards：这块屏上的卡片 [{id, key, x, y}]（位置由宿主算好，CSS 像素）；scene：全屏天气画面跟着哪个城市（城市键）
   // overlayWall：壁纸叠加——天空半透明、系统壁纸常驻垫底；skyOpacity：天空那层的不透明度（0.05–1）；
   // cloudAlpha：云的不透明度（极简模式不叠壁纸时恒为 1）
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, scene: '', cards: [] };
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, scene: '', cards: [] };
 
   let W = 0, H = 0, DPR = 1;
   // weathers：各城市的天气（城市键 → 宿主发来的 weather 消息）；weather：画面城市的那一份（天空、太阳、雨雪都按它）
@@ -184,6 +184,16 @@
     heavy: { code: 65, cc: 100, wind: 32, label: '暴雨' }, thunder: { code: 95, cc: 100, wind: 25, label: '雷阵雨' },
     snow: { code: 73, cc: 100, wind: 8, label: '雪' },
     rainbow: { code: 1, cc: 20, time: 'bow', bow: true, label: '雨后彩虹' },
+    // 节日预览：fest = 按哪个节日装饰，fw = 烟花密度（1 隔一阵一发 / 2 零点前后那样密），moon: 'full' = 按满月画
+    cny: { code: 0, cc: 5, time: 'night', fest: 'cny', fw: 2, label: '春节' },
+    lantern: { code: 0, cc: 5, time: 'night', fest: 'lantern', fw: 1, moon: 'full', label: '元宵节' },
+    dragon: { code: 1, cc: 25, time: 'day', fest: 'dragon', label: '端午节' },
+    midautumn: { code: 0, cc: 5, time: 'night', fest: 'moon', moon: 'full', label: '中秋节' },
+    national: { code: 0, cc: 10, time: 'day', fest: 'national', label: '国庆节' },
+    newyear: { code: 0, cc: 5, time: 'night', fest: 'newyear', fw: 2, label: '跨年' },
+    xmas: { code: 73, cc: 100, wind: 6, time: 'night', fest: 'xmas', label: '圣诞节' },
+    halloween: { code: 1, cc: 20, time: 'night', fest: 'halloween', label: '万圣节' },
+    easter: { code: 1, cc: 15, time: 'day', fest: 'easter', label: '复活节' },
   };
   let dayDemo = false;
   const previewLabel = () => {
@@ -211,7 +221,17 @@
   /// mode：天气预览（live = 实时天气）；day：一天快进演示（用 mode 的天气，从凌晨 4 点快进 24 小时，48 秒走一遍）
   function setPreview(mode, day) {
     const keepDemo = !!day && dayDemo && demo;   // 演示进行中只换天气，时间轴接着走
+    const was = preview;
+    // 自定义效果的预览（user:文件名）可能比效果脚本先到：先按实时天气，脚本注册时再切过去
+    userPv = typeof mode === 'string' && mode.startsWith('user:') && !PREV[mode] ? { mode, day } : null;
     preview = PREV[mode] ? mode : 'live';
+    // 预览里堆的雪人别带回实时画面：进预览时记下积雪，回到实时天气时还原
+    if (was === 'live' && preview !== 'live') snowSaved = { acc: snowAcc, men: men.slice() };
+    else if (was !== 'live' && preview === 'live' && snowSaved) { snowAcc = snowSaved.acc; snowSaved.men.forEach((m, i) => { men[i] = m; }); snowSaved = null; }
+    if (preview !== 'live' && preview !== was) { snowAcc = 0; men.fill(null); }   // 每个预览都从光秃秃的地面开始：别把圣诞预览的雪人带进复活节
+    festAt = -1e9;   // 节日马上按新的预览重新算
+    flagPv = false;  // 再选一次国庆预览：再演示一遍升旗
+    if (PREV[preview] && PREV[preview].fest) { sleighNext = simT + 2.5; batNext = simT + 2; }   // 预览只有几十秒：雪橇、蝙蝠马上就来
     dayDemo = !!day;
     const pv = PREV[preview], li = locInfo(), t = Date.now(), di = dayInfo(t, li);
     if (!keepDemo) demo = null;
@@ -220,6 +240,7 @@
     else if (pv && pv.time === 'set' && di.set) demo = { base: di.set - 45 * 60000, start: performance.now(), speed: 20 };
     else if (pv && pv.time === 'night') demo = { base: nightAt(di, li), start: performance.now(), speed: 1 };
     else if (pv && pv.time === 'bow') demo = { base: bowAt(di, li), start: performance.now(), speed: 1 };
+    else if (pv && pv.time === 'day') demo = { base: di.mid + 13.5 * 3600000, start: performance.now(), speed: 1 };   // 白天的节日装饰：下午一点半
     tgt = targetScene();
     renderPanel();
   }
@@ -387,6 +408,282 @@
     return { main: pts, branches };
   }
 
+  // ------------------------------------------------------------------ 彩蛋：雪地 / 雪人 / 流星 / 节日
+  // 都归设置里的「节日装饰与彩蛋」（Festive）管；效果预览里不管开没开都照常演示
+  const qParam = k => new URLSearchParams(location.search).get(k);
+  const eggsOn = () => L.festive || preview !== 'live';
+  // 今天的节日（按天气所在城市的当地日期，见 fest.js）。预览里选了节日就只按预览的来
+  let fest = { keys: [], fw: 0 }, festAt = -1e9;
+  const DECOR = new Set(['cny', 'lantern', 'dragon', 'moon', 'national', 'halloween', 'xmas', 'easter']);   // 有装饰的节日（跨年只放烟花）
+  const hasFest = k => fest.keys.includes(k);
+  const festDecor = () => fest.keys.some(k => DECOR.has(k));
+  const festBorn = {};   // 节日装饰出现的时刻（simT）：先"长"出来 / 灯笼从上面落下来
+  function refreshFest() {
+    const pv = PREV[preview];
+    if (pv && pv.fest) fest = { keys: [pv.fest], fw: pv.fw || 0 };
+    else if (!L.festive || !window.FEST) fest = { keys: [], fw: 0 };
+    else fest = window.FEST.at(now() + locInfo().off * 1000);
+    if (qParam('fest') && !(pv && pv.fest)) fest = { keys: qParam('fest').split(','), fw: +qParam('fw') || 0 };   // 调试：?fest=xmas,national&fw=1
+    for (const k of fest.keys) if (festBorn[k] == null) festBorn[k] = simT;
+    for (const k in festBorn) if (!fest.keys.includes(k)) delete festBorn[k];
+    checkFlag();
+    refreshUserFx();
+  }
+  const pvFest = () => !!(PREV[preview] && PREV[preview].fest);
+
+  // 降雪积累：下雪时按强度攒"降雪秒数"（地面先铺出雪地，攒得够久陆续堆起小雪人），停雪后慢慢消融，雪人也跟着化掉
+  let snowAcc = 0, snowSaved = null;
+  const SNOW_AT = [300, 660, 1020];   // 攒到多少"降雪秒数"堆第 1 / 2 / 3 个雪人（约 5 / 11 / 17 分钟的雪）；圣诞节快三倍多
+  const SNOW_MELT = 0.45;             // 停雪后每秒消掉的量，约为积累速度的一半：雪停了雪人还在，过一阵才化
+  const men = [null, null, null];     // 三个雪人坑位（按堆出来的顺序站左 / 中 / 右）
+  const snowFast = qParam('snowfast') === '1' ? 30 : 1;   // 调试：积累 / 消融 30 倍速，方便看效果
+  const snowCover = () => smooth(45, 420, snowAcc);
+  const decorOn = () => snowAcc > 2 || !!(men[0] || men[1] || men[2]) || festDecor() || userFxOn();   // 地上有东西：前景层保持分配、低频重画
+  const easeBack = t => { const c = 1.6, u = t - 1; return 1 + u * u * ((c + 1) * u + c); };   // 雪人从雪地里冒出来时带一点回弹
+  // easeBack 的反函数（[0, 0.59] 单调上升段，雪人复活倒推生长进度用；y 最大 1，段内够用）
+  const backOf = y => { let a = 0, b = 0.59; for (let i = 0; i < 22; i++) { const t = (a + b) / 2; if (easeBack(t) < y) a = t; else b = t; } return (a + b) / 2; };
+  const growK = m => m.dying ? Math.max(0, 1 - (simT - m.dying) / 9) : Math.min(1, (simT - m.born) / 3.5);
+  function stepEaster(dt) {
+    if (!eggsOn()) { snowAcc = 0; men.fill(null); return; }
+    const fast = snowFast * (preview !== 'live' ? 20 : 1);   // 预览只有几十秒：雪人堆得快一些才看得到
+    snowAcc = clamp(snowAcc + (cur.snow > 0.04 ? dt * (0.4 + 0.6 * cur.snow) : -dt * SNOW_MELT) * fast, 0, 1400);
+    const xk = hasFest('xmas') ? 0.3 : 1;   // 圣诞节：一下雪很快就有雪人
+    for (let i = 0; i < 3; i++) {
+      const at = SNOW_AT[i] * xk;
+      if (!men[i]) {
+        if (snowAcc >= at) { men[i] = { xf: [0.22, 0.53, 0.79][i] + (rand() - 0.5) * 0.1, z: 0.55 + 0.45 * rand(), born: simT, dying: 0 }; wake(); }
+      } else if (men[i].dying) {
+        if (snowAcc >= at) {
+          // 又下回来了：接着化掉时的样子长回去。化着的高度是 size×(0.35+0.65g)、透明度是 g，
+          // 生长分支画的是 size×easeBack(gk)、透明度 1——高度用反函数倒推 born 对齐，透明度和脚下的水洼走 1.2 秒过渡（画的地方看 fadeAt）
+          const m = men[i], g = Math.max(0, 1 - (simT - m.dying) / 9);
+          m.born = simT - 3.5 * backOf(0.35 + 0.65 * g);
+          m.fadeAt = simT; m.fadeFrom = g;
+          m.dying = 0;
+        }
+        else if (simT - men[i].dying > 9) men[i] = null;  // 化完，收走
+      } else if (snowAcc < at - 90 * xk) men[i].dying = simT;  // 消融到阈值以下：开始化（留一点迟滞，别在阈值边上反复横跳）
+    }
+  }
+  // 流星：晴朗的夜隔一阵子划一颗。星空夜本来就要 300ms 一档重画闪烁的星星，只有飞行中的零点几秒才需要满帧
+  const meteorAsk = qParam('meteor') === '1';   // 调试：条件一满足立刻先划一颗
+  let meteor = null, meteorNext = meteorAsk ? 0 : 45 + rand() * 150;
+  function stepMeteor(dt) {
+    if (meteor) {
+      meteor.t += dt;
+      if (meteor.t >= meteor.dur) { meteor = null; meteorNext = simT + 100 + rand() * 260; }
+      return;
+    }
+    if (simT < meteorNext || !eggsOn()) return;
+    if (lastStarA > 0.45 && cur.cloud < 0.35 && cur.fog < 0.2 && cur.rain < 0.05 && cur.snow < 0.04) {
+      const dir = rand() < 0.5 ? 1 : -1;   // 往右下或左下划（ang 只给向下的斜率，水平方向由 dir 翻转——cos 是偶函数，直接乘进角一半流星会往上飞）
+      meteor = { t: 0, dur: 0.75 + rand() * 0.4, x0: W * (dir > 0 ? 0.12 + rand() * 0.6 : 0.3 + rand() * 0.58), y0: H * (0.04 + rand() * 0.26), len: W * (0.09 + rand() * 0.06), ang: 0.3 + rand() * 0.22, dir };
+      wake();   // 马上按满帧画它
+    } else meteorNext = simT + (meteorAsk ? 1 : 20);   // 阴天 / 雨雪 / 天亮了：过一会儿再看
+  }
+
+  // 烟花：春节每晚、元宵、国庆、跨年的夜里（时段见 fest.js）。下雨打雷不放；只有空中有烟花的那几秒才满帧
+  const rockets = [], bursts = [], flashes = [];
+  let fwNext = 0;
+  const FW_COLORS = ['#ff5a5a', '#ffd25a', '#7dff8a', '#5ac8ff', '#c78bff', '#ffffff', '#ffa04d', '#ff7ad9'];
+  function launch(x, apex) {   // x / apex：从哪升空、在多高炸开（不填就随机；自定义效果的 fx.firework 会填）
+    const k = H / 1080, hz = horizonY(), dur = 1 + rand() * 0.5;
+    if (apex == null) apex = H * (0.12 + rand() * 0.3);
+    const vy = -2 * (hz - apex) / dur;   // 匀减速升到最高点
+    rockets.push({ x: x != null ? x : W * (0.12 + rand() * 0.76), y: hz, vx: x != null ? 0 : (rand() - 0.5) * 30 * k, vy, ay: -vy / dur, t: 0, dur });
+  }
+  function explode(r) {
+    const k = H / 1080, kind = rand(), n = kind < 0.25 ? 40 : 64;
+    const c1 = FW_COLORS[(rand() * FW_COLORS.length) | 0], c2 = FW_COLORS[(rand() * FW_COLORS.length) | 0];
+    const willow = kind > 0.8, ring = kind < 0.25, v0 = (180 + 110 * rand()) * k;   // 炸开后火花能飞出 1080p 的 130–200 像素
+    // 一发烟花拆成一两组同色火花，各自整组画（一组一次 stroke，几百个火花也只要几次绘制调用）
+    const groups = willow ? [{ c: '#ffcf6a', p: [] }] : c1 !== c2 && rand() < 0.4 ? [{ c: c1, p: [] }, { c: c2, p: [] }] : [{ c: c1, p: [] }];
+    for (let i = 0; i < n; i++) {
+      const a = ring ? TAU * i / n : rand() * TAU, v = ring ? v0 : v0 * (0.35 + 0.65 * Math.sqrt(rand()));
+      groups[i % groups.length].p.push({ x: r.x, y: r.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v });
+    }
+    for (const g of groups) bursts.push({ c: g.c, p: g.p, t: 0, life: willow ? 2.8 : 1.6 + rand() * 0.6, drag: willow ? 2.2 : 1.4, grav: (willow ? 55 : 38) * k, willow });
+    flashes.push({ x: r.x, y: r.y, t: 0, c: groups[0].c });
+  }
+  function stepFireworks(dt) {
+    const want = (eggsOn() || userFxOn()) && fest.fw > 0 && lastDaylight < 0.35 && cur.rain < 0.15 && cur.thunder < 0.3;   // 自定义效果要的烟花不归「节日装饰与彩蛋」开关管
+    if (want && simT >= fwNext && rockets.length < 6) {
+      launch(); if (rand() < (fest.fw >= 2 ? 0.45 : 0.18)) launch();
+      fwNext = simT + (fest.fw >= 2 ? 0.35 + rand() * 1.1 : 2.2 + rand() * 5);
+      wake();
+    }
+    for (let i = rockets.length - 1; i >= 0; i--) {
+      const r = rockets[i];
+      r.t += dt; r.x += r.vx * dt; r.y += r.vy * dt; r.vy += r.ay * dt;
+      if (r.t >= r.dur) { explode(r); rockets[i] = rockets[rockets.length - 1]; rockets.pop(); }
+    }
+    for (let i = bursts.length - 1; i >= 0; i--) {
+      const b = bursts[i];
+      b.t += dt;
+      const dk = Math.exp(-dt * b.drag);
+      for (const p of b.p) { p.vx *= dk; p.vy = p.vy * dk + b.grav * dt; p.x += p.vx * dt; p.y += p.vy * dt; }
+      if (b.t >= b.life) { bursts[i] = bursts[bursts.length - 1]; bursts.pop(); }
+    }
+    for (let i = flashes.length - 1; i >= 0; i--) if ((flashes[i].t += dt) > 0.6) { flashes[i] = flashes[flashes.length - 1]; flashes.pop(); }
+  }
+
+  // 圣诞雪橇：平安夜和圣诞节的夜里，隔几分钟从天上飞过一趟；月亮在天上时正好从月亮前面掠过
+  let sleigh = null, sleighNext = 8 + rand() * 40;
+  const dust = [];   // 雪橇后面撒的金粉
+  let lastMoon = null, lastMoonV = 0;
+  function stepSleigh(dt) {
+    for (let i = dust.length - 1; i >= 0; i--) { const d = dust[i]; d.t += dt; d.y += 14 * dt * H / 1080; if (d.t > 1.4) { dust[i] = dust[dust.length - 1]; dust.pop(); } }
+    if (sleigh) {
+      sleigh.t += dt;
+      const p = sleighAt(sleigh);
+      if (dust.length < 90) dust.push({ x: p.x - p.dir * 42 * H / 1080 + (rand() - 0.5) * 8, y: p.y + (rand() - 0.2) * 8, t: 0 });
+      if (sleigh.t >= sleigh.dur) { sleigh = null; sleighNext = simT + (pvFest() ? 14 : 150 + rand() * 210); }
+      return;
+    }
+    if (!eggsOn() || !hasFest('xmas') || lastDaylight > 0.25 || simT < sleighNext) return;
+    const dir = rand() < 0.5 ? 1 : -1, moonUp = lastMoon && lastMoonV > 0.3 && lastMoon.y < horizonY() * 0.8;
+    const xm = moonUp ? lastMoon.x : W * (0.3 + rand() * 0.4), ym = moonUp ? lastMoon.y : H * (0.16 + rand() * 0.14);
+    const um = Math.max(xm / W + 0.12, 1.12 - xm / W);   // 抛物线两头离最高点最远的横向距离
+    sleigh = { t: 0, dur: 10 + rand() * 2, dir, xm, ym, cv: Math.min(H * 0.5, Math.max(0, horizonY() * 0.85 - ym) / (um * um)) };   // 月亮低的时候弧度放平：两头别扎到地平线下面
+    wake();
+  }
+  function sleighAt(s) {
+    const p = s.t / s.dur, x = s.dir > 0 ? -0.12 * W + 1.24 * W * p : 1.12 * W - 1.24 * W * p;
+    const u = (x - s.xm) / W;
+    return { x, y: s.ym + s.cv * u * u + Math.sin(s.t * 3) * 2 * H / 1080, dir: s.dir };   // 抛物线：越近月亮飞得越高，正好穿过月亮
+  }
+
+  // 万圣节：夜里时不时飞过一群蝙蝠
+  let bats = null, batNext = 6 + rand() * 30;
+  function stepBats(dt) {
+    if (bats) { bats.t += dt; if (bats.t >= bats.dur) { bats = null; batNext = simT + (pvFest() ? 10 : 70 + rand() * 120); } return; }
+    if (!eggsOn() || !hasFest('halloween') || lastDaylight > 0.3 || simT < batNext) return;
+    const list = [];
+    for (let i = 0; i < 7; i++) list.push({ dx: (rand() - 0.5) * 0.12, dy: (rand() - 0.5) * 0.09, ph: rand() * TAU, s: 0.7 + rand() * 0.6, wob: rand() * TAU });
+    bats = { t: 0, dur: 7 + rand() * 2, dir: rand() < 0.5 ? 1 : -1, y0: H * (0.14 + rand() * 0.2), list };
+    wake();
+  }
+  function stepFest(dt) {
+    if (simT - festAt > (demo && demo.speed > 1 ? 0.5 : 20)) { festAt = simT; refreshFest(); }
+    stepFireworks(dt); stepSleigh(dt); stepBats(dt);
+  }
+  const skyFxBusy = () => rockets.length > 0 || bursts.length > 0 || flashes.length > 0 || !!sleigh || dust.length > 0 || !!bats;
+
+  // ------------------------------------------------------------------ 自定义效果
+  // 用户自己写的效果脚本放在 %APPDATA%\WeatherWallpaper\effects\*.js（宿主映射成 https://effects.local/，文件列表随 layout 发来）。
+  // 脚本里调 WeatherWallpaper.effect({ name, dates, draw(ctx, fx) { … } })，到了日子每帧调它的 draw，画在前景层（雨雪下面、卡片下面）。
+  // 写法见那个文件夹里的「生日示例.js」和 README。脚本出错只停掉它自己，不影响壁纸
+  const userFx = [];   // { file, def, name, on, born, state, ready, errs, dead, lastT }
+  let userFxSig = null, userPv = null;   // userFxSig：已加载的文件列表（变了就整页重载）；userPv：预览指令比脚本先到时记下，注册后再切
+  const userFxOn = () => userFx.some(u => u.on && !u.dead);
+  const userFxFps = () => userFx.reduce((m, u) => u.on && !u.dead ? Math.max(m, clamp(+u.def.fps || 30, 1, 60)) : m, 0);
+  const userFxFast = () => userFxFps() >= 20;   // 要 20 帧以上的走 rAF 满帧；低于的走定时器
+  const fxLog = (file, msg) => { post('log:effect ' + file + ': ' + msg); console.warn('[effect ' + file + '] ' + msg); };
+  function loadUserFx(list) {
+    for (const e of list) {
+      const s = document.createElement('script');
+      s.src = (qParam('fxbase') || 'https://effects.local/') + encodeURIComponent(e.f) + '.js?v=' + e.v;   // v = 修改时间：改过的文件不吃缓存；fxbase 是浏览器调试用
+      s.dataset.fx = e.f;
+      s.onerror = () => fxLog(e.f, '脚本加载失败');
+      // 跨域脚本的语法错误页面拿不到详情（只有 "Script error."）：跑完了却没注册，多半是写错了
+      s.onload = () => { if (!userFx.some(u => u.file === e.f)) fxLog(e.f, '脚本没有调用 WeatherWallpaper.effect(...)（多半是有语法错误：用 VS Code 之类的编辑器打开看看哪里标红）'); };
+      document.body.appendChild(s);
+    }
+  }
+  window.WeatherWallpaper = {
+    version: 1,
+    effect(def) {
+      const sc = document.currentScript, file = (sc && sc.dataset.fx) || 'effect' + (userFx.length + 1);
+      if (!def || typeof def.draw !== 'function') { fxLog(file, 'WeatherWallpaper.effect() 要传一个带 draw(ctx, fx) 函数的对象'); return; }
+      const i = userFx.findIndex(u => u.file === file);
+      if (i >= 0) userFx.splice(i, 1);   // 同一个文件注册两次：后一次算数
+      const name = String(def.name || file);
+      userFx.push({ file, def, name, on: false, born: 0, state: {}, ready: false, errs: 0, dead: false, lastT: null });
+      // 托盘「效果预览 → 自定义」演示时的天气和时间：preview: { time: 'night' | 'day', weather: 'clear' | 'snow' | … }，默认晴朗的夜晚
+      const pv = def.preview || {}, day = pv.time === 'day', base = (PREV[pv.weather] && !PREV[pv.weather].fest && PREV[pv.weather]) || PREV[day ? 'clear' : 'night'];
+      PREV['user:' + file] = { code: base.code, cc: base.cc, wind: base.wind, time: day ? 'day' : 'night', fest: 'user:' + file, fw: clamp(def.fireworks | 0, 0, 2), label: name };
+      if (userPv && userPv.mode === 'user:' + file) { const p = userPv; setPreview(p.mode, p.day); }
+      festAt = -1e9; wake();
+    },
+  };
+  // 当地日期（天气所在城市）：给 dates / when 判断用，也原样交给 draw 的 fx.date
+  function fxDate() {
+    const ms = now() + locInfo().off * 1000, d = new Date(ms);
+    let lun;
+    return {
+      year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(), weekday: d.getUTCDay(), hour: d.getUTCHours(), minute: d.getUTCMinutes(),
+      get lunar() { return lun !== undefined ? lun : (lun = window.FEST && FEST.lunar ? FEST.lunar(ms) : null); },   // { month, day, leap }，用到才算
+    };
+  }
+  // dates 里每一项：'03-15' 每年公历 3 月 15 日；'2027-01-01' 只那一天；'lunar:08-15' / '农历08-15' 每年农历八月十五（闰月不算）
+  function userMatch(def, d) {
+    for (const s0 of Array.isArray(def.dates) ? def.dates : [def.dates]) {
+      const s = String(s0 == null ? '' : s0).trim();
+      let m;
+      if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s))) { if (+m[1] === d.year && +m[2] === d.month && +m[3] === d.day) return true; }
+      else if ((m = /^(\d{1,2})-(\d{1,2})$/.exec(s))) { if (+m[1] === d.month && +m[2] === d.day) return true; }
+      else if ((m = /^(?:lunar:|农历)\s*(\d{1,2})-(\d{1,2})$/i.exec(s))) { const l = d.lunar; if (l && !l.leap && l.month === +m[1] && l.day === +m[2]) return true; }
+    }
+    return typeof def.when === 'function' && !!def.when(d);
+  }
+  function userErr(u, e) {
+    u.errs++;
+    fxLog(u.file, String((e && e.stack) || e).split('\n').slice(0, 2).join(' | '));
+    if (u.errs >= 3) { u.dead = true; fxLog(u.file, '连续出错，先停用（改好保存后壁纸会自动重新加载）'); }
+  }
+  // 跟着节日一起刷新（refreshFest 里调）：今天哪些自定义效果该出现。预览里只演示选中的那个
+  function refreshUserFx() {
+    if (!userFx.length) return;
+    const pv = PREV[preview], pvKey = pv && pv.fest ? pv.fest : null, d = fxDate();
+    for (const u of userFx) {
+      let on = false;
+      if (pvKey) on = pvKey === 'user:' + u.file;
+      else if (!u.dead) { try { on = userMatch(u.def, d); } catch (e) { userErr(u, e); } }
+      if (on && !u.on) { u.on = true; u.born = simT; u.state = {}; u.ready = false; u.lastT = null; wake(); }
+      else if (!on) u.on = false;
+      if (u.on && !pvKey && u.def.fireworks) fest.fw = Math.max(fest.fw, clamp(u.def.fireworks | 0, 0, 2));
+    }
+  }
+  const okColor = c => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c);
+  const userGlowCache = new Map();   // 用户效果 fx.glow 的发光贴图：和内置的分开（见 fxApi 里的说明）
+  // 交给效果脚本的 fx：尺寸、时间、天气、日期、卡片位置，外加几个画图帮手
+  function fxApi(u, daylight) {
+    const dt = u.lastT == null ? 0 : clamp(simT - u.lastT, 0, 0.25);   // 隔了很久才画一帧（暂停后恢复）：别让动画一下跳出去老远
+    u.lastT = simT;
+    return {
+      t: simT - u.born, dt, time: simT,                   // t：这个效果出现了多少秒（做入场动画）；time：全局动画时钟
+      W, H, k: H / 1080, ground: horizonY(),              // 屏幕 CSS 像素；按 1080p 设计的尺寸乘 k；ground = 地平线（任务栏顶 / 屏幕底）
+      night: 1 - daylight, daylight,                      // 0 白天 … 1 深夜
+      weather: { rain: cur.rain, snow: cur.snow, cloud: cur.cloud, fog: cur.fog, thunder: cur.thunder, wind: cur.windX },   // 0–1；wind 正 = 往右吹
+      date: fxDate(), preview: preview !== 'live',
+      cards: (L.panel ? L.cards || [] : []).map(c => ({ x: c.x, y: c.y, w: CARD_W, h: CARD_H })),
+      state: u.state,                                     // 这个效果自己的存储（每次出现时清空）
+      free: (x, w, y0, y1) => placeX(x, w, y0, y1),       // 宽 w 的东西在 [y0, y1] 这段高度上、离 x 最近又不被卡片挡住的中心 x
+      glow: (c, x, y, r, a = 1) => {                      // 柔光（叠加发光）；颜色写 #rrggbb
+        if (!okColor(c)) return;
+        // 用户脚本的发光单独缓存：它要是一直换颜色，清的也只是自己那份，内置装饰（灯笼 / 彩灯 / 烟花…）的贴图不受影响
+        if (userGlowCache.size > 96 && !userGlowCache.has(c)) userGlowCache.clear();
+        const op = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'lighter'; glowAt(c, x, y, r, a, userGlowCache); ctx.globalCompositeOperation = op;
+      },
+      shade: (c, amount) => okColor(c) ? sh(c, amount == null ? (1 - daylight) * 0.5 : amount) : c,   // 夜里压暗的颜色（和内置装饰同一套夜色）
+      firework: (x, y) => { if (rockets.length < 12) { launch(x, y != null ? Math.min(y, horizonY() - 60) : null); wake(); } },   // 在 x 处放一发、在 y 高度炸开（都可不填）
+      rand,
+    };
+  }
+  function drawUserFx(daylight) {
+    for (const u of userFx) {
+      if (!u.on || u.dead) continue;
+      ctx.save();
+      try {
+        const api = fxApi(u, daylight);
+        if (!u.ready) { u.ready = true; if (typeof u.def.setup === 'function') u.def.setup(api); }
+        u.def.draw(ctx, api);
+        u.errs = 0;
+      } catch (e) { userErr(u, e); }
+      ctx.restore();
+    }
+  }
+
   // ------------------------------------------------------------------ 更新
   let simT = 0, lastScenePost = 0, lastSceneMsg = '', panelT = 0;
   function update(dt) {
@@ -437,6 +734,9 @@
         if (flakes.length > wantFlakes) { flakes[i] = flakes[flakes.length - 1]; flakes.pop(); } else newFlake(f, false);
       }
     }
+    stepEaster(dt);
+    stepMeteor(dt);
+    stepFest(dt);
     // 本地溅射（没有任务栏特效层时）
     const grav = 1100 * H / 1080;
     for (let i = splash.length - 1; i >= 0; i--) {
@@ -480,7 +780,7 @@
     const st = bgState();
     updateBgRes(st, true);
     drawSky(st); drawClouds(st); updateVeil();
-    const on = fxNeeded(); fxAlloc(on); fxDirty = on; if (on) drawFx();
+    const on = fxNeeded() || decorOn(); fxAlloc(on); fxDirty = on; if (on) drawFx();
   }
   // 天空画布分辨率自适应：有星星 / 月亮 / 清晰的太阳时用全分辨率；阴天、雨雪、雾等画面本来就柔和，用半分辨率省显存
   let bgK = 1, wantK = 1, wantSince = 0;
@@ -529,6 +829,8 @@
     const sunV = vis * smooth(-4, 0.5, e);
     const rays = sunV > 0.3 && (1 - smooth(1, 22, e)) < 0.97;   // 与 drawSun 画光芒的条件一致
     lastDaylight = daylight;
+    lastStarA = starA;
+    lastMoon = mp; lastMoonV = moonV;   // 圣诞雪橇要从月亮前面飞过
     // 云的颜色：下雨的云是乌云——只要在下雨，至少往乌云色靠一半（毛毛雨按 storm 算只有 0.2 左右，云还是白的），雨越大越暗
     const rainCloud = Math.max(storm, 0.5 * smooth(0.02, 0.18, cur.rain) + 0.5 * storm);
     return { li, t, sp, e, hz, daylight, golden, storm, vis, starA, mp, moonV, sunV, rays, cc: cloudColors(e, daylight, golden, rainCloud) };
@@ -662,11 +964,18 @@
   }
 
   // 前景层：降水与闪电（透明画布，按设定帧率绘制；没有降水时整层停掉）
-  let lastDaylight = 1;
+  let lastDaylight = 1, lastStarA = 0;
   function drawFx() {
     ctx = fctx;
     ctx.clearRect(0, 0, W, H);
     const daylight = lastDaylight;
+    // 天上的远景（流星、烟花、雪橇、蝙蝠）垫在最底下；流星只在晴朗的夜里划，压在薄云上面也看不出破绽——它出现时天上基本没云
+    if (meteor) drawMeteor();
+    if (rockets.length || bursts.length || flashes.length) drawFireworks();
+    if (sleigh || dust.length) drawSleigh();
+    if (bats) drawBats();
+    drawEaster(daylight);   // 然后是雪地、雪人、节日装饰，雨雪落在它们前面
+    if (userFxOn()) drawUserFx(daylight);   // 自定义效果：压在内置装饰上面、雨雪下面
     if (drops.length) drawRain(daylight);
     if (flakes.length) drawSnow(daylight);
     if (splash.length || ripples.length) drawSplash(daylight);
@@ -688,6 +997,607 @@
       }
       ctx.globalCompositeOperation = 'source-over';
     }
+  }
+
+  // ------------------------------------------------------------------ 彩蛋绘制
+  function drawEaster(daylight) {
+    const k = H / 1080, hz = horizonY(), cov = snowCover();
+    if (cov > 0.01) {
+      const dk = (1 - daylight) * 0.55;
+      const hi = mix(hex('#f6f9fd'), hex('#66759c'), dk), lo = mix(hex('#dce5f2'), hex('#4a5678'), dk);
+      // 一片起伏的雪地铺满地面，远处两个雪坡添点层次
+      ctx.beginPath(); ctx.moveTo(-2, H + 2);
+      for (let i = 0; i <= 28; i++) {
+        const x = W * i / 28;
+        ctx.lineTo(x, hz + 1 + (Math.sin(x * 0.011 + 1.7) * 2.2 + Math.sin(x * 0.031 + 4.2) * 1.1) * k);
+      }
+      ctx.lineTo(W + 2, H + 2); ctx.closePath();
+      const g = ctx.createLinearGradient(0, hz, 0, H);
+      g.addColorStop(0, css(hi, 0.96 * cov)); g.addColorStop(1, css(lo, 0.88 * cov));
+      ctx.fillStyle = g; ctx.fill();
+      ctx.fillStyle = css(hi, 0.5 * cov);
+      ctx.beginPath(); ctx.ellipse(W * 0.3, hz + 2 * k, W * 0.16, 7 * k, 0, Math.PI, TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(W * 0.74, hz + 2 * k, W * 0.2, 5.5 * k, 0, Math.PI, TAU); ctx.fill();
+    }
+    if (festDecor()) drawDecor(daylight, k, hz);
+    for (const m of men) if (m) drawSnowman(m, daylight, k, hz);
+  }
+
+  function drawSnowman(m, daylight, k, hz) {
+    const gk = growK(m);
+    if (gk <= 0) return;
+    const dying = !!m.dying;
+    const x = m.xf * W, gy = hz + 3 * k;
+    const h = (50 + 36 * m.z) * k * (dying ? 0.35 + 0.65 * gk : easeBack(Math.min(1, gk)));
+    if (h < 3) return;
+    const r1 = h * 0.30, r2 = h * 0.21, r3 = h * 0.15;
+    const y1 = gy - r1 * 0.8, y2 = y1 - r1 * 0.92 - r2 * 0.78, y3 = y2 - r2 * 0.9 - r3 * 0.74;
+    const dk = (1 - daylight) * 0.5;
+    // 复活后的头一小段：透明度从"化着"的值淡回 1，脚下的水洼也顺势收掉（growK 的回推只对齐了高度）
+    let fade = 1;
+    if (!dying && m.fadeAt != null) fade = Math.min(1, m.fadeFrom + (simT - m.fadeAt) / 1.2);
+    const hi = mix(hex('#f8fafd'), hex('#5d6c96'), dk), lo = mix(hex('#dde6f3'), hex('#49557a'), dk);
+    const dark = css(mix(hex('#33384a'), hex('#141826'), dk * 0.8));
+    ctx.save();
+    ctx.globalAlpha = dying ? gk : fade;
+    // 影子；化掉时脚下摊开一小摊水（刚复活还在收的那一小段也画着，跟着 fade 一起收掉）
+    ctx.fillStyle = css(mix(hex('#5b688c'), hex('#2b3350'), dk), 0.22);
+    ctx.beginPath(); ctx.ellipse(x, gy + 1, r1 * 1.45, r1 * 0.3, 0, 0, TAU); ctx.fill();
+    if (dying || fade < 1) { const fk = dying ? 1 - gk : 1 - fade; ctx.fillStyle = css(mix(hex('#9fb4d8'), hex('#3d4c74'), dk), 0.32 * fk); ctx.beginPath(); ctx.ellipse(x, gy, r1 * (1.5 + 1.1 * fk), r1 * 0.36, 0, 0, TAU); ctx.fill(); }
+    // 三个雪球
+    const ball = (bx, by, r) => {
+      const gg = ctx.createRadialGradient(bx - r * 0.4, by - r * 0.45, r * 0.1, bx, by, r);
+      gg.addColorStop(0, css(hi)); gg.addColorStop(1, css(lo));
+      ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(bx, by, r, 0, TAU); ctx.fill();
+    };
+    ball(x, y1, r1); ball(x, y2, r2); ball(x, y3, r3);
+    // 树枝手臂
+    ctx.strokeStyle = css(mix(hex('#7c5b3f'), hex('#3a2f26'), dk)); ctx.lineWidth = Math.max(1, 1.6 * k); ctx.lineCap = 'round';
+    const ay = y2 + r2 * 0.05;
+    ctx.beginPath();
+    ctx.moveTo(x - r2 * 0.75, ay); ctx.lineTo(x - r2 * 0.75 - r1 * 0.8, ay - r2 * 0.6);
+    ctx.moveTo(x + r2 * 0.75, ay); ctx.lineTo(x + r2 * 0.75 + r1 * 0.8, ay - r2 * 0.9);
+    ctx.stroke();
+    // 围巾：脖子一圈，飘带顺着风轻轻摆
+    ctx.strokeStyle = css(mix(hex('#c14f4c'), hex('#5c2f3a'), dk));
+    ctx.lineWidth = Math.max(1.5, r3 * 0.5);
+    ctx.beginPath(); ctx.arc(x, y3 + r3 * 1.12, r3 * 0.95, Math.PI * 0.1, Math.PI * 0.9); ctx.stroke();
+    const sway = Math.sin(simT * 1.8 + m.xf * 9) * 0.22 * clamp(Math.abs(cur.windX) * 3, 0.3, 1);
+    ctx.lineWidth = Math.max(1, r3 * 0.38);
+    ctx.beginPath(); ctx.moveTo(x + r3 * 0.45, y3 + r3 * 1.5);
+    ctx.quadraticCurveTo(x + r3 * (1.1 + sway), y3 + r3 * 2.1, x + r3 * (1.5 + sway * 1.8), y3 + r3 * 2.6);
+    ctx.stroke();
+    // 眼睛、胡萝卜鼻（朝着风来的方向）、扣子
+    ctx.fillStyle = dark;
+    ctx.beginPath();
+    ctx.arc(x - r3 * 0.36, y3 - r3 * 0.18, Math.max(0.7, r3 * 0.11), 0, TAU);
+    ctx.arc(x + r3 * 0.36, y3 - r3 * 0.18, Math.max(0.7, r3 * 0.11), 0, TAU);
+    ctx.fill();
+    const nd = cur.windX >= 0 ? 1 : -1;
+    ctx.fillStyle = css(mix(hex('#e2833a'), hex('#6e4526'), dk));
+    ctx.beginPath(); ctx.moveTo(x, y3 + r3 * 0.05); ctx.lineTo(x + r3 * 0.9 * nd, y3 + r3 * 0.22); ctx.lineTo(x, y3 + r3 * 0.36); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = dark;
+    for (let j = -1; j <= 1; j++) { ctx.beginPath(); ctx.arc(x, y2 + r2 * j * 0.42, Math.max(0.6, r2 * 0.09), 0, TAU); ctx.fill(); }
+    ctx.restore();
+  }
+
+  function drawMeteor() {
+    const p = clamp(meteor.t / meteor.dur, 0, 1), fade = Math.sin(Math.PI * p);
+    const D = meteor.len * 3.2;
+    const c = Math.cos(meteor.ang) * meteor.dir, s = Math.sin(meteor.ang);   // dir 翻转水平方向；竖直分量恒为正：流星只会往下落
+    const hx = meteor.x0 + c * D * p, hy = meteor.y0 + s * D * p;
+    const tx = hx - c * meteor.len, ty = hy - s * meteor.len;
+    const k = H / 1080;
+    const g = ctx.createLinearGradient(hx, hy, tx, ty);
+    g.addColorStop(0, `rgba(255,255,255,${0.9 * fade})`); g.addColorStop(1, 'rgba(190,205,255,0)');
+    ctx.strokeStyle = g; ctx.lineWidth = Math.max(1, 1.8 * k); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.fillStyle = `rgba(255,255,255,${0.85 * fade})`;
+    ctx.beginPath(); ctx.arc(hx, hy, Math.max(1, 1.5 * k), 0, TAU); ctx.fill();
+  }
+
+  // ------------------------------------------------------------------ 节日绘制
+  const NIGHT = hex('#141826');
+  const sh = (c, dk, a = 1) => css(mix(hex(c), NIGHT, dk), a);   // 不发光的东西：夜里压暗
+  // 往当前路径里加一个椭圆（先 moveTo 到起点，免得和上一段连出一条线）
+  const oval = (x, y, rx, ry, rot = 0) => { ctx.moveTo(x + rx * Math.cos(rot), y + rx * Math.sin(rot)); ctx.ellipse(x, y, rx, ry, rot, 0, TAU); };
+  // 发光贴图：径向渐变每种颜色只画一次，之后按位置 / 大小 / 透明度贴上去（每帧新建渐变会撑大渐变缓存，见文件开头）。调用方自己设 'lighter'
+  const glowCache = new Map();
+  function glowAt(c, x, y, r, a, cache = glowCache) {
+    if (a <= 0.01 || r <= 0) return;
+    let g = cache.get(c);
+    if (!g) {
+      g = document.createElement('canvas'); g.width = g.height = 64;
+      const gx = g.getContext('2d'), rgb = hex(c), gr = gx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gr.addColorStop(0, css(rgb, 1)); gr.addColorStop(0.3, css(rgb, 0.5)); gr.addColorStop(1, css(rgb, 0));
+      gx.fillStyle = gr; gx.fillRect(0, 0, 64, 64);
+      cache.set(c, g);
+    }
+    const ga = ctx.globalAlpha;
+    ctx.globalAlpha = ga * Math.min(1, a);
+    ctx.drawImage(g, x - r, y - r, 2 * r, 2 * r);
+    ctx.globalAlpha = ga;
+  }
+  function lighter(fn) { ctx.globalCompositeOperation = 'lighter'; fn(); ctx.globalCompositeOperation = 'source-over'; }
+
+  // 烟花：火箭拖着尾迹升空，炸开后每组火花一次 stroke（每个火花一小段顺着速度方向的线），快灭时闪烁
+  function drawFireworks() {
+    const k = H / 1080;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    for (const f of flashes) { const q = 1 - f.t / 0.6; glowAt(f.c, f.x, f.y, 170 * k, 0.4 * q * q); }
+    if (rockets.length) {
+      ctx.strokeStyle = 'rgba(255,205,140,0.5)'; ctx.lineWidth = Math.max(1, 1.5 * k);
+      ctx.beginPath();
+      for (const r of rockets) { ctx.moveTo(r.x, r.y); ctx.lineTo(r.x - r.vx * 0.08, r.y - r.vy * 0.08); }
+      ctx.stroke();
+      for (const r of rockets) glowAt('#ffe2b0', r.x, r.y, 6 * k, 0.9);
+    }
+    for (const b of bursts) {
+      const q = b.t / b.life;
+      let a = Math.pow(1 - q, 1.2);
+      if (q > 0.55) a *= 0.65 + 0.35 * Math.sin(simT * 37 + b.life * 11);
+      const tl = b.willow ? 0.35 : 0.07, droop = b.willow ? 10 * k * q : 0;   // 垂柳：金色的长尾巴往下垂
+      ctx.globalAlpha = clamp(a, 0, 1);
+      ctx.strokeStyle = b.c; ctx.lineWidth = Math.max(1, (b.willow ? 1.4 : 2) * k * (1 - 0.45 * q));
+      ctx.beginPath();
+      for (const p of b.p) { ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * tl, p.y - p.vy * tl - droop); }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // 圣诞老人的雪橇：四头驯鹿拉着，剪影从月亮前面掠过，后面撒一路金粉；领头的鲁道夫鼻子是红的
+  function drawSleigh() {
+    const k = H / 1080;
+    ctx.save();
+    if (dust.length) lighter(() => { for (const d of dust) glowAt('#ffd98a', d.x, d.y, 4 * k, 0.9 * (1 - d.t / 1.4)); });
+    if (sleigh) {
+      const s = sleigh, p = sleighAt(s), q = sleighAt({ ...s, t: s.t + 0.05 });
+      ctx.translate(p.x, p.y);
+      ctx.scale(s.dir * k, k);
+      ctx.rotate(clamp(Math.atan2(q.y - p.y, (q.x - p.x) * s.dir), -0.5, 0.5));
+      const ink = 'rgba(16,20,34,0.94)';
+      ctx.fillStyle = ink; ctx.strokeStyle = ink; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(-13, -12); ctx.lineTo(6, -3);   // 手里的缰绳
+      for (let i = 0; i < 4; i++) ctx.lineTo(24 + i * 22, -5 - i * 1.2);
+      ctx.stroke();
+      for (let i = 0; i < 4; i++) {
+        const x = 30 + i * 22, y = -4 - i * 1.2, g = Math.sin(simT * 11 + i * 1.7);
+        ctx.beginPath(); oval(x, y, 8, 3.4, -0.05); oval(x + 11.5, y - 7, 3.2, 1.8, 0.25); ctx.fill();   // 身子、头
+        ctx.lineWidth = 2.4; ctx.beginPath(); ctx.moveTo(x + 5, y - 1); ctx.lineTo(x + 10, y - 6); ctx.stroke();   // 脖子
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 10, y - 8.5); ctx.lineTo(x + 8, y - 14); ctx.moveTo(x + 9, y - 11.5); ctx.lineTo(x + 6, y - 13);   // 鹿角
+        ctx.moveTo(x + 11.5, y - 8.5); ctx.lineTo(x + 12.5, y - 14); ctx.moveTo(x + 12, y - 11.5); ctx.lineTo(x + 14.5, y - 13);
+        ctx.moveTo(x + 5, y + 2); ctx.lineTo(x + 6 + 5 * g, y + 8);   // 腿：前后交替地蹬
+        ctx.moveTo(x + 3.5, y + 2); ctx.lineTo(x + 4 + 3 * g, y + 8.5);
+        ctx.moveTo(x - 5, y + 2); ctx.lineTo(x - 6 - 5 * g, y + 8);
+        ctx.moveTo(x - 3.5, y + 2); ctx.lineTo(x - 4 - 3 * g, y + 8.5);
+        ctx.moveTo(x - 7.5, y - 1); ctx.lineTo(x - 10, y - 3);   // 尾巴
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(-40, 11); ctx.lineTo(4, 11); ctx.quadraticCurveTo(12, 11, 11, 3);   // 滑板
+      ctx.moveTo(-31, 7); ctx.lineTo(-31, 11); ctx.moveTo(-6, 7); ctx.lineTo(-6, 11); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-39, -7); ctx.lineTo(-36, 7); ctx.lineTo(2, 7); ctx.quadraticCurveTo(9, 6, 7, -4);
+      ctx.lineTo(-6, -3); ctx.quadraticCurveTo(-12, -3, -14, -9); ctx.closePath(); ctx.fill();   // 车身
+      ctx.beginPath(); oval(-31, -11, 7.5, 7.5); oval(-18, -12, 6.5, 6.5); oval(-16, -21, 4, 4); oval(-22.5, -30, 1.8, 1.8); ctx.fill();   // 礼物袋、圣诞老人、帽子尖上的绒球
+      ctx.beginPath(); ctx.moveTo(-20, -23); ctx.lineTo(-12.5, -23.5); ctx.lineTo(-22, -30); ctx.closePath(); ctx.fill();   // 帽子
+      const nx = 30 + 3 * 22 + 14.6, ny = -4 - 3 * 1.2 - 6.4;
+      lighter(() => glowAt('#ff3b30', nx, ny, 7, 0.95));
+      ctx.fillStyle = '#ff4a3a'; ctx.beginPath(); oval(nx, ny, 1.4, 1.4); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // 万圣节的蝙蝠：一群从天上扑棱着飞过。翅膀左右镜像且把点序反过来，所有形状都是顺时针，一次 fill 不会互相抵消出窟窿
+  const WING = [0, -0.08, 0.5, -0.25, 1, 0, 0.85, 0.05, 0.68, 0.16, 0.55, 0.08, 0.38, 0.2, 0.22, 0.06, 0, 0.12];
+  const WING_UP = [0, 0.7, 1, 0.55, 0.45, 0.25, 0.15, 0, 0];   // 每个点随翅膀扇动上下移动的比例（翅尖最大）
+  function drawBats() {
+    const k = H / 1080, b = bats, p = b.t / b.dur;
+    const cx = b.dir > 0 ? -0.1 * W + 1.2 * W * p : 1.1 * W - 1.2 * W * p, cy = b.y0 + Math.sin(p * TAU) * 0.03 * H;
+    ctx.fillStyle = 'rgba(18,14,28,0.92)';
+    ctx.beginPath();
+    for (const m of b.list) {
+      const x = cx + m.dx * W, y = cy + m.dy * H + Math.sin(simT * 2.3 + m.wob) * 6 * k, sp = 13 * k * m.s;
+      const up = Math.sin(simT * 15 / m.s + m.ph) * 0.5, n = WING.length / 2;
+      for (const side of [1, -1]) {
+        const pt = i => { const j = side > 0 ? i : n - 1 - i; return [x + side * WING[2 * j] * sp, y + (WING[2 * j + 1] - up * WING_UP[j]) * sp]; };
+        ctx.moveTo(...pt(0));
+        for (let i = 1; i < n; i += 2) { const c = pt(i), e = pt(i + 1); ctx.quadraticCurveTo(c[0], c[1], e[0], e[1]); }
+        ctx.closePath();
+      }
+      oval(x, y + sp * 0.04, sp * 0.13, sp * 0.22);
+      ctx.moveTo(x - sp * 0.1, y - sp * 0.05); ctx.lineTo(x - sp * 0.09, y - sp * 0.27); ctx.lineTo(x - sp * 0.03, y - sp * 0.17);   // 头和两只尖耳朵
+      ctx.lineTo(x + sp * 0.03, y - sp * 0.17); ctx.lineTo(x + sp * 0.09, y - sp * 0.27); ctx.lineTo(x + sp * 0.1, y - sp * 0.05); ctx.closePath();
+    }
+    ctx.fill();
+  }
+
+  // 节日装饰：灯笼从屏幕顶上垂下来，其余的摆在地上（左右两个位置，同一天有两个节日就一边一个）；都绕开卡片
+  const popK = key => festBorn[key] == null ? 0 : clamp((simT - festBorn[key]) / 1.8, 0, 1);
+  const GROUND = {
+    xmas: { w: 140, h: 175, draw: drawTree },
+    halloween: { w: 130, h: 120, draw: drawPumpkins },
+    easter: { w: 130, h: 70, draw: drawEggHunt },
+    dragon: { w: 140, h: 110, draw: drawZongzi },
+    moon: { w: 140, h: 70, draw: drawMooncakes },
+  };   // 国庆的国旗不占左右两个位置：单独立在屏幕正中（drawNationalFlag）
+  // 天气卡片的 CSS 尺寸（改尺寸要连着改：style.css 的 .card、宿主 src/CardLayout.cs 的 W / H、这里的让位边距 16）
+  const CARD_W = 336, CARD_H = 480;
+  // 在 [y0, y1] 这段高度上，卡片没挡住的横向空地 [[a, b], ...]（CSS 像素，卡片两边再让出一点）
+  function freeSpans(y0, y1) {
+    const bl = (L.panel ? L.cards || [] : []).filter(c => c.y < y1 && c.y + CARD_H > y0).map(c => [c.x - 16, c.x + CARD_W + 16]).sort((a, b) => a[0] - b[0]);
+    const out = [];
+    let x = 0;
+    for (const [a, b] of bl) { if (a > x) out.push([x, a]); x = Math.max(x, b); }
+    if (x < W) out.push([x, W]);
+    return out;
+  }
+  // 宽 w 的东西尽量摆在 x 附近的空地上（哪都放不下就照原位置放，被卡片挡住也无妨）
+  function placeX(x, w, y0, y1) {
+    let best = x, bd = Infinity;
+    for (const [a, b] of freeSpans(y0, y1)) {
+      if (b - a < w) continue;
+      const c = clamp(x, a + w / 2, b - w / 2), d = Math.abs(c - x);
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+  function drawDecor(daylight, k, hz) {
+    const nt = 1 - daylight, dk = nt * 0.5, gy = hz - 4 * k;   // 比地平线略高：没有底部任务栏时地平线就是屏幕下边，盘子、影子的下半圈别画到屏幕外
+    let slot = 0;
+    for (const key of fest.keys) {
+      if (!DECOR.has(key)) continue;
+      const g = popK(key);
+      if (g <= 0) continue;
+      const e = easeBack(g);
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, g * 2);
+      if (key === 'cny' || key === 'lantern' || key === 'moon') hangLanterns(key, e, k, nt);
+      if (key === 'national') drawNationalFlag(k, gy, nt, dk);
+      const gd = GROUND[key];
+      if (gd) {
+        const x = placeX(W * (slot % 2 ? 0.915 : 0.085), gd.w * k, gy - gd.h * k, gy);
+        slot++;
+        ctx.translate(x, gy); ctx.scale(k * e, k * e);
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        gd.draw(dk, nt);
+      }
+      ctx.restore();
+    }
+  }
+
+  // 灯笼：春节一对写着"福"的大红灯笼，中秋一对橘黄的圆灯笼，元宵一串彩色小花灯；从顶上落下来，随风轻轻晃
+  function hangLanterns(key, e, k, nt) {
+    const big = key !== 'lantern', h = (big ? 150 : 110) * k;
+    const w = big ? 150 * k : Math.min(W * 0.42, 640 * k);
+    const sp = freeSpans(0, h).find(([a, b]) => b - a >= w * (big ? 1 : 0.6));
+    if (!sp) return;
+    const len = Math.min(w, sp[1] - sp[0]), x0 = sp[0] + Math.min(W * 0.035, (sp[1] - sp[0] - len) / 2);
+    ctx.save();
+    ctx.translate(0, -(1 - e) * h);
+    if (big) {
+      const red = key === 'cny', col = red ? '#d8261e' : '#f08a24', gc = red ? '#ff5a3a' : '#ffb050', word = red ? '福' : '';
+      drawLantern(x0 + 38 * k, 0, 46, 30, col, gc, nt, 0, word);
+      drawLantern(x0 + 112 * k, 0, 70, 26, col, gc, nt, 2.1, word);
+    } else {
+      // 一根绳子从左到右垂下一道弧，小花灯挂在上面
+      const sag = 34 * k, n = 7, cols = [['#e8342c', '#ff5a3a'], ['#ff8a2a', '#ffb050'], ['#ef4f78', '#ff7a9a'], ['#f2b42e', '#ffd060']];
+      ctx.strokeStyle = sh('#4a3826', nt * 0.5); ctx.lineWidth = Math.max(1, 1.3 * k);
+      ctx.beginPath(); ctx.moveTo(x0, -2); ctx.quadraticCurveTo(x0 + len / 2, -2 + 2 * sag, x0 + len, -2); ctx.stroke();
+      for (let i = 0; i < n; i++) {
+        const t = (i + 0.5) / n, [c, g] = cols[i % cols.length];
+        drawLantern(x0 + len * t, -2 + 4 * sag * t * (1 - t), 8 + (i % 2) * 14, 15, c, g, nt, i * 1.3, '');
+      }
+    }
+    ctx.restore();
+  }
+  // 一盏灯笼：(x, y) 是挂点，len 是吊绳长，r 是半宽（都按 1080p 的像素算）；col 灯笼纸的颜色，gc 里面透出来的光。
+  // 夜里里面亮着灯：中心透亮、外面一圈同色的光晕
+  function drawLantern(x, y, len, r, col, gc, nt, ph, word) {
+    const k = H / 1080, lit = smooth(0.2, 0.8, nt), dk = nt * 0.4;   // 灯纸本身是亮色的，夜里只稍微压一点（亮着的地方靠光晕补回来）
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(k, k);
+    ctx.rotate(Math.sin(simT * 0.9 + ph) * 0.05 + clamp(cur.windX, -1, 1) * 0.1);
+    const ry = r * 0.82, cy = len + r * 0.14 + ry;
+    ctx.strokeStyle = sh('#4a3826', dk); ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, cy - ry); ctx.stroke();
+    if (lit > 0.01) lighter(() => glowAt(gc, 0, cy, r * 2.7, 0.35 * lit));
+    ctx.fillStyle = sh(col, dk);
+    ctx.beginPath(); oval(0, cy, r, ry); ctx.fill();
+    lighter(() => glowAt(gc, 0, cy, r * 0.95, 0.12 + 0.45 * lit));   // 里面的亮心
+    ctx.strokeStyle = css(mix(hex(col), [70, 12, 10], 0.45), 0.55); ctx.lineWidth = 1;   // 竹骨
+    ctx.beginPath(); oval(0, cy, r * 0.45, ry); oval(0, cy, r * 0.8, ry); ctx.moveTo(0, cy - ry); ctx.lineTo(0, cy + ry); ctx.stroke();
+    ctx.fillStyle = sh('#e0aa3a', dk);   // 上下的金边
+    ctx.fillRect(-r * 0.42, cy - ry - r * 0.14, r * 0.84, r * 0.2);
+    ctx.fillRect(-r * 0.42, cy + ry - r * 0.06, r * 0.84, r * 0.2);
+    const tz = cy + ry + r * 0.14, sw = Math.sin(simT * 1.3 + ph) * r * 0.06;
+    ctx.strokeStyle = sh('#e8b040', dk); ctx.lineWidth = 1.1;   // 流苏
+    ctx.beginPath();
+    for (let i = -2; i <= 2; i++) { ctx.moveTo(i * r * 0.07, tz); ctx.lineTo(i * r * 0.09 + sw, tz + r * 0.85); }
+    ctx.stroke();
+    if (word) {
+      ctx.fillStyle = css(mix(hex('#ffd35a'), [255, 240, 190], 0.4 * lit));
+      ctx.font = `bold ${Math.round(r * 0.95)}px "Microsoft YaHei UI","Microsoft YaHei",sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(word, 0, cy + r * 0.04);
+    }
+    ctx.restore();
+  }
+
+  function starPath(x, y, ro, ri, n, rot = -Math.PI / 2) {
+    ctx.beginPath();
+    for (let i = 0; i < n * 2; i++) { const r = i % 2 ? ri : ro, a = rot + Math.PI * i / n; ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+    ctx.closePath();
+  }
+
+  // 以下地上的装饰都在"原点 = 地面中点、1 单位 = 1080p 的 1 像素"的坐标里画（y 向上是负数）
+  // 圣诞树：三层树冠（下雪时挂着雪），一圈圈彩灯轮流闪，顶上一颗星，树下几个礼物
+  const LIGHTS = ['#ff4b4b', '#ffd34b', '#4bc8ff', '#7dff8a', '#ff7ad9'];
+  function drawTree(dk, nt) {
+    const cov = snowCover(), lit = smooth(0.15, 0.7, nt);
+    ctx.fillStyle = sh('#3a4560', dk, 0.22); ctx.beginPath(); oval(0, 0, 70, 6); ctx.fill();   // 影子
+    ctx.fillStyle = sh('#6b4a2f', dk); ctx.fillRect(-7, -18, 14, 18);   // 树干
+    const tiers = [[-14, 60, -88], [-52, 47, -120], [-88, 34, -152]];   // 每层：[底边 y, 半宽, 尖 y]
+    const greens = ['#1c5e34', '#22703e', '#2a8049'];
+    let li = 0;
+    tiers.forEach(([by, hw, ty], i) => {
+      ctx.fillStyle = sh(greens[i], dk);
+      ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(hw, by);
+      for (let j = 1; j <= 4; j++) ctx.quadraticCurveTo(hw - hw * (j - 0.5) / 2, by + 8, hw - hw * j / 2, by);   // 底边一排松针的弧
+      ctx.closePath(); ctx.fill();
+      if (cov > 0.05) {   // 树枝上的雪
+        const s = 7, f = 1 - s / (by - ty);
+        ctx.fillStyle = css(mix(hex('#f4f8fc'), hex('#66759c'), dk), 0.92 * cov);
+        ctx.beginPath(); ctx.moveTo(hw * f, by - s); ctx.lineTo(hw * 0.98, by);
+        for (let j = 1; j <= 4; j++) ctx.quadraticCurveTo(hw * 0.98 - hw * 0.98 * (j - 0.5) / 2, by + 4, hw * 0.98 - hw * 0.98 * j / 2, by);
+        ctx.lineTo(-hw * f, by - s); ctx.closePath(); ctx.fill();
+      }
+      // 彩灯串：沿着这一层垂一道弧
+      const gb = by - 16, gw = hw * (1 - 16 / (by - ty)) * 0.92;
+      ctx.strokeStyle = sh('#e0c060', dk, 0.6); ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      for (let j = 0; j <= 12; j++) { const t = j / 12; ctx.lineTo(-gw + 2 * gw * t, gb + 6 * Math.sin(Math.PI * t)); }
+      ctx.stroke();
+      for (let j = 0; j < 5; j++, li++) {
+        const t = (j + 0.5) / 5, x = -gw + 2 * gw * t, y = gb + 6 * Math.sin(Math.PI * t);
+        const c = LIGHTS[li % LIGHTS.length], on = (Math.floor(simT * 1.4) + li * 3) % 5 !== 0;
+        ctx.fillStyle = on ? css(mix(hex(c), [255, 255, 255], 0.15 * lit)) : sh(c, 0.6);
+        ctx.beginPath(); oval(x, y, 3, 3); ctx.fill();
+        if (on && lit > 0.05) lighter(() => glowAt(c, x, y, 13, 0.6 * lit));
+      }
+    });
+    const tw = 0.85 + 0.15 * Math.sin(simT * 2.2);
+    lighter(() => glowAt('#ffd75a', 0, -156, 28, (0.12 + 0.4 * lit) * tw));
+    ctx.fillStyle = css(mix(hex('#f2c230'), [255, 236, 150], 0.4 * lit));
+    starPath(0, -156, 11, 4.6, 5); ctx.fill();
+    const gift = (x, w, h, c, rb) => {
+      ctx.fillStyle = sh(c, dk); ctx.fillRect(x - w / 2, -h, w, h);
+      ctx.fillStyle = sh(rb, dk); ctx.fillRect(x - 2, -h, 4, h); ctx.fillRect(x - w / 2, -h * 0.6 - 2, w, 4);
+      ctx.beginPath(); oval(x - 4, -h - 2.5, 4, 2.6, -0.5); oval(x + 4, -h - 2.5, 4, 2.6, 0.5); ctx.fill();
+    };
+    gift(-50, 24, 17, '#c8323c', '#f2c94c'); gift(44, 20, 14, '#2f6fc0', '#f4f4f4'); gift(63, 13, 19, '#3b9a5a', '#e8384a');
+  }
+
+  // 万圣节：三个南瓜（两个刻了脸，夜里里面的蜡烛一闪一闪），夜里上面还飘着个小幽灵
+  function drawPumpkins(dk, nt) {
+    const lit = smooth(0.15, 0.7, nt);
+    pumpkin(-50, 16, true, 2, dk, lit);
+    pumpkin(44, 19, false, 1, dk, lit);
+    pumpkin(-6, 30, true, 0, dk, lit);
+    if (lit > 0.02) {
+      const x = 16 + Math.sin(simT * 0.5) * 14, y = -82 + Math.sin(simT * 1.3) * 6, s = 13;
+      ctx.fillStyle = `rgba(236,240,255,${0.75 * lit})`;
+      ctx.beginPath(); ctx.moveTo(x - s, y); ctx.arc(x, y, s, Math.PI, 0); ctx.lineTo(x + s, y + s * 1.3);
+      for (let i = 1; i <= 3; i++) ctx.quadraticCurveTo(x + s - 2 * s * (i - 0.5) / 3, y + s * (i % 2 ? 1.0 : 1.6) + Math.sin(simT * 3 + i) * 1.5, x + s - 2 * s * i / 3, y + s * 1.3);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = `rgba(30,26,46,${0.85 * lit})`;
+      ctx.beginPath(); oval(x - s * 0.35, y - s * 0.05, s * 0.14, s * 0.22); oval(x + s * 0.35, y - s * 0.05, s * 0.14, s * 0.22); oval(x, y + s * 0.42, s * 0.12, s * 0.16); ctx.fill();
+    }
+  }
+  function pumpkin(cx, r, carved, seed, dk, lit) {
+    const ry = r * 0.78, cy = -ry;
+    ctx.fillStyle = sh('#3a2a20', dk, 0.22); ctx.beginPath(); oval(cx, 0, r * 1.15, r * 0.16); ctx.fill();
+    ctx.fillStyle = sh('#bf5a17', dk); ctx.beginPath(); oval(cx - r * 0.4, cy, r * 0.62, ry); oval(cx + r * 0.4, cy, r * 0.62, ry); ctx.fill();
+    ctx.fillStyle = sh('#e07a22', dk); ctx.beginPath(); oval(cx, cy, r * 0.6, ry * 1.03); ctx.fill();
+    ctx.fillStyle = sh('#5a6b2a', dk);   // 蒂
+    ctx.beginPath(); ctx.moveTo(cx - r * 0.08, cy - ry * 0.92); ctx.quadraticCurveTo(cx - r * 0.06, cy - ry * 1.3, cx + r * 0.14, cy - ry * 1.4);
+    ctx.lineTo(cx + r * 0.12, cy - ry * 1.24); ctx.quadraticCurveTo(cx + r * 0.05, cy - ry * 1.08, cx + r * 0.09, cy - ry * 0.92); ctx.closePath(); ctx.fill();
+    if (!carved) return;
+    const on = lit * (0.78 + 0.22 * Math.sin(simT * 7.3 + seed * 2) * Math.sin(simT * 3.1 + seed));
+    const poly = pts => { ctx.moveTo(cx + pts[0][0] * r, cy + pts[0][1] * r); for (let i = 1; i < pts.length; i++) ctx.lineTo(cx + pts[i][0] * r, cy + pts[i][1] * r); ctx.closePath(); };
+    ctx.fillStyle = css(mix(hex('#3b1d08'), hex('#ffc548'), on));
+    ctx.beginPath();
+    poly([[-0.44, -0.08], [-0.12, -0.08], [-0.3, -0.38]]);
+    poly([[0.12, -0.08], [0.44, -0.08], [0.3, -0.38]]);
+    poly([[-0.08, 0.1], [0.08, 0.1], [0, -0.04]]);
+    poly([[-0.5, 0.2], [-0.22, 0.28], [-0.16, 0.4], [-0.08, 0.3], [0.1, 0.3], [0.17, 0.42], [0.24, 0.28], [0.5, 0.2], [0.3, 0.52], [-0.3, 0.52]]);
+    ctx.fill();
+    if (on > 0.05) lighter(() => glowAt('#ff9a2a', cx, cy, r * 2.4, 0.5 * on));
+  }
+
+  // 复活节：草丛里藏着几个彩蛋，旁边蹲着一只兔子（时不时抖一下耳朵）
+  function drawEggHunt(dk) {
+    ctx.strokeStyle = sh('#4f9a3c', dk); ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    for (let i = 0; i < 16; i++) { const x = -62 + i * 8.3, h = 7 + (i * 37) % 7; ctx.moveTo(x, 1); ctx.quadraticCurveTo(x + 1, -h * 0.6, x + 2.5 * Math.sin(i * 2.1 + simT * 0.8), -h); }
+    ctx.stroke();
+    egg(-52, 10, '#f7a8c4', '#ffffff', -0.2, dk);
+    egg(-30, 12, '#8fd0f5', '#f7e08a', 0.15, dk);
+    egg(-7, 9, '#f7d86a', '#e070a0', -0.1, dk);
+    egg(14, 11, '#b2e89a', '#8a7ff0', 0.25, dk);
+    bunny(46, 1, 1, dk, '#d8c8b8', '#3a2a22');
+  }
+  function egg(x, r, c1, c2, rot, dk) {
+    ctx.save();
+    ctx.translate(x, -r * 0.95); ctx.rotate(rot);
+    ctx.beginPath(); ctx.ellipse(0, 0, r * 0.82, r * 1.25, 0, Math.PI, TAU); ctx.ellipse(0, 0, r * 0.82, r * 0.95, 0, 0, Math.PI); ctx.closePath();   // 上尖下圆
+    ctx.fillStyle = sh(c1, dk); ctx.fill();
+    ctx.clip();
+    ctx.fillStyle = sh(c2, dk);   // 一道锯齿花纹 + 上面几个点
+    ctx.beginPath(); ctx.moveTo(-r, -r * 0.12);
+    for (let i = 0; i <= 6; i++) ctx.lineTo(-r + r * i / 3, i % 2 ? -r * 0.32 : -r * 0.12);
+    for (let i = 6; i >= 0; i--) ctx.lineTo(-r + r * i / 3, i % 2 ? r * 0.02 : r * 0.22);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath(); oval(-r * 0.3, -r * 0.7, r * 0.12, r * 0.12); oval(r * 0.3, -r * 0.7, r * 0.12, r * 0.12); oval(0, r * 0.6, r * 0.14, r * 0.14); ctx.fill();
+    ctx.restore();
+  }
+  // 兔子侧面坐着；dir = 1 面朝左。s 缩放，fur 毛色，eye 眼睛颜色（中秋的玉兔是红眼睛）
+  function bunny(x, s, dir, dk, fur, eye) {
+    ctx.save(); ctx.translate(x, 0); ctx.scale(dir * s, s);
+    const tw = (Math.floor(simT / 0.35) + Math.round(x)) % 11 === 0 ? 0.35 : 0;   // 时不时抖一下耳朵
+    const inner = sh('#f2b4bc', dk);
+    ctx.fillStyle = sh('#3a4560', dk, 0.2); ctx.beginPath(); oval(0, 0, 24, 3.5); ctx.fill();
+    ctx.fillStyle = sh(fur, dk);
+    ctx.beginPath(); oval(2, -15, 17, 15); oval(-13, -32, 10, 9); oval(-17, -50, 3.6, 12, -0.18); oval(-10, -49, 3.6, 12, 0.22 + tw); oval(-9, -3, 6, 3); ctx.fill();
+    ctx.fillStyle = sh('#f8f4f0', dk); ctx.beginPath(); oval(19, -10, 5.5, 5.5); ctx.fill();   // 尾巴
+    ctx.fillStyle = inner; ctx.beginPath(); oval(-17, -50, 1.6, 8.5, -0.18); oval(-10, -49, 1.6, 8.5, 0.22 + tw); ctx.fill();
+    ctx.fillStyle = sh(eye, dk * 0.5); ctx.beginPath(); oval(-17, -34, 1.7, 1.9); ctx.fill();
+    ctx.fillStyle = inner; ctx.beginPath(); oval(-22.5, -30.5, 1.5, 1.2); ctx.fill();
+    ctx.restore();
+  }
+
+  // 端午：竹盘里摞着三只粽子，旁边插一小捆艾草（扎着红绳，随风晃）
+  function drawZongzi(dk) {
+    ctx.fillStyle = sh('#b88a4a', dk); ctx.beginPath(); oval(-10, -3, 52, 7); ctx.fill();
+    ctx.strokeStyle = sh('#8a6232', dk); ctx.lineWidth = 1; ctx.beginPath(); oval(-10, -3, 45, 5); ctx.stroke();
+    zong(-9, -21, 17, 0, Math.min(1, dk + 0.35));   // 后排压暗的一只：填住三只之间漏出来的三角缝
+    zong(-28, -17, 20, -0.1, dk); zong(10, -17, 20, 0.12, dk); zong(-9, -37, 18, 0.02, dk);
+    const x = 54, sway = Math.sin(simT * 0.9) * 2 + clamp(cur.windX, -1, 1) * 4;
+    for (let i = 0; i < 5; i++) {
+      const a = (i - 2) * 0.16, h = 78 + (i % 3) * 12, tx = x + Math.sin(a) * h + sway * h / 90, ty = -h;
+      ctx.strokeStyle = sh('#6f8a4a', dk); ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(x + (i - 2) * 1.5, 0); ctx.quadraticCurveTo(x + Math.sin(a) * h * 0.4, -h * 0.5, tx, ty); ctx.stroke();
+      ctx.fillStyle = sh(i % 2 ? '#7fa05a' : '#8fae68', dk);
+      ctx.beginPath();
+      for (let j = 0; j < 5; j++) {
+        const t = 0.35 + j * 0.15, side = j % 2 ? 1 : -1;
+        oval(lerp(x, tx, t) + side * 5, lerp(0, ty, t) + 2, 6, 2.2, side * 0.6 + a);
+      }
+      ctx.fill();
+    }
+    ctx.strokeStyle = sh('#d23a3a', dk); ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.moveTo(x - 6, -16); ctx.lineTo(x + 6, -17); ctx.stroke();
+  }
+  function zong(x, y, s, rot, dk) {   // 一只粽子：圆角三角，粽叶的纹路，十字捆一道绳
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+    ctx.lineWidth = s * 0.35;
+    ctx.fillStyle = ctx.strokeStyle = sh('#5e9a3a', dk);
+    ctx.beginPath(); ctx.moveTo(0, -s * 0.95); ctx.lineTo(s, s * 0.55); ctx.lineTo(-s, s * 0.55); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = sh('#3f7426', dk); ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const t of [0.25, 0.5, 0.75]) { const xb = -s + 2 * s * t; ctx.moveTo(xb, s * 0.55); ctx.lineTo(xb * 0.35, -s * 0.55); }
+    ctx.stroke();
+    ctx.strokeStyle = sh('#e6d3a0', dk); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-s * 0.66, 0); ctx.lineTo(s * 0.66, 0); ctx.moveTo(0, -s * 0.95); ctx.lineTo(0, s * 0.62); ctx.stroke();
+    ctx.restore();
+  }
+
+  // 中秋：盘子里两块月饼，旁边蹲着一只玉兔
+  function drawMooncakes(dk) {
+    ctx.fillStyle = sh('#e8e2d6', dk); ctx.beginPath(); oval(-16, -3, 50, 7); ctx.fill();
+    mooncake(-32, -5, 22, dk); mooncake(4, -2, 18, dk);
+    bunny(50, 0.85, 1, dk, '#f4f1ee', '#d23a4a');
+  }
+  function mooncake(x, y, r, dk) {
+    const h = r * 0.55, ry = r * 0.36;
+    ctx.fillStyle = sh('#b8762e', dk);
+    ctx.beginPath(); ctx.moveTo(x - r, y - h); ctx.lineTo(x - r, y); ctx.ellipse(x, y, r, ry, 0, Math.PI, 0, true); ctx.lineTo(x + r, y - h); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = sh('#dba052', dk); ctx.beginPath(); oval(x, y - h, r, ry); ctx.fill();
+    ctx.strokeStyle = sh('#a8662a', dk); ctx.lineWidth = 1.1;
+    ctx.beginPath(); oval(x, y - h, r * 0.78, ry * 0.78); oval(x, y - h, r * 0.4, ry * 0.4);
+    for (let i = 0; i < 12; i++) { const a = TAU * i / 12; oval(x + Math.cos(a) * r * 0.6, y - h + Math.sin(a) * ry * 0.6, r * 0.07, ry * 0.1); }
+    ctx.stroke();
+  }
+
+  // 国庆：屏幕正中一根高旗杆（让开卡片），旗面挂在屏幕中上方，国庆假期（10 月 1–7 日）一直迎风飘。
+  // 只有 10 月 1 日当天：每块屏第一次开机 / 解锁时（或开着机跨进 10 月 1 日时）从杆底升上去，升到顶迎一阵大风。
+  // 旗面先画进离屏小画布，再切成竖条按波浪错开贴，波峰亮一点、波谷暗一点
+  const FLAG_RISE = 12;   // 升旗用时（秒）
+  let flagWant = true, flagPv = false, flagRise = null;   // flagWant：刚开机 / 刚解锁、还没看过要不要升旗；flagRise = { t0 }：升旗开始的 simT
+  const localDay = () => new Date(now() + locInfo().off * 1000).toISOString().slice(0, 10);   // 天气所在城市的当地日期
+  function checkFlag() {
+    if (!hasFest('national')) { flagRise = null; flagPv = false; return; }
+    if (pvFest()) { if (!flagPv) { flagPv = true; flagRise = { t0: simT + 1.2 }; } return; }   // 预览：每次都演示一遍升旗
+    flagPv = false;
+    if (!flagWant) return;   // 10 月 2–7 日开着机跨过零点：不算开机 / 解锁，旗子接着飘
+    if (host && (paused || asleep)) return;   // 桌面这会儿被窗口挡着 / 画面收起了：等露出来再升，别没人看见就升完了
+    if (demo) return;   // 一天快进把时间拨快了：快进到 10 月 1 日不算真的到了，也别把演示日期记成"今天升过旗"（真的到了国庆节那天照常升）
+    flagWant = false;
+    if (!localDay().endsWith('-10-01')) return;   // 升旗只在国庆节当天，假期里其余几天旗子一直挂在杆顶
+    // 每块屏各记各的：几块屏的页面共用一份 localStorage，不分开的话只有先跑到这里的那块屏会升旗。
+    // ?date= 调试页把日期平移了（demo 拦不住它）：假日期记到带后缀的键上，别把真的"今天升过旗"占掉
+    const key = 'ww.flagDay.' + (L.screen || 'page') + (qParam('date') ? '@dbg' : ''), day = localDay();
+    let seen = null;
+    try { seen = localStorage.getItem(key); localStorage.setItem(key, day); } catch (e) { /* 存不了就每次都升 */ }
+    if (flagRise) return;   // 正升着（升旗途中又锁屏 / 解锁了一次）：标记在上面已经写下，接着升完
+    flagRise = seen === day ? null : { t0: simT + 1.2 };   // 今天这块屏已经升过（重启程序、换显示器设置后页面重载）：直接挂在杆顶
+  }
+  // 升旗进度 p：0 在杆底 … 1 到顶；gust：到顶后那阵大风（慢慢平息）
+  function flagLift() {
+    if (!flagRise) return { p: 1, gust: 0 };
+    const t = simT - flagRise.t0;
+    if (t <= 0) return { p: 0, gust: 0 };
+    const u = Math.min(1, t / FLAG_RISE), p = u * 0.75 + u * u * (3 - 2 * u) * 0.25;   // 基本匀速，起步和到顶稍缓
+    const after = t - FLAG_RISE;
+    if (after > 9) flagRise = null;
+    return { p, gust: after > 0 ? smooth(0, 0.6, after) * Math.exp(-after / 2.5) : 0 };
+  }
+  function drawNationalFlag(k, gy, nt, dk) {
+    const fw = 300 * k, fh = 200 * k, pw = 7 * k, top = Math.max(H * 0.2, 40 * k);   // 旗面 3:2；top = 杆顶
+    // 整块（底座 + 旗杆 + 旗面）横跨 [px - 36k, px + fw + 12k]：旗杆尽量在正中，卡片挡着就就近挪开
+    const off = (fw + 12 * k - 36 * k) / 2;
+    const px = placeX(W / 2 + off, fw + 48 * k, top - 14 * k, gy) - off;
+    const lit = smooth(0.2, 0.75, nt), base = gy - 22 * k;
+    ctx.fillStyle = sh('#8f959f', dk); ctx.fillRect(px - 36 * k, gy - 10 * k, 72 * k, 10 * k);   // 两级石台
+    ctx.fillStyle = sh('#aab0ba', dk); ctx.fillRect(px - 22 * k, base, 44 * k, 12 * k);
+    ctx.fillStyle = sh('#dadde3', dk); ctx.fillRect(px - pw / 2, top, pw, base - top);           // 旗杆：亮面 + 一道暗面，看着是圆的
+    ctx.fillStyle = sh('#9ca1ab', dk); ctx.fillRect(px + pw * 0.1, top, pw * 0.4, base - top);
+    ctx.fillStyle = sh('#f0c84a', dk * 0.6); ctx.beginPath(); oval(px, top - 6 * k, 7 * k, 7 * k); ctx.fill();   // 杆顶金球
+    const rx = px + pw / 2 + 1.5 * k;   // 升降绳：从杆顶垂到下面的绳扣，旗子挂在绳上
+    ctx.strokeStyle = sh('#eeeeee', dk, 0.5); ctx.lineWidth = Math.max(1, 1.2 * k);
+    ctx.beginPath(); ctx.moveTo(rx, top + 3 * k); ctx.lineTo(rx, base - 50 * k); ctx.stroke();
+
+    const { p, gust } = flagLift();
+    const yTop = top + 8 * k, yLow = base - 50 * k - fh;   // 升旗起点：旗面下边在绳扣那儿（大约人手的高度）
+    const fy = yLow + (yTop - yLow) * p;
+    const wind = (0.65 + clamp(Math.abs(cur.windX) * 2, 0, 1) * 0.5) * (1 + 0.8 * gust);
+    const fdk = dk * (1 - 0.6 * lit);   // 夜里有灯照着旗：旗面不像别的装饰压那么暗
+    if (lit > 0.02) lighter(() => glowAt('#fff0cc', rx + fw * 0.5, fy + fh * 0.5, fw * 0.8, 0.1 * lit));
+    const img = flagSprite(), N = clamp(Math.round(fw / 2.5), 48, 140), sw = img.width / N, w = fw / N + 0.8;   // 条切得够细（约 2.5px 一条），旗边的波浪才不出锯齿台阶
+    const sq = ctx.imageSmoothingQuality;
+    ctx.imageSmoothingQuality = 'high';
+    for (let i = 0; i < N; i++) {
+      const t = i / N, ph = simT * 2.4 - t * 6.5;
+      const y = fy + Math.sin(ph) * fh * 0.075 * wind * t + fh * 0.05 * t * t * Math.max(0, 1.3 - wind);   // 越往旗尾摆得越大；风小时旗尾往下耷一点
+      const x = rx + fw * t;
+      ctx.drawImage(img, i * sw, 0, sw, img.height, x, y, w, fh);
+      const s = Math.cos(ph) * 0.22 * Math.min(1, wind) * Math.min(1, t * 3);
+      if (s > 0.01) { ctx.fillStyle = `rgba(255,255,255,${(s * (1 - fdk)).toFixed(3)})`; ctx.fillRect(x, y, w, fh); }
+      const d = fdk * 0.9 + Math.max(0, -s);
+      if (d > 0.01) { ctx.fillStyle = css(NIGHT, Math.min(0.8, d)); ctx.fillRect(x, y, w, fh); }
+    }
+    ctx.imageSmoothingQuality = sq;
+  }
+  let flagCvs = null;
+  function flagSprite() {
+    if (flagCvs) return flagCvs;
+    const c = document.createElement('canvas'); c.width = 480; c.height = 320;   // 比 1080p 上的旗面（300×200）大一些，2K / 4K 屏上星星也不发虚
+    const g = c.getContext('2d'), u = 480 / 30;   // 国旗按 30×20 的网格定星位
+    g.fillStyle = '#de2910'; g.fillRect(0, 0, 480, 320);
+    g.fillStyle = '#ffde00';
+    const st = (cx, cy, R, rot) => {
+      g.beginPath();
+      for (let i = 0; i < 10; i++) { const r = i % 2 ? R * 0.382 : R, a = rot + Math.PI * i / 5; g.lineTo((cx + Math.cos(a) * r) * u, (cy + Math.sin(a) * r) * u); }
+      g.closePath(); g.fill();
+    };
+    st(5, 5, 3, -Math.PI / 2);
+    for (const [x, y] of [[10, 2], [12, 4], [12, 7], [10, 9]]) st(x, y, 1, Math.atan2(5 - y, 5 - x));   // 四颗小星各有一个角正对大星中心
+    return (flagCvs = c);
   }
 
   function cloudColors(e, daylight, golden, storm) {
@@ -784,6 +1694,8 @@
   // 换算成"月龄"天数，0 = 朔，SYN/2 = 望。只用平均朔望月的话误差可达半天以上，十五十六哪天最圆会算错。
   const SYN = 29.530588853;
   function moonAge(t) {
+    const pv = PREV[preview];
+    if (pv && pv.moon === 'full') return SYN / 2;   // 中秋 / 元宵预览：按满月画（真到了节日那天，月亮本来就是圆的）
     const d = t / 86400000 - 10957.5;
     const g = (357.529 + 0.98560028 * d) * RAD;
     const ls = 280.459 + 0.98564736 * d + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g);
@@ -991,6 +1903,9 @@
     if (transitioning() || (demo && demo.speed > 1)) d = Math.min(d, 1000 / bgFps());
     if (st.starA > 0.01) d = Math.min(d, 300);
     if (st.rays) d = Math.min(d, 500);
+    if (decorOn()) d = Math.min(d, 160);   // 雪人冒出来 / 化掉、围巾摆动、灯笼轻晃、彩灯闪烁：6 帧上下够用
+    if (hasFest('national')) d = Math.min(d, 1000 / Math.min(L.fps, 15));   // 正中那面大旗一直在飘：6 帧看着一顿一顿的
+    const uf = userFxFps(); if (uf) d = Math.min(d, 1000 / Math.min(L.fps, uf));   // 自定义效果要的帧率
     return d;
   }
   /// 状态变了（天气 / 预览 / 布局 / 恢复）：别等下一次定时，马上跑一轮
@@ -1009,7 +1924,7 @@
     let st = null, cloudsOn = false;
     try {
       update(dt);
-      if (fxActive) { fxAlloc(true); drawFx(); fxDirty = true; }
+      if (fxActive || decorOn()) { fxAlloc(true); drawFx(); fxDirty = true; }   // 雨雪 / 闪电 / 流星 / 烟花满帧画；雪地、雪人、节日装饰只是低频画
       else if (fxDirty) { fxAlloc(false); fxDirty = false; }
 
       st = bgState();
@@ -1024,8 +1939,8 @@
       else tm = setTimeout(() => frame(performance.now()), st ? idleDelay(st, cloudsOn) : 1000);
     }
   }
-  // 前景画布只在有雨雪 / 闪电时才分配整屏大小；晴天、多云时缩成 1×1 并隐藏，省下一整屏的显存和合成开销
-  function fxNeeded() { return drops.length > 0 || flakes.length > 0 || splash.length > 0 || ripples.length > 0 || !!flash || tgt.rain > 0 || tgt.snow > 0; }
+  // 前景画布只在有雨雪 / 闪电 / 流星时才分配整屏大小；雪地和雪人还留着时也保持分配（低频重画）。晴天、多云时缩成 1×1 并隐藏，省下一整屏的显存和合成开销
+  function fxNeeded() { return drops.length > 0 || flakes.length > 0 || splash.length > 0 || ripples.length > 0 || !!flash || !!meteor || skyFxBusy() || !!flagRise || userFxFast() || tgt.rain > 0 || tgt.snow > 0; }
   let fxOn = false;
   function fxAlloc(on) {
     if (on === fxOn) return;
@@ -1064,6 +1979,7 @@
       clearTimeout(sleepTm); sleepTm = 0;
       if (asleep) {
         asleep = false; firstScene = true;
+        if (flagWant) festAt = -1e9;   // 国庆节当天还没升旗：醒来马上看一眼
         sceneEl.style.display = '';
         resize();                   // 按当前尺寸重新分配画布并启动主循环
         update(0.016); draw();      // 先画好完整的一帧再淡入，不会从空白画布淡进来
@@ -1140,7 +2056,13 @@
         case 'layout': {
           const g0 = L.ground;
           Object.assign(L, m); gotLayout = true;
+          festAt = -1e9;   // 「节日装饰与彩蛋」可能刚开 / 关：马上重新算今天的节日
           if (m.keys) for (const k of Object.keys(weathers)) if (!m.keys.includes(k)) delete weathers[k];   // 不再用到的城市（卡片换了城市）：丢掉它的天气数据
+          {   // 自定义效果脚本：第一次照列表加载；之后列表变了（增删、改过文件）就整页重载，旧脚本干干净净地卸掉
+            const sig = JSON.stringify(m.effects || []);
+            if (userFxSig === null) { userFxSig = sig; loadUserFx(m.effects || []); }
+            else if (sig !== userFxSig) { location.reload(); return; }
+          }
           if (L.ground !== g0) { drops.length = 0; flakes.length = 0; firstFill = true; }   // 地平线变了：雨雪按新的落点重新生成
           if (syncSkyAlpha()) { resize(); frame(performance.now()); }   // 切换壁纸叠加：天空画布整个换掉，重新分配后马上画一帧——别让合成器拿到一张空白的新画布
           pickWeather(); renderPanel(); applyBackdrop(); reportViewport();
@@ -1152,12 +2074,13 @@
         case 'backdrop': backdrop = m; applyBackdrop(); break;
         case 'pause': paused = true; break;
         case 'perf': L.fps = clamp(m.fps | 0, 5, 60); break;
+        case 'unlock': flagWant = true; festAt = -1e9; break;   // 解锁屏幕：国庆节当天这块屏还没升过旗就升一次；锁屏期间可能过了零点，节日马上重算
       }
       applyMinimal();
       // 暂停中（被最大化窗口遮挡）也要保证画面是最新的静态帧，取消遮挡时不会闪黑
       if (paused && !asleep) { firstScene = true; update(0.016); draw(); }
       switch (m.t) {
-        case 'resume': if (paused) { paused = false; last = performance.now(); } break;
+        case 'resume': if (paused) { paused = false; last = performance.now(); if (flagWant) festAt = -1e9; } break;   // 桌面重新露出来：等着的升旗马上开始
       }
       postScene();
       wake();
@@ -1167,7 +2090,9 @@
     // 浏览器里直接打开调试：?mode=rain&day=1&data=sample.json&panel=0
     const q = new URLSearchParams(location.search);
     L.panel = q.get('panel') !== '0'; L.primary = true; L.ground = 0.0444;
-    L.scene = 'dbg'; L.cards = [{ id: 'dbg', key: 'dbg', x: Math.max(0, window.innerWidth - 336 - 28), y: 28 }];   // 一张卡片，右上角（尺寸同 .card）
+    L.scene = 'dbg'; L.cards = [{ id: 'dbg', key: 'dbg', x: Math.max(0, window.innerWidth - CARD_W - 28), y: 28 }];   // 一张卡片，右上角（尺寸同 .card）
+    const cp = /^(\d+),(\d+)$/.exec(q.get('card') || '');   // ?card=40,560 把卡片挪到别处（看节日装饰会不会让开）
+    if (cp) { L.cards[0].x = +cp[1]; L.cards[0].y = +cp[2]; }
     L.minimal = q.get('minimal') === '1'; fxKind = q.get('fx') || null;   // ?minimal=1&fx=rainbow 调试极简模式
     // ?overlay=1&sky=0.45&back=图片URL 调试壁纸叠加（back 模拟宿主发来的系统壁纸底图；不填用灰色渐变占位）
     L.overlayWall = q.get('overlay') === '1';
@@ -1180,7 +2105,16 @@
       performance.now = () => vt;
       paused = true;
       window.__step = (dt) => { vt += dt * 1000; update(dt); draw(); };
+      window.__snow = v => { snowAcc = +v || 0; stepEaster(0); };   // 手动设降雪积累（配 ?snowfast=1 看雪人 / 融化）
+      window.__pv = m => { setPreview(m, false); };   // 调试：切预览天气（雪停 = 雪人开始化）
+      window.__snowmen = () => ({ simT, men: men.map(m => m && { born: m.born, dying: m.dying, fadeAt: m.fadeAt, fadeFrom: m.fadeFrom, z: m.z }) });   // 调试：雪人状态（复活连续性测试用）
+      window.meteorObj = () => meteor;   // 调试用：看看这颗流星往哪边飞
+      window.__fest = () => ({ keys: fest.keys, fw: fest.fw, rockets: rockets.length, bursts: bursts.length, sleigh: !!sleigh, bats: !!bats, daylight: +lastDaylight.toFixed(2), men: men.filter(Boolean).length,
+        flag: flagRise ? +(simT - flagRise.t0).toFixed(1) : null, user: userFx.map(u => u.file + (u.on ? ' on' : '') + (u.dead ? ' dead' : '')) });
+      window.__unlock = () => { flagWant = true; festAt = -1e9; };
     }
+    // ?effects=birthday&fxbase=/web/effects/ 加载自定义效果脚本（调试；宿主里是 layout 带来的文件列表）
+    if (q.get('effects')) { userFxSig = '[]'; loadUserFx(q.get('effects').split(',').map(f => ({ f, v: 0 }))); }
     const dd = Date.parse(q.get('date') + 'T00:00:00');   // ?date=2026-11-24 换一天（看月相）
     if (!isNaN(dd)) { const d0 = new Date().setHours(0, 0, 0, 0), real = Date.now; Date.now = () => real() + dd - d0; }
     const apply = () => {

@@ -58,13 +58,22 @@ namespace WeatherWallpaper
                 WebHost.Configure(wv);
                 wv.Settings.AreDevToolsEnabled = devTools;
                 wv.SetVirtualHostNameToFolderMapping(Backdrop.Host, Backdrop.Dir, CoreWebView2HostResourceAccessKind.Allow);   // 极简模式的系统壁纸底图
+                Effects.EnsureDir();
+                wv.SetVirtualHostNameToFolderMapping(Effects.Host, Effects.Dir, CoreWebView2HostResourceAccessKind.Allow);     // 用户的自定义效果脚本
                 wv.WebMessageReceived += (o, e) =>
                 {
                     string str = null;
                     try { str = e.TryGetWebMessageAsString(); } catch { }
                     if (str != null)
                     {
-                        if (str == "ready") { Ready = true; Flush(); OnReady?.Invoke(this); }
+                        if (str == "ready")
+                        {
+                            // 页面整页重载过（如自定义效果文件变了）：新页面默认是没暂停的，按宿主这边的状态补一句
+                            bool again = Ready;
+                            Ready = true; Flush();
+                            if (again && paused) Post("{\"t\":\"pause\"}");
+                            OnReady?.Invoke(this);
+                        }
                         else OnString?.Invoke(this, str);
                     }
                     else OnJson?.Invoke(this, e.WebMessageAsJson);
@@ -95,7 +104,8 @@ namespace WeatherWallpaper
         static readonly string[] Snapshots = { "layout", "weather", "preview", "fx", "backdrop" };
         static string GroupOf(string json) =>
             json.StartsWith("{\"t\":\"pause\"", StringComparison.Ordinal) || json.StartsWith("{\"t\":\"resume\"", StringComparison.Ordinal) ? "pause"
-            : json.StartsWith("{\"t\":\"perf\"", StringComparison.Ordinal) ? "perf" : null;
+            : json.StartsWith("{\"t\":\"perf\"", StringComparison.Ordinal) ? "perf"
+            : json.StartsWith("{\"t\":\"unlock\"", StringComparison.Ordinal) ? "unlock" : null;
         static bool IsSnapshot(string json) => Array.Exists(Snapshots, t => json.StartsWith("{\"t\":\"" + t + "\"", StringComparison.Ordinal));
 
         void Flush()
