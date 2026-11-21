@@ -358,7 +358,8 @@ namespace WeatherWallpaper
         }
 
         // LayoutJson 等热路径每块屏、每张卡片都会调：复用一个实例（可能同时跑在几个取天气的回调里，加锁）
-        static readonly JavaScriptSerializer JsonStrSer = new JavaScriptSerializer();
+        // 不限长度：默认最多 2M 字符，自定义卡片联网取到的 1 MB 文字要是满是 < > & '（每个都转成 6 个字符的 Unicode 转义）会超，抛错就被当成「连不上」了
+        static readonly JavaScriptSerializer JsonStrSer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         static readonly object JsonStrLock = new object();
         public static string JsonStr(string s) { lock (JsonStrLock) return JsonStrSer.Serialize(s ?? ""); }
     }

@@ -28,7 +28,7 @@
 //   fx.night         0 = 白天 … 1 = 深夜（fx.daylight 正好相反）
 //   fx.weather       { rain, snow, cloud, fog, thunder, wind }，都是 0–1，wind 正数往右吹
 //   fx.date          同上面 when 的 d；fx.preview 是不是在效果预览里
-//   fx.cards         天气卡片的位置 [{ x, y, w, h }]
+//   fx.cards         屏幕上卡片的位置 [{ x, y, w, h }]（天气卡片和自定义卡片；藏着的——还没画好、出错了——不算）
 //   fx.state         这个效果自己的小本子，随便往里放东西（每次出现时清空）
 //   fx.free(x, w, y0, y1)    宽 w 的东西放在 [y0, y1] 这段高度上：离 x 最近、又不被卡片挡住的中心 x
 //   fx.glow(颜色, x, y, 半径, 亮度)   一团柔光（颜色写 '#rrggbb'）

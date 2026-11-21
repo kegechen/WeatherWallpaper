@@ -42,6 +42,7 @@ namespace WeatherWallpaper
                 Height = Bounds.Height,
             });
             DesktopHost.Attach(Handle, Bounds, layered);
+            resumeCards.Tick += (o, e) => RetryCards();
             Init(env, devTools);
         }
 
@@ -78,10 +79,55 @@ namespace WeatherWallpaper
                     }
                     else OnJson?.Invoke(this, e.WebMessageAsJson);
                 };
-                wv.Navigate("https://wallpaper.local/index.html" + (Primary ? "?primary=1" : ""));
+                // 页面进程崩了（如自定义卡片的脚本把内存吃光）/ 卡死：重新载入，页面就绪后宿主把状态全发一遍（OnReady）。
+                // 10 分钟内接连崩 3 次：多半是哪个自定义卡片脚本每次都把页面搞崩，先不运行自定义卡片（半小时后、或改过卡片脚本后 RetryCards 恢复）。
+                // 卡死不算崩：卡片脚本跑在 Worker 里卡不住页面，卡死多半是系统太忙（刚从睡眠醒来之类），不该因此停掉自定义卡片
+                wv.ProcessFailed += (o, ev) =>
+                {
+                    var kind = ev.ProcessFailedKind;
+                    Log.Write("wallpaper " + DeviceName + ": webview process failed " + kind);
+                    var now = DateTime.UtcNow;
+                    if (kind == CoreWebView2ProcessFailedKind.RenderProcessExited)
+                    {
+                        crashes.RemoveAll(t => (now - t).TotalMinutes > 10);
+                        crashes.Add(now);
+                        if (crashes.Count >= 3 && !noCards)
+                        {
+                            noCards = true;
+                            Log.Write("wallpaper " + DeviceName + ": crashed " + crashes.Count + " times in 10 minutes, custom cards paused");
+                            // 崩溃不一定是卡片脚本的错（显卡驱动更新、睡眠唤醒、内存紧张也会）：半小时后自己再试一次，真是脚本的话会再崩 3 次、再停半小时
+                            resumeCards.Stop(); resumeCards.Start();
+                        }
+                    }
+                    else if (kind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)
+                    {
+                        if ((now - lastHang).TotalSeconds < 60) return;   // 一直卡着时这个事件会接连来：最多一分钟重新载入一次
+                        lastHang = now;
+                    }
+                    else return;
+                    var u = Url;
+                    System.Threading.SynchronizationContext.Current?.Post(_ => { try { if (!disposed) ctl?.CoreWebView2.Navigate(u); } catch { } }, null);
+                };
+                wv.Navigate(Url);
                 if (devTools) wv.OpenDevToolsWindow();
             }
             catch (Exception ex) { Log.Write("webview init failed: " + ex); }
+        }
+
+        readonly List<DateTime> crashes = new List<DateTime>();
+        DateTime lastHang;   // 上次因为页面卡死重新载入的时间
+        bool noCards;   // 页面接连崩溃：先不运行自定义卡片（页面里显示为出错）
+        readonly Timer resumeCards = new Timer { Interval = 30 * 60 * 1000 };   // noCards 之后过多久自己恢复
+        string Url => "https://wallpaper.local/index.html?" + (Primary ? "primary=1" : "") + (noCards ? "&nocards=1" : "");
+
+        /// <summary>卡片脚本改过了 / 停了半小时了：因为接连崩溃停掉的自定义卡片重新运行（重新载入页面）。</summary>
+        public void RetryCards()
+        {
+            resumeCards.Stop();
+            if (!noCards || disposed || ctl == null) return;
+            noCards = false; crashes.Clear();
+            Log.Write("wallpaper " + DeviceName + ": custom cards resumed");
+            try { ctl.CoreWebView2.Navigate(Url); } catch { }
         }
 
         public void Post(string json)
@@ -101,7 +147,8 @@ namespace WeatherWallpaper
             try { ctl.CoreWebView2.PostWebMessageAsJson(json); } catch (Exception ex) { Log.Write("post failed: " + ex.Message); }
         }
 
-        static readonly string[] Snapshots = { "layout", "weather", "preview", "fx", "backdrop" };
+        // 自定义卡片的回复（csrc / cfile / cget）也不排队：页面没就绪 = 发请求的那个页面已经没了，新页面会自己重新要
+        static readonly string[] Snapshots = { "layout", "weather", "preview", "fx", "backdrop", "csrc", "cfile", "cget" };
         static string GroupOf(string json) =>
             json.StartsWith("{\"t\":\"pause\"", StringComparison.Ordinal) || json.StartsWith("{\"t\":\"resume\"", StringComparison.Ordinal) ? "pause"
             : json.StartsWith("{\"t\":\"perf\"", StringComparison.Ordinal) ? "perf"
@@ -141,6 +188,7 @@ namespace WeatherWallpaper
         {
             if (disposed) return;
             disposed = true;
+            resumeCards.Dispose();
             try { ctl?.Close(); } catch { }
             ctl = null;
             DestroyHandle();

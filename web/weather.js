@@ -189,5 +189,40 @@ const WX = (() => {
     for (let i = chips.length - 1; i > 0 && el.scrollWidth > el.clientWidth + 0.5; i--) chips[i].style.display = 'none';
   }
 
-  return { info, scene, chinaAqi, aqiLevel, wind, panelHtml, fitChips };
+  /** 给自定义卡片的天气（api.weather）：整理好的、和天气卡片同一个口径的数字和文字（不给原始数据：每次重画都要整份复制进 Worker）。
+   *  nowMs = 现在（真实时间）；时间、日期都是那个城市的当地时间。字段说明见 README「自定义卡片」 */
+  function summary(w, nowMs) {
+    const fc = w.fc, c = fc.current, d = fc.daily, h = fc.hourly;
+    // 没有这个字段（Open-Meteo 总会给，防万一）就按 UTC 算：直接乘是 NaN，toISOString 会抛错，api.weather 就一直是 null 了
+    const localMs = nowMs + (fc.utc_offset_seconds || 0) * 1000;
+    const iso = new Date(localMs).toISOString(), today = iso.slice(0, 10), curHour = iso.slice(0, 13);
+    let di = d.time.indexOf(today); if (di < 0) di = 0;
+    let hi = h.time.findIndex(t => t.slice(0, 13) === curHour); if (hi < 0) hi = 0;
+    const r = v => v == null || isNaN(v) ? null : Math.round(v);
+    const now = info(c.weather_code), aqi = aqiLevel(chinaAqi(w.aq && w.aq.current));
+    const hours = [], days = [];
+    for (let i = hi; i < Math.min(h.time.length, hi + 24); i++) {
+      const k = info(h.weather_code[i]);
+      hours.push({ time: h.time[i].slice(11, 16), temp: r(h.temperature_2m[i]), kind: k.kind, text: k.text, isDay: h.is_day ? h.is_day[i] === 1 : true,
+        rain: h.precipitation_probability ? r(h.precipitation_probability[i]) : null });
+    }
+    for (let i = di; i < d.time.length; i++) {
+      const k = info(d.weather_code[i]);
+      days.push({ date: d.time[i], week: WEEK[new Date(d.time[i] + 'T00:00:00Z').getUTCDay()], hi: r(d.temperature_2m_max[i]), lo: r(d.temperature_2m_min[i]),
+        kind: k.kind, text: k.text, rain: d.precipitation_probability_max ? r(d.precipitation_probability_max[i]) : null,
+        sunrise: hm(d.sunrise && d.sunrise[i]), sunset: hm(d.sunset && d.sunset[i]) });
+    }
+    return {
+      city: w.loc && w.loc.name || '', temp: r(c.temperature_2m), feels: r(c.apparent_temperature), humidity: r(c.relative_humidity_2m),
+      kind: now.kind, text: now.text, isDay: c.is_day === 1, code: c.weather_code, cloud: r(c.cloud_cover),
+      wind: wind(c.wind_speed_10m, c.wind_direction_10m), windSpeed: r(c.wind_speed_10m), windDir: r(c.wind_direction_10m),
+      hi: days.length ? days[0].hi : null, lo: days.length ? days[0].lo : null,
+      aqi: aqi ? { value: aqi.value, text: aqi.text, color: aqi.color } : null,
+      sunrise: days.length ? days[0].sunrise : '', sunset: days.length ? days[0].sunset : '',
+      updated: w.ts || null, timezone: fc.timezone || '', utcOffset: fc.utc_offset_seconds || 0,
+      hours, days,
+    };
+  }
+
+  return { info, scene, chinaAqi, aqiLevel, wind, panelHtml, fitChips, summary };
 })();

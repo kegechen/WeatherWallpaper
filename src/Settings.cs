@@ -34,6 +34,10 @@ namespace WeatherWallpaper
         public bool Off { get; set; }
         // 卡片上显示哪些内容（城市和当前天气总是显示），逗号分隔，见 ShowKeys；卡片高度按它算（CardLayout.HeightOf）。null = 默认（DefaultShow）
         public string Show { get; set; } = DefaultShow;
+        // 自定义卡片：cards 文件夹里的脚本名（不带 .js），内容由脚本画（见 CustomCards / README「自定义卡片」）；null = 天气卡片。默认卡片总是天气卡片
+        public string Script { get; set; }
+        // 自定义卡片的高度（CSS 像素，64–720，宽度和天气卡片一样固定 336）；天气卡片为 null（高度按 Show 算）
+        public int? Height { get; set; }
 
         // 可选内容，按卡片上从上到下的顺序：公历日期、星期、农历（日期行）；今日最高 / 最低、定位来源（手动 / IP 定位）；
         // 空气、体感、湿度、风（指标标签）；今天逐小时预报、未来几天预报；日出日落、更新时间（底部）。
@@ -50,11 +54,16 @@ namespace WeatherWallpaper
         }
 
         public bool IsDefault() => Id == DefaultId;
+        /// <summary>自定义卡片：不取天气、不参与全屏天气画面（Scene / Hidden 都没有意义），只占卡片的位置。</summary>
+        public bool IsCustom() => Script != null;
+        /// <summary>能拿"画面跟随"（Scene）：显示着的天气卡片。隐藏的、自定义卡片不参与，这块屏的画面交给别的卡片。</summary>
+        public bool CanTakeScene() => !Off && !IsCustom();
         public bool IsAuto() => !(Lat.HasValue && Lon.HasValue);
         /// <summary>手动卡片的城市名；手改文件只填了经纬度时用坐标（桌面卡片、托盘面板、卡片设置都用这一个）。</summary>
         public string PlaceName() => !string.IsNullOrEmpty(City) ? City
             : Lat.Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ", " + Lon.Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
-        /// <summary>天气数据的分组键：自动定位为 auto，指定城市按经纬度（两位小数，约 1 公里）——同一城市的卡片共用一份天气。</summary>
+        /// <summary>天气数据的分组键：自动定位为 auto，指定城市按经纬度（两位小数，约 1 公里）——同一城市的卡片共用一份天气。
+        /// 自定义卡片没有城市（Normalize 清掉了经纬度），这里也是 auto：用之前先把它们排除（Program.WeatherCards）。</summary>
         public string LocKey() => IsAuto() ? "auto" : string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F2},{1:F2}", Lat.Value, Lon.Value);
         public CardSpec Clone() => (CardSpec)MemberwiseClone();
 
@@ -70,6 +79,15 @@ namespace WeatherWallpaper
             OffsetX = Math.Max(Pos[1] == 'c' ? -4000 : 0, Math.Min(4000, OffsetX));   // 只有居中位置的水平偏移可以是负数（往左）
             OffsetY = Math.Max(0, Math.Min(4000, OffsetY));
             if (IsAuto() || Math.Abs(Lat.Value) > 90 || Math.Abs(Lon.Value) > 180) { Lat = Lon = null; City = null; }
+            Script = Id == DefaultId ? null : CustomCards.CleanName(Script);
+            if (Script != null)
+            {
+                // 自定义卡片没有天气：城市、画面跟随、只显示天气画面都清掉（手改文件写了也不认，免得它去取天气、抢这块屏的天气画面）
+                Scene = Hidden = false;
+                City = null; Lat = Lon = null;
+                Height = Math.Max(CustomCards.MinHeight, Math.Min(CustomCards.MaxHeight, Height ?? CustomCards.DefaultHeight));
+            }
+            else Height = null;
             // 显示内容：去掉不认识的、重复的，按固定顺序排（比较改没改过、写进文件都用同一个样子）；"" = 只显示城市和当前天气
             if (Show == null) Show = DefaultShow;
             else
@@ -82,7 +100,7 @@ namespace WeatherWallpaper
         public static string NewId() => "c" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
         /// <summary>截到最多 n 个字符，不把 emoji 等代理对切成半个。</summary>
-        static string Cut(string s, int n)
+        internal static string Cut(string s, int n)
         {
             if (s.Length <= n) return s;
             if (char.IsHighSurrogate(s[n - 1])) n--;
@@ -222,12 +240,12 @@ namespace WeatherWallpaper
         /// <summary>
         /// 每块屏恰好有一张卡片负责"全屏天气画面跟随"（Scene = true）：没有的补上这块屏的第一张，有多张的只留一张。
         /// 只显示天气画面的卡片（Hidden）就是用来提供天气画面的：同屏有它时总是它。否则 prefer = 刚被用户勾选的那张（同一块屏上有多张标记时留它）。
-        /// 隐藏（Off）的卡片不参与：不拿画面跟随，这块屏的画面交给其他卡片。
+        /// 隐藏（Off）的卡片、自定义卡片不参与：不拿画面跟随，这块屏的画面交给其他卡片（只有自定义卡片的屏用默认卡片的城市，见 App.SceneKeyOf）。
         /// </summary>
         public static void NormalizeScenes(IList<CardSpec> cards, string prefer = null)
         {
-            foreach (var c in cards) if (c.Off) c.Scene = false;
-            foreach (var g in cards.Where(c => !c.Off).GroupBy(CardLayout.GroupKey))
+            foreach (var c in cards) if (!c.CanTakeScene()) c.Scene = false;
+            foreach (var g in cards.Where(c => c.CanTakeScene()).GroupBy(CardLayout.GroupKey))
             {
                 var list = g.ToList();
                 var pick = list.FirstOrDefault(c => c.Hidden) ?? list.FirstOrDefault(c => c.Id == prefer && c.Scene) ?? list.FirstOrDefault(c => c.Scene) ?? list[0];
@@ -366,7 +384,9 @@ namespace WeatherWallpaper
                 "Hidden = true 不画卡片、只显示天气画面（这块屏的天气城市由它决定）；" +
                 "Off = true 隐藏这张卡片（默认卡片除外）：不显示、不占位置、不更新天气，也不决定天气画面，相当于暂时删掉，改回 false 即恢复；" +
                 "Show 卡片上显示的内容（城市和当前天气总是显示，卡片高度随之变化），逗号分隔：date 公历日期、week 星期、lunar 农历、hilo 今日最高 / 最低、src 定位来源、" +
-                "aqi 空气、feel 体感、hum 湿度、wind 风、hours 今天逐小时、days 未来几天、sun 日出日落、upd 更新时间（\"\" = 只显示城市和当前天气）",
+                "aqi 空气、feel 体感、hum 湿度、wind 风、hours 今天逐小时、days 未来几天、sun 日出日落、upd 更新时间（\"\" = 只显示城市和当前天气）；" +
+                "Script 自定义卡片的脚本名（cards 文件夹里的 .js 文件，不带扩展名；null = 天气卡片，默认卡片总是天气卡片），自定义卡片不取天气、不决定天气画面，City / Scene / Hidden / Show 对它无效；" +
+                "Height 自定义卡片的高度，" + CustomCards.MinHeight + "–" + CustomCards.MaxHeight + " 像素（天气卡片为 null）",
             ["Fps"] = "帧率：30 或 60",
             ["TaskbarFx"] = "任务栏雨雪效果：true 开 / false 关",
             ["ShowPanel"] = "桌面天气卡片总开关：true 显示 / false 全部隐藏（隐藏后可左键点托盘图标查看）",

@@ -95,6 +95,13 @@ namespace WeatherWallpaper
         string effectsJson = "[]";
         FileSystemWatcher effectsWatcher;
         readonly WinTimer effectsRescan = new WinTimer { Interval = 600 };
+        // 自定义卡片（见 CustomCards）：cards 文件夹里的脚本。layout 里每张自定义卡片带上它脚本的修改时间，改过文件页面就重新加载那张卡片
+        List<CustomCards.Script> cardScripts = new List<CustomCards.Script>();
+        string cardScriptsSig = "";
+        readonly WinTimer cardsRescan = new WinTimer { Interval = 600 };
+        // 自定义卡片现在的错误（卡片 Id → 原因；页面报上来的，没有 = 正常）：卡片设置里显示；日志里同一个错误 10 分钟内只记一次
+        readonly Dictionary<string, string> cardErrs = new Dictionary<string, string>();
+        readonly Dictionary<string, DateTime> cardLogged = new Dictionary<string, DateTime>();
         string perfText = "";
         readonly PerfMonitor perf = new PerfMonitor();
         static readonly JavaScriptSerializer Js = new JavaScriptSerializer();
@@ -432,9 +439,11 @@ namespace WeatherWallpaper
         /// </summary>
         string SceneKeyOf(WallpaperWindow w)
         {
-            var on = places.Where(p => p.Host != null && p.Host.DeviceName == w.DeviceName).ToList();
+            var mine = places.Where(p => p.Host != null && p.Host.DeviceName == w.DeviceName).ToList();
+            var on = mine.Where(p => !p.Card.IsCustom()).ToList();   // 自定义卡片没有城市，不决定天气画面
             var pick = on.FirstOrDefault(p => p.Card.Scene) ?? on.FirstOrDefault();
-            return pick != null ? pick.Card.LocKey() : w.SceneKey;
+            if (pick != null) return pick.Card.LocKey();
+            return mine.Count > 0 ? DefaultKey() : w.SceneKey;   // 这块屏上只有自定义卡片：天气画面用默认卡片的城市
         }
 
         /// <summary>重新排卡片、定每块屏的画面城市，发给各页面（卡片设置窗口开着时一并更新它的"放不放得下"）。</summary>
@@ -445,6 +454,8 @@ namespace WeatherWallpaper
             if (!tbKnown) { IntPtr h; tb = TaskbarRect(out h); }
             var shown = walls.Select(w => Screen.AllScreens.FirstOrDefault(s => s.DeviceName == w.DeviceName)).Where(s => s != null).ToList();
             places = CardLayout.Arrange(EffectiveCards(), shown, AreaOf);
+            // 哪块屏都没在运行的卡片（挪到了放不下的屏、原来那块屏的窗口跟着撤掉了——没有页面再报 gone）：记着的错误清掉，卡片设置里别再显示
+            foreach (var id in cardErrs.Keys.Where(id => !places.Any(p => p.Card.Id == id && p.Host != null && p.Rect.HasValue)).ToList()) cardErrs.Remove(id);
             foreach (var w in walls)
             {
                 w.SceneKey = SceneKeyOf(w);
@@ -464,9 +475,10 @@ namespace WeatherWallpaper
             bool hasTb = tb.HasValue && w.Bounds.Contains(new Point(tb.Value.X + tb.Value.Width / 2, tb.Value.Y + tb.Value.Height / 2));
             if (hasTb) ground = (w.Bounds.Bottom - tb.Value.Top) / (double)w.Bounds.Height;
             bool main = w == MainWall;
-            // 每张卡片带城市键、显示内容和高度（高度按显示的内容算，CardLayout.HeightOf）
+            // 天气卡片带城市键和显示内容；自定义卡片带脚本名和脚本的修改时间（0 = 文件不在，页面照样去要、拿到"找不到脚本"的错误）
             var cards = string.Join(",", PlacesOn(w).Select(p => "{\"id\":" + WeatherService.JsonStr(p.Card.Id)
-                + ",\"key\":" + WeatherService.JsonStr(p.Card.LocKey()) + ",\"show\":" + WeatherService.JsonStr(p.Card.Show)
+                + (p.Card.IsCustom() ? ",\"script\":" + WeatherService.JsonStr(p.Card.Script) + ",\"v\":" + ScriptVersion(p.Card.Script)
+                    : ",\"key\":" + WeatherService.JsonStr(p.Card.LocKey()) + ",\"show\":" + WeatherService.JsonStr(p.Card.Show))
                 + ",\"x\":" + p.Rect.Value.X.ToString("F1", Inv) + ",\"y\":" + p.Rect.Value.Y.ToString("F1", Inv)
                 + ",\"h\":" + p.Rect.Value.Height.ToString("F1", Inv) + "}"));
             return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", Inv)
@@ -476,9 +488,14 @@ namespace WeatherWallpaper
                 + ",\"cloudAlpha\":" + settings.CloudAlphaValue().ToString("F3", Inv) + ",\"festive\":" + B(settings.Festive)
                 + ",\"scene\":" + WeatherService.JsonStr(w.SceneKey) + ",\"screen\":" + WeatherService.JsonStr(w.DeviceName) + ",\"cards\":[" + cards + "]"
                 + ",\"effects\":" + effectsJson
+                + ",\"defKey\":" + WeatherService.JsonStr(DefaultKey())   // 自定义卡片的 api.weather 用默认卡片城市的天气
                 + ",\"keys\":[" + string.Join(",", cities.Keys.Select(WeatherService.JsonStr)) + "]}";   // 还在用的城市：页面据此丢掉不再用的天气数据
         }
         static string B(bool b) => b ? "true" : "false";
+        /// <summary>列表里的卡片脚本（文件名不分大小写），不在列表里（找不到、隐藏的、排在 50 个之后的）是 null。版本号、能不能运行、新增时的默认名称和高度都按它。</summary>
+        CustomCards.Script FindScript(string name) => cardScripts.FirstOrDefault(s => string.Equals(s.File, name, StringComparison.OrdinalIgnoreCase));
+        // 不在列表里是 0：页面来要脚本时回不运行的原因（csrc）；列出来了版本号一变，页面就重新加载
+        long ScriptVersion(string name) => FindScript(name)?.V ?? 0;
 
         void OnWallReady(WallpaperWindow w)
         {
@@ -505,7 +522,16 @@ namespace WeatherWallpaper
                 var d = Js.Deserialize<Dictionary<string, object>>(json);
                 if (d == null || !d.ContainsKey("t")) return;
                 Func<string, double> num = k => d.ContainsKey(k) && d[k] != null ? Convert.ToDouble(d[k], Inv) : 0;
+                Func<string, string> str = k => d.ContainsKey(k) && d[k] != null ? Convert.ToString(d[k], Inv) : null;
                 var t = d["t"] as string;
+                // 自定义卡片：要脚本、读 cards 文件夹里的文件、联网、报告出错 / 恢复（见 web/cards.js）
+                switch (t)
+                {
+                    case "csrc": { var f = str("f"); w.Post(CustomCards.ReadScript(f, FindScript(f) != null)); return; }
+                    case "cfile": w.Post("{\"t\":\"cfile\",\"rid\":" + (long)num("rid") + "," + CustomCards.ReadFile(str("path"), str("kind")) + "}"); return;
+                    case "cget": CardFetch(w, (long)num("rid"), str("id"), str("kind"), str("url"), str("method"), str("body"), d.ContainsKey("headers") ? d["headers"] as Dictionary<string, object> : null); return;
+                    case "cstate": CardState(w, str("id"), str("script"), str("err"), d.ContainsKey("gone")); return;
+                }
                 if (t == "viewport")
                 {
                     // 页面的实际视口：卡片位置按它换算，和页面的 CSS 像素严格一致
@@ -537,6 +563,43 @@ namespace WeatherWallpaper
         }
 
         void Broadcast(string json) { foreach (var w in walls) w.Post(json); flyout?.Post(json); }
+
+        /// <summary>自定义卡片的 api.fetchText / fetchJson / fetchImage：宿主替它发请求（限制见 CustomCards.Fetch），结果按 rid 发回那个页面。</summary>
+        async void CardFetch(WallpaperWindow w, long rid, string id, string kind, string url, string method, string body, Dictionary<string, object> headers)
+        {
+            string r;
+            try { r = await CustomCards.Fetch(id ?? "", kind == "image" ? "image" : "text", url, method, body, headers); }
+            catch (Exception ex) { r = "\"ok\":false,\"err\":" + WeatherService.JsonStr(ex.Message); }
+            if (quitStage == 0 && walls.Contains(w)) w.Post("{\"t\":\"cget\",\"rid\":" + rid + "," + r + "}");   // 这期间页面换掉了：旧请求的回复页面自己会丢掉
+        }
+
+        /// <summary>
+        /// 页面报告自定义卡片出错 / 恢复（err 为空 = 正常）：记日志，告诉卡片设置窗口（「预览」那里显示原因）。
+        /// gone = 这张卡片不在这个页面上运行了（删了、隐藏了、挪到别的屏）：只清掉记着的错误，不记日志。
+        /// </summary>
+        void CardState(WallpaperWindow w, string id, string script, string err, bool gone)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            // 挪到了别的屏、在那边摆上了：那边的页面会报它自己的状态。那边放不下（Rect 是 null）就没有页面运行它，这里得把旧的错误清掉
+            if (gone && places.Any(p => p.Card.Id == id && p.Host != null && p.Host.DeviceName != w.DeviceName && p.Rect.HasValue)) return;
+            err = gone || string.IsNullOrEmpty(err) ? null : err.Length > 600 ? err.Substring(0, 600) + "…" : err;
+            string old;
+            cardErrs.TryGetValue(id, out old);
+            if (old == err) return;
+            if (err == null) cardErrs.Remove(id); else cardErrs[id] = err;
+            if (gone) { cardWin?.Post(Js.Serialize(new { t = "cerr", id, err = "" })); return; }
+            // 日志：同一张卡片的同一句话（某个错误 / 恢复正常）10 分钟内只记一次（refresh 很短、时好时坏的卡片别把日志刷满）
+            var now = DateTime.UtcNow;
+            var key = id + "\n" + (err ?? "ok");
+            DateTime at;
+            if (!(cardLogged.TryGetValue(key, out at) && (now - at).TotalMinutes < 10))
+            {
+                if (cardLogged.Count > 200) foreach (var k in cardLogged.Where(e => (now - e.Value).TotalMinutes >= 10).Select(e => e.Key).ToList()) cardLogged.Remove(k);
+                cardLogged[key] = now;
+                Log.Write("card " + script + " [" + id + "]: " + (err ?? "ok"));
+            }
+            cardWin?.Post(Js.Serialize(new { t = "cerr", id, err = err ?? "" }));
+        }
 
         FlyoutWindow flyout;
         FlyoutWindow Flyout()
@@ -838,7 +901,7 @@ namespace WeatherWallpaper
         {
             int secs = settings.PlaySecondsValue();
             var keys = kind == "off" ? cities.Keys.ToList()
-                : cardId != null ? EffectiveCards().Where(c => c.Id == cardId).Select(c => c.LocKey()).ToList()
+                : cardId != null ? WeatherCards().Where(c => c.Id == cardId).Select(c => c.LocKey()).ToList()
                 : walls.Select(w => w.SceneKey).Distinct().ToList();
             foreach (var k in keys)
             {
@@ -883,7 +946,7 @@ namespace WeatherWallpaper
         void SyncCities(bool refresh = true, CardSpec edited = null)
         {
             var now = DateTime.UtcNow;
-            var eff = EffectiveCards();
+            var eff = WeatherCards();   // 自定义卡片不取天气（它的 api.weather 用默认卡片的，默认卡片总是天气卡片）
             var want = new Dictionary<string, CardSpec>();
             foreach (var c in eff) if (!want.ContainsKey(c.LocKey())) want[c.LocKey()] = c;
             foreach (var k in cities.Keys.ToList())
@@ -1364,6 +1427,8 @@ namespace WeatherWallpaper
         /// 不显示、不占位置、不取天气、不决定天气画面，它的屏上没有别的卡片时也不显示天气壁纸。
         /// </summary>
         List<CardSpec> EffectiveCards() => AllCards().Where(c => !c.Off).ToList();
+        /// <summary>参与显示的天气卡片（不含自定义卡片：它没有城市，不取天气）。按城市分组、取天气用它，别直接拿 EffectiveCards 的 LocKey。</summary>
+        List<CardSpec> WeatherCards() => EffectiveCards().Where(c => !c.IsCustom()).ToList();
 
         /// <summary>所有卡片，含隐藏（Off）的（卡片设置的页签、预览图、摆放检查要按原来的顺序看到它们）。</summary>
         List<CardSpec> AllCards()
@@ -1386,8 +1451,8 @@ namespace WeatherWallpaper
                     // 否则 NormalizeScenes 会还给排在第一的 draft，页面勾选框又被勾上，和 draft.Scene 对不上。
                     // 刚隐藏（Off）的也走这里（Off 的 Scene 总是 false）：画面跟随交给同屏没隐藏的卡片
                     var key = CardLayout.GroupKey(draft);
-                    var other = list.FirstOrDefault(k => k.Id != draft.Id && !k.Off && CardLayout.GroupKey(k) == key && k.Scene)
-                             ?? list.FirstOrDefault(k => k.Id != draft.Id && !k.Off && CardLayout.GroupKey(k) == key);
+                    var other = list.FirstOrDefault(k => k.Id != draft.Id && k.CanTakeScene() && CardLayout.GroupKey(k) == key && k.Scene)
+                             ?? list.FirstOrDefault(k => k.Id != draft.Id && k.CanTakeScene() && CardLayout.GroupKey(k) == key);
                     if (other != null) { other.Scene = true; prefer = other.Id; }
                 }
             }
@@ -1397,7 +1462,7 @@ namespace WeatherWallpaper
 
         static int ScreenIndex(Screen s) => Array.FindIndex(Screen.AllScreens, x => x.DeviceName == s.DeviceName);
         static string ScreenName(Screen s) => "显示器 " + (ScreenIndex(s) + 1);
-        string CardName(CardSpec c) => !string.IsNullOrEmpty(c.Name) ? c.Name : c.IsDefault() ? "默认卡片" : c.IsAuto() ? "自动定位"
+        string CardName(CardSpec c) => !string.IsNullOrEmpty(c.Name) ? c.Name : c.IsDefault() ? "默认卡片" : c.IsCustom() ? c.Script : c.IsAuto() ? "自动定位"
             : c.PlaceName();
 
         /// <summary>
@@ -1432,18 +1497,18 @@ namespace WeatherWallpaper
             if (id == null) AddCard();
         }
 
-        /// <summary>「＋ 新增卡片」：在放得下的屏上建一张新卡片（马上保存），切过去编辑。都放不下就不新增。</summary>
-        void AddCard()
+        /// <summary>「＋ 新增卡片」：在放得下的屏上建一张新卡片（马上保存），切过去编辑。都放不下就不新增。script = 自定义卡片用哪个脚本（null = 天气卡片）。</summary>
+        void AddCard(string script = null)
         {
             if (cardWin == null || settings.Cards.Count >= Settings.MaxCards) return;
             var prev = draft;
             draft = null;   // 正在编辑的那张如果有放不下、没保存的改动，丢弃
-            var c = NewCard();
+            var c = NewCard(script);
             if (c == null) { draft = prev; UpdateLayout(); return; }
             settings.Cards.Add(c);
             Settings.NormalizeScenes(settings.Cards);
             ScheduleCardSave();
-            Log.Write("card added: " + c.Id + " on " + c.Screen);
+            Log.Write("card added: " + c.Id + " on " + c.Screen + (c.IsCustom() ? " script " + c.Script : ""));
             EditCard(settings.Cards.Last().Clone());
         }
 
@@ -1469,8 +1534,9 @@ namespace WeatherWallpaper
             if (gone != null)
             {
                 // 删掉的是这块屏负责"画面跟随"的卡片：交给这块屏剩下的第一张；这块屏没有卡片了，它的天气壁纸也随之关掉
-                var keep = gone.Scene ? settings.Cards.FirstOrDefault(k => k != gone && !k.Off && CardLayout.GroupKey(k) == CardLayout.GroupKey(gone)) : null;
+                var keep = gone.Scene ? settings.Cards.FirstOrDefault(k => k != gone && k.CanTakeScene() && CardLayout.GroupKey(k) == CardLayout.GroupKey(gone)) : null;
                 settings.Cards.Remove(gone);
+                cardErrs.Remove(gone.Id);
                 if (keep != null) { keep.Scene = true; Log.Write("scene moved to: " + keep.Id); }
                 Settings.NormalizeScenes(settings.Cards, keep?.Id);
                 cardSaveTimer.Stop();
@@ -1480,12 +1546,36 @@ namespace WeatherWallpaper
             EditCard(settings.Cards[0].Clone());
         }
 
-        /// <summary>新卡片放在哪：设置窗口所在的屏 → 主屏 → 其他屏，第一块放得下的；都放不下返回 null（不新增）。</summary>
-        CardSpec NewCard()
+        /// <summary>
+        /// 自定义卡片默认的名字（重名时 NewCard 再加「 2」「 3」…）：脚本里的 name，没写用文件名；截到 20 个字，留出加编号的位置（名称最长 24）。
+        /// 截完去掉结尾的空格再查重：Normalize 会去掉，带着查就查不出和别的卡片重名。卡片设置页面换脚本时也按它改名（fit 的 scripts[].auto）
+        /// </summary>
+        static string AutoTitle(CustomCards.Script s, string script) => CardSpec.Cut(s?.Title ?? script, 20).TrimEnd();
+
+        /// <summary>
+        /// 新卡片放在哪：设置窗口所在的屏 → 主屏 → 其他屏，第一块放得下的；都放不下返回 null（不新增）。
+        /// script = 自定义卡片的脚本：名字和高度先用脚本里写的 name / height（没写用脚本文件名、160）。
+        /// probe = 只看放不放得下（卡片设置里判断新增按钮能不能点）：不取 Monitor（要枚举显示设备，拖动时每次重排都会试）。
+        /// </summary>
+        CardSpec NewCard(string script = null, bool probe = false)
         {
-            int n = settings.Cards.Count + 1;
-            while (settings.Cards.Any(k => k.Name == "卡片 " + n)) n++;
-            var c = new CardSpec { Id = CardSpec.NewId(), Name = "卡片 " + n };
+            var c = new CardSpec { Id = CardSpec.NewId() };
+            if (script != null)
+            {
+                var s = FindScript(script);
+                c.Script = s?.File ?? script;
+                c.Height = s?.Height ?? CustomCards.DefaultHeight;
+                var title = AutoTitle(s, c.Script);
+                c.Name = title;
+                for (int k = 2; settings.Cards.Any(x => x.Name == c.Name); k++) c.Name = title + " " + k;
+                c.Normalize();
+            }
+            else
+            {
+                int n = settings.Cards.Count + 1;
+                while (settings.Cards.Any(k => k.Name == "卡片 " + n)) n++;
+                c.Name = "卡片 " + n;
+            }
             var order = new List<string>();
             if (cardWin != null) { var here = Screen.FromControl(cardWin); order.Add(here.Primary ? CardSpec.PrimaryScreen : here.DeviceName); }
             order.Add(CardSpec.PrimaryScreen);
@@ -1494,7 +1584,7 @@ namespace WeatherWallpaper
             {
                 c.Screen = id;
                 if (!Fit(c).Ok) continue;
-                c.Monitor = CardLayout.MonitorOf(id);   // 只给选中的屏取（要枚举显示设备；卡片设置开着时每次重排都会试一遍新增）
+                if (!probe) c.Monitor = CardLayout.MonitorOf(id);   // 只给选中的屏取（要枚举显示设备）
                 return c;
             }
             return null;
@@ -1519,13 +1609,13 @@ namespace WeatherWallpaper
                         var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
                         c.Scene = saved != null && saved.Scene && CardLayout.GroupKey(saved) == CardLayout.GroupKey(c);
                     }
-                    if (c.Off) c.Scene = false;   // 隐藏的卡片不拿画面跟随（刚隐藏的那一下 draft.Scene 还是 true）
+                    if (!c.CanTakeScene()) c.Scene = false;   // 隐藏的卡片不拿画面跟随（刚隐藏的那一下 draft.Scene 还是 true）；自定义卡片没有城市
                     // 什么都没改（如输入框失焦、拖完又落回原处）：不重排、不写盘，只把当前结果再发一遍让页面复位
                     if (Js.Serialize(c) == Js.Serialize(draft)) { cardWin.Post(CardFitJson()); return; }
                     // 换了城市，或者隐藏 / 重新显示（隐藏的卡片不取天气，显示出来时它的城市太久没更新就马上去取）。
                     // 只有真改了城市才按这张卡片的城市名定地名：只是隐藏 / 显示的话，同一地点的其他卡片的地名不变
-                    bool cityEdit = c.LocKey() != draft.LocKey() || c.City != draft.City;
-                    bool city = cityEdit || c.Off != draft.Off;
+                    bool cityEdit = !c.IsCustom() && (c.LocKey() != draft.LocKey() || c.City != draft.City);   // 自定义卡片没有城市
+                    bool city = cityEdit || c.Off != draft.Off || c.IsCustom() != draft.IsCustom();   // 换成 / 换回自定义卡片：它的城市不用 / 要用了
                     draft = c;
                     if (Fit(c).Ok) CommitDraft();
                     if (city) SyncCities(true, cityEdit ? c : null);   // 换了城市：马上去取新城市的天气，桌面上的卡片跟着变
@@ -1533,7 +1623,8 @@ namespace WeatherWallpaper
                     break;
                 case "search": SearchCity(d.ContainsKey("q") ? Convert.ToString(d["q"]) : ""); break;
                 case "identify": ScreenBadge.ShowAll(); break;
-                case "add": AddCard(); break;
+                case "add": AddCard(d.ContainsKey("script") && d["script"] != null ? CustomCards.CleanName(Convert.ToString(d["script"])) : null); break;
+                case "opencards": OpenCardsDir(); break;
                 case "switch": SwitchCard(d.ContainsKey("id") ? Convert.ToString(d["id"]) : ""); break;
                 case "delete": DeleteCard(); break;
                 case "close": cardWin.CloseNow(); break;
@@ -1574,7 +1665,7 @@ namespace WeatherWallpaper
             else if (!c.Scene && old.Scene)
             {
                 // 取消勾选、或者隐藏了：交给同屏另一张没隐藏的（只有它一张时 NormalizeScenes 会还给它，隐藏了就没人拿、这块屏也不显示天气壁纸了）
-                var other = settings.Cards.FirstOrDefault(k => k.Id != c.Id && !k.Off && CardLayout.GroupKey(k) == CardLayout.GroupKey(c));
+                var other = settings.Cards.FirstOrDefault(k => k.Id != c.Id && k.CanTakeScene() && CardLayout.GroupKey(k) == CardLayout.GroupKey(c));
                 if (other != null) { other.Scene = true; prefer = other.Id; }
             }
             settings.Cards[i] = c;
@@ -1591,7 +1682,7 @@ namespace WeatherWallpaper
             cardSaveTimer.Stop();
             // 文件刚被外部改过（还没重新加载）：Save 不写、改为重新加载，以文件为准——卡片设置里还没写盘的改动让位，窗口会换成文件里的样子
             if (!settings.Save()) return;
-            Log.Write("cards saved: " + string.Join(" | ", settings.Cards.Select(c => c.Id + " " + c.Screen + " " + c.Pos + " " + c.LocKey()
+            Log.Write("cards saved: " + string.Join(" | ", settings.Cards.Select(c => c.Id + " " + c.Screen + " " + c.Pos + " " + (c.IsCustom() ? "script:" + c.Script + " h" + c.Height : c.LocKey())
                 + (c.Hidden ? " hidden" : "") + (c.Off ? " off" : "") + (c.Scene ? " scene" : ""))));
         }
 
@@ -1651,7 +1742,7 @@ namespace WeatherWallpaper
                 var placed = new HashSet<string>(before.Where((k, i) => br[i].HasValue).Select(k => k.Id));
                 var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
                 bool taller = saved != null && CardLayout.HeightOf(c) > CardLayout.HeightOf(saved) + 0.5f;   // 这次多显示了内容、卡片变高了：提示里先建议少显示几项
-                const string lower = "少显示几项内容";
+                var lower = c.IsCustom() ? "调小卡片高度" : "少显示几项内容";   // 自定义卡片的高度是直接设的
                 if (!f.Rects[me].HasValue)
                 {
                     // 本来就放不下、这次也没挪它（只改了名称、城市、显示内容等）：照常保存，只提示；挪到了另一个同样放不下的地方、或者刚取消隐藏 → 不保存
@@ -1747,20 +1838,46 @@ namespace WeatherWallpaper
 
             // 画面跟随勾选框：这块屏只有这一张 / 这张只显示天气画面 → 一定是它（打勾禁用）；同屏有只显示天气画面的卡片 → 一定是那张（不勾禁用）；
             // 这张隐藏了 → 不参与（不勾禁用）
-            var group = eff.Where(k => CardLayout.GroupKey(k) == CardLayout.GroupKey(draft)).ToList();
+            // 自定义卡片不算：它们拿不了画面跟随（CommitDraft / NormalizeScenes 都跳过它们），算进来的话"只有这一张天气卡片"时勾选框能点、点了又弹回去
+            var group = eff.Where(k => !k.IsCustom() && CardLayout.GroupKey(k) == CardLayout.GroupKey(draft)).ToList();
             var hid = group.FirstOrDefault(k => k.Hidden && k.Scene && k.Id != draft.Id);   // 这块屏上拿着画面跟随的、只显示天气画面的卡片（NormalizeScenes 让第一张这样的卡片拿）
-            string sceneHint = draft.Off ? "这张卡片已隐藏，不参与天气画面；重新显示后才能设置"
+            string sceneHint = draft.IsCustom() ? "自定义卡片没有城市，不决定天气画面"
+                : draft.Off ? "这张卡片已隐藏，不参与天气画面；重新显示后才能设置"
                 : hid != null ? "这块屏的天气画面由只显示天气画面的卡片「" + CardName(hid) + "」决定"
                 : draft.Hidden ? "这张卡片只显示天气画面，就是用来决定这块屏的天气画面的"
-                : group.Count <= 1 ? "这块屏上只有这一张卡片，天气画面一定跟随它" : null;
+                : group.Count <= 1 ? (eff.Any(k => k.IsCustom() && CardLayout.GroupKey(k) == CardLayout.GroupKey(draft)) ? "这块屏上只有这一张天气卡片" : "这块屏上只有这一张卡片") + "，天气画面一定跟随它" : null;
 
             // 和 AddCard 同样的条件：新增时会丢掉正在编辑的卡片放不下、没保存的改动，所以按设置里的样子算
             var keep = draft;
             bool canAdd;
-            try { draft = null; canAdd = settings.Cards.Count < Settings.MaxCards && NewCard() != null; }
+            // 自定义卡片的高度各不相同（脚本里写的 height）：按高度试放不放得下。卡片一样宽、排版是按高度往下摞，高的放得下矮的一定放得下，
+            // 放得下的是最矮的那几种：先试最高的（通常就放得下，只试一次），再试最矮的（放不下就都放不下），都不是再二分找分界。
+            // 拖动、勾选时每次都要算，别每种高度都排一遍
+            var byHeight = cardScripts.GroupBy(s => s.Height).OrderBy(g => g.Key).ToList();
+            int fitCount = 0;   // 最矮的 fitCount 种放得下
+            try
+            {
+                draft = null;
+                bool spare = settings.Cards.Count < Settings.MaxCards;
+                canAdd = spare && NewCard(probe: true) != null;
+                Func<int, bool> fitsAt = i => NewCard(byHeight[i].First().File, probe: true) != null;
+                int n = byHeight.Count;
+                if (spare && n > 0)
+                {
+                    if (fitsAt(n - 1)) fitCount = n;
+                    else if (n > 1 && fitsAt(0))
+                    {
+                        int lo = 1, hi = n - 1;   // [0, lo) 放得下，[hi, n) 放不下
+                        while (lo < hi) { int mid = (lo + hi) / 2; if (fitsAt(mid)) lo = mid + 1; else hi = mid; }
+                        fitCount = lo;
+                    }
+                }
+            }
             finally { draft = keep; }
-            string addHint = settings.Cards.Count >= Settings.MaxCards ? "最多 " + Settings.MaxCards + " 张卡片" : !canAdd ? "所有屏幕都放不下新卡片了" : null;
-            var cards = everyCard.Select(k => new { id = k.Id, name = CardName(k), scene = k.Scene, hidden = k.Hidden, off = k.Off }).ToList();
+            var fits = new HashSet<int>(byHeight.Take(fitCount).Select(g => g.Key));
+            bool canAddCustom = fitCount > 0;
+            string addHint = settings.Cards.Count >= Settings.MaxCards ? "最多 " + Settings.MaxCards + " 张卡片" : !canAdd && !canAddCustom ? "所有屏幕都放不下新卡片了" : null;
+            var cards = everyCard.Select(k => new { id = k.Id, name = CardName(k), scene = k.Scene, hidden = k.Hidden, off = k.Off, custom = k.IsCustom() }).ToList();
             var warn = string.Join("；", new[] { f.Warn, !settings.ShowPanel ? "设置文件里 ShowPanel 为 false：桌面上不显示任何卡片（只有天气画面），改成 true 才显示" : null }.Where(s => s != null));
             // 偏移能调到多大：再大卡片也已经贴边、不会再动（方向键、± 按到这里为止）。按左右 / 上下贴边算，居中位置页面自己减半；
             // 只跟所选的屏有关（scr），页面换了屏、新结果还没到时不用它
@@ -1768,10 +1885,15 @@ namespace WeatherWallpaper
             int[] lim = f.Area == null ? null : new[] { (int)Math.Max(0, f.Area.Work.Width - CardLayout.W), (int)Math.Max(0, f.Area.Work.Height - ch) };
             // 设置里保存的位置和显示内容：页面在放不下（没保存）时点「隐藏卡片」，先换回它再隐藏——没保存的改动作废，和换卡片、关窗口一样
             var stored = settings.Cards.FirstOrDefault(k => k.Id == draft.Id);
-            var saved = stored == null ? null : new { scr = stored.Screen, pos = stored.Pos, x = stored.OffsetX, y = stored.OffsetY, show = stored.Show };
+            var saved = stored == null ? null : new { scr = stored.Screen, pos = stored.Pos, x = stored.OffsetX, y = stored.OffsetY, show = stored.Show, height = stored.Height };
+            // 自定义卡片：cards 文件夹里的脚本（下拉框、新增菜单用）；这张卡片现在的错误（桌面上不显示它的原因）
+            var scripts = cardScripts.Select(s => new { f = s.File, name = s.Title ?? "", auto = AutoTitle(s, s.File), height = s.Height, fits = fits.Contains(s.Height) }).ToList();
+            string cerr;
+            if (!draft.IsCustom() || draft.Off || !cardErrs.TryGetValue(draft.Id, out cerr)) cerr = "";
             // 拖动吸附用：卡片间距、默认边距（页面 CSS 像素），和这边的排版一致；cw / ch = 这张卡片的大小（「卡片内容」里显示）
             return Js.Serialize(new { t = "fit", id = draft.Id, scr = draft.Screen, ok = f.Ok, msg = f.Msg ?? "", warn, lim, scene = mine.Scene, sceneLock = sceneHint != null, sceneHint = sceneHint ?? "", addable = addHint == null, addHint = addHint ?? "",
-                cards, screens, thumb, saved, gap = CardLayout.Gap, margin = CardSpec.DefaultOffset, cw = CardLayout.W, ch });
+                addWeather = canAdd, addCustom = canAddCustom, cards, screens, thumb, saved, scripts, cerr, hmin = CustomCards.MinHeight, hmax = CustomCards.MaxHeight,
+                gap = CardLayout.Gap, margin = CardSpec.DefaultOffset, cw = CardLayout.W, ch });
         }
 
         // ---------------------------------------------------------------- 设置文件
@@ -1783,6 +1905,14 @@ namespace WeatherWallpaper
         {
             Effects.EnsureDir();
             OpenUrl("explorer.exe", "\"" + Effects.Dir + "\"");
+        }
+
+        /// <summary>在资源管理器里打开自定义卡片文件夹（不在了就重新建上、放回示例）。</summary>
+        void OpenCardsDir()
+        {
+            CustomCards.EnsureDir();
+            RescanCards();   // 刚重新建出来、放了示例：卡片设置的下拉框马上就有
+            OpenUrl("explorer.exe", "\"" + CustomCards.Dir + "\"");
         }
 
         /// <summary>用记事本打开 settings.json（格式化成多行便于编辑），保存后自动重新加载。</summary>
@@ -1817,26 +1947,65 @@ namespace WeatherWallpaper
             effects = Effects.Scan();
             effectsJson = Effects.Json(effects);
             if (effects.Count > 0) Log.Write("effects: " + string.Join(", ", effects.Select(e => e.Key)));
-            var dir = Effects.Dir;
+            // 自定义卡片文件夹也在设置目录下，共用这一个监视器（各自去抖、各自重扫）
+            CustomCards.EnsureDir();
+            cardScripts = CustomCards.Scan();
+            cardScriptsSig = CustomCards.Sig(cardScripts);
+            if (cardScripts.Count > 0) Log.Write("card scripts: " + string.Join(", ", cardScripts.Select(s => s.File)));
+            var dir = Effects.Dir.TrimEnd('\\') + "\\";
+            var cdir = CustomCards.Dir.TrimEnd('\\') + "\\";
             var ui = SynchronizationContext.Current;
             effectsRescan.Tick += (s, e) => { effectsRescan.Stop(); if (quitStage == 0) RescanEffects(); };
+            cardsRescan.Tick += (s, e) => { cardsRescan.Stop(); if (quitStage == 0) RescanCards(); };
+            RetryUnread(cardScripts);
             try
             {
-                effectsWatcher = new FileSystemWatcher(Settings.AppDataDir) { IncludeSubdirectories = true, InternalBufferSize = 64 * 1024, NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName | NotifyFilters.DirectoryName };
+                // Attributes：设成隐藏 / 去掉隐藏也要重扫（隐藏的脚本不列出来、不运行）
+                effectsWatcher = new FileSystemWatcher(Settings.AppDataDir) { IncludeSubdirectories = true, InternalBufferSize = 64 * 1024,
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.Attributes };
                 Action<string> h = p =>
                 {
-                    if (p == null || !p.StartsWith(dir, StringComparison.OrdinalIgnoreCase)) return;   // settings.json 之类的不管
-                    ui?.Post(_ => { effectsRescan.Stop(); effectsRescan.Start(); }, null);              // 编辑器保存时往往连着来好几个事件：合并成一次
+                    if (p == null) return;
+                    var q = p.TrimEnd('\\') + "\\";   // 文件夹本身被删 / 改名时，事件里是不带结尾 \ 的文件夹路径
+                    // settings.json 之类的不管；编辑器保存时往往连着来好几个事件：合并成一次
+                    if (q.StartsWith(dir, StringComparison.OrdinalIgnoreCase)) ui?.Post(_ => { effectsRescan.Stop(); effectsRescan.Start(); }, null);
+                    else if (q.StartsWith(cdir, StringComparison.OrdinalIgnoreCase)) ui?.Post(_ => { cardRetries = 0; cardsRescan.Stop(); cardsRescan.Start(); }, null);   // 新的文件事件：重扫次数重新算
                 };
                 effectsWatcher.Changed += (s, e) => h(e.FullPath);
                 effectsWatcher.Created += (s, e) => h(e.FullPath);
                 effectsWatcher.Deleted += (s, e) => h(e.FullPath);
                 effectsWatcher.Renamed += (s, e) => { h(e.FullPath); h(e.OldFullPath); };
                 // 卡片拖动等高频写盘可能挤爆监视缓冲（事件被丢）：出了错就补扫一次，最多晚 600 毫秒，不会一直丢
-                effectsWatcher.Error += (s, e) => { Log.Write("effects watch: " + e.GetException().Message); ui?.Post(_ => { effectsRescan.Stop(); effectsRescan.Start(); }, null); };
+                effectsWatcher.Error += (s, e) =>
+                {
+                    Log.Write("effects watch: " + e.GetException().Message);
+                    ui?.Post(_ => { effectsRescan.Stop(); effectsRescan.Start(); cardsRescan.Stop(); cardsRescan.Start(); }, null);
+                };
                 effectsWatcher.EnableRaisingEvents = true;
             }
             catch (Exception ex) { Log.Write("effects watch: " + ex.Message); }
+        }
+
+        /// <summary>自定义卡片的脚本增删、改过：layout 里的版本号跟着变，页面重新加载用到它的卡片；卡片设置的下拉框跟着更新（UpdateLayout 里发）。</summary>
+        void RescanCards()
+        {
+            var list = CustomCards.Scan();
+            RetryUnread(list);
+            var sig = CustomCards.Sig(list);
+            if (sig == cardScriptsSig) return;
+            cardScripts = list; cardScriptsSig = sig;
+            Log.Write("card scripts changed: " + (list.Count == 0 ? "(none)" : string.Join(", ", list.Select(s => s.File))));
+            foreach (var w in walls) w.RetryCards();   // 因为页面接连崩溃停掉的自定义卡片：改过脚本了，再试一次
+            UpdateLayout();
+        }
+
+        int cardRetries;   // 有脚本被占着读不出来时，连着重扫的次数
+        /// <summary>有脚本正好被占用、没读出名称高度（编辑器、杀毒软件占着）：过一会儿再扫，最多 10 次（6 秒）——占用结束不一定再有文件事件，不重扫的话要等它下次被改才读到。</summary>
+        void RetryUnread(List<CustomCards.Script> list)
+        {
+            if (!list.Any(s => s.Unread)) { cardRetries = 0; return; }
+            if (++cardRetries <= 10) { cardsRescan.Stop(); cardsRescan.Start(); }
+            else if (cardRetries == 11) Log.Write("card scripts: still locked, gave up: " + string.Join(", ", list.Where(s => s.Unread).Select(s => s.File)));
         }
 
         void RescanEffects()
@@ -2123,6 +2292,7 @@ namespace WeatherWallpaper
                         case "settings": OpenSettingsFile(); break;
                         case "logs": OpenUrl("explorer.exe", "\"" + Settings.LocalDir + "\""); break;
                         case "effects": OpenEffectsDir(); break;
+                        case "cards": OpenCardsDir(); break;
                     }
                     break;
             }

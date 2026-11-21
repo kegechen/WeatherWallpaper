@@ -138,5 +138,29 @@ namespace WeatherWallpaper
                 GetWindowRect(h, out r);
             return System.Drawing.Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
         }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct WIN32_FIND_DATA
+        {
+            public uint dwFileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime, ftLastAccessTime, ftLastWriteTime;
+            public uint nFileSizeHigh, nFileSizeLow, dwReserved0, dwReserved1;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string cFileName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)] public string cAlternateFileName;
+        }
+        [DllImport("kernel32", CharSet = CharSet.Unicode)] static extern IntPtr FindFirstFile(string name, out WIN32_FIND_DATA data);
+        [DllImport("kernel32")] static extern bool FindClose(IntPtr h);
+
+        /// <summary>是不是符号链接、目录联接（名称代理类的重解析点：打开它实际打开的是别处）。OneDrive 云文件之类的重解析点不算；不存在的、路径里有通配符的返回 false。</summary>
+        public static bool IsLink(string path)
+        {
+            if (path.IndexOfAny(new[] { '*', '?' }) >= 0) return false;
+            WIN32_FIND_DATA d;
+            var h = FindFirstFile(path, out d);
+            if (h == new IntPtr(-1)) return false;
+            FindClose(h);
+            // dwReserved0 是重解析点的类型（tag）；第 29 位 = 名称代理（IsReparseTagNameSurrogate）
+            return (d.dwFileAttributes & 0x400 /*FILE_ATTRIBUTE_REPARSE_POINT*/) != 0 && (d.dwReserved0 & 0x20000000) != 0;
+        }
     }
 }

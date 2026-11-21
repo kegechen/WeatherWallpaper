@@ -87,14 +87,25 @@
   const rand = Math.random;
   function prng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
-  // cards：这块屏上的卡片 [{id, key, show, x, y, h}]（位置、高度由宿主算好，CSS 像素）；scene：全屏天气画面跟着哪个城市（城市键）
+  // cards：这块屏上的卡片 [{id, key, x, y}]（位置由宿主算好，CSS 像素）；自定义卡片是 {id, script, v, x, y, h}（v = 脚本文件的修改时间）；
+  // scene：全屏天气画面跟着哪个城市（城市键）；defKey：默认卡片的城市键（自定义卡片的 api.weather 用它）
   // overlayWall：壁纸叠加——天空半透明、系统壁纸常驻垫底；skyOpacity：天空那层的不透明度（0.05–1）；
   // cloudAlpha：云的不透明度（极简模式不叠壁纸时恒为 1）
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, scene: '', cards: [] };
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, scene: '', defKey: '', cards: [] };
 
   let W = 0, H = 0, DPR = 1;
   // weathers：各城市的天气（城市键 → 宿主发来的 weather 消息）；weather：画面城市的那一份（天空、太阳、雨雪都按它）
   const weathers = {};
+  // 自定义卡片（cards.js）：脚本要天气时给默认卡片城市的那份（整理过的）。每画一轮都要：整理的结果只和这份天气、那个城市当地的钟点有关，
+  // 两样都没变就用上次的（refresh = 1 秒的卡片一秒一次）
+  const wxSum = { w: null, hour: 0, v: null };
+  UserCards.init({ post, width: () => CARD_W, weather: () => {   // width：CARD_W 在下面才定义，画的时候再取
+    const w = weathers[L.defKey];
+    if (!w || !w.fc) return null;
+    const hour = Math.floor((Date.now() + (w.fc.utc_offset_seconds || 0) * 1000) / 3600000);
+    if (wxSum.w !== w || wxSum.hour !== hour) { const v = WX.summary(w, Date.now()); wxSum.w = w; wxSum.hour = hour; wxSum.v = v; }   // 整理出错（数据不全）不记下来
+    return wxSum.v;
+  } });
   let weather = null, preview = 'live', demo = null, paused = false;
   function pickWeather() {
     const w = weathers[L.scene] || null;
@@ -656,7 +667,7 @@
       night: 1 - daylight, daylight,                      // 0 白天 … 1 深夜
       weather: { rain: cur.rain, snow: cur.snow, cloud: cur.cloud, fog: cur.fog, thunder: cur.thunder, wind: cur.windX },   // 0–1；wind 正 = 往右吹
       date: fxDate(), preview: preview !== 'live',
-      cards: (L.panel ? L.cards || [] : []).map(c => ({ x: c.x, y: c.y, w: CARD_W, h: cardH(c) })),
+      cards: shownCards().map(c => ({ x: c.x, y: c.y, w: CARD_W, h: cardH(c) })),
       state: u.state,                                     // 这个效果自己的存储（每次出现时清空）
       free: (x, w, y0, y1) => placeX(x, w, y0, y1),       // 宽 w 的东西在 [y0, y1] 这段高度上、离 x 最近又不被卡片挡住的中心 x
       glow: (c, x, y, r, a = 1) => {                      // 柔光（叠加发光）；颜色写 #rrggbb
@@ -1230,9 +1241,15 @@
   // 没给高度（浏览器里调试）按全显示的高度算。卡片两边的让位边距 16
   const CARD_W = 336, CARD_H = 446;
   const cardH = c => c.h || CARD_H;
+  // 屏幕上看得见的卡片（装饰绕开它们、交给效果脚本的 fx.cards）：自定义卡片藏着的（还没画好、出错了，见 cards.js）不算，那块地方是空的。
+  // cardEls 在下面「天气卡片」里定义：这里只在画每一帧时调用，那时早就有了
+  const shownCards = () => (L.panel ? L.cards || [] : []).filter(c => {
+    const e = c.script && cardEls.get(c.id);
+    return !e || !(e.el.classList.contains('hidden') || e.el.classList.contains('cerr'));
+  });
   // 在 [y0, y1] 这段高度上，卡片没挡住的横向空地 [[a, b], ...]（CSS 像素，卡片两边再让出一点）
   function freeSpans(y0, y1) {
-    const bl = (L.panel ? L.cards || [] : []).filter(c => c.y < y1 && c.y + cardH(c) > y0).map(c => [c.x - 16, c.x + CARD_W + 16]).sort((a, b) => a[0] - b[0]);
+    const bl = shownCards().filter(c => c.y < y1 && c.y + cardH(c) > y0).map(c => [c.x - 16, c.x + CARD_W + 16]).sort((a, b) => a[0] - b[0]);
     const out = [];
     let x = 0;
     for (const [a, b] of bl) { if (a > x) out.push([x, a]); x = Math.max(x, b); }
@@ -1856,6 +1873,14 @@
       if (x !== e.x || y !== e.y) { e.x = x; e.y = y; e.el.style.left = x + 'px'; e.el.style.top = y + 'px'; }
       const h = c.h ? c.h + 'px' : 'auto';   // 浏览器里调试没有宿主算的高度：按内容撑开
       if (h !== e.h) { e.h = h; e.el.style.height = h; }
+      // 自定义卡片：内容由 cards.js 跑用户脚本画（放在卡片里的 iframe 里），显隐也归它管（第一次画好才淡入，出错就藏起来）
+      if (c.script) {
+        // 原来是天气卡片（settings.json 里给它加了 Script）：先藏起来，和新建的一样等脚本画好再显示（不然空着的毛玻璃框摆在那，装饰还要绕开它）
+        if (!e.custom) { e.custom = true; e.html = null; e.err = ''; e.el.textContent = ''; e.el.classList.add('custom', 'hidden'); }
+        UserCards.update(c, e.el);
+        continue;
+      }
+      if (e.custom) { e.custom = false; UserCards.drop(c.id, e.el); e.el.textContent = ''; e.el.classList.remove('custom', 'cerr'); }
       const w = weathers[c.key];
       let html;
       try {
@@ -1875,6 +1900,8 @@
     {
       e.gone = true;
       e.el.classList.add('hidden');
+      // 自定义卡片：马上停掉脚本（不然淡出期间画好一次又会把自己显示出来）；淡出期间又回来了就重新载入
+      if (e.custom) UserCards.drop(id, e.el);
       // 只认最后一次淡出排的定时器（来回切换时早先排的那个到点了别提前撤）；只删自己那条（同一 id 可能已经换成新建的卡片）
       const tok = e.fade = (e.fade || 0) + 1;
       setTimeout(() => { if (e.gone && e.fade === tok) { e.el.remove(); if (cardEls.get(id) === e) cardEls.delete(id); } }, 1000);
@@ -2056,9 +2083,10 @@
     host.addEventListener('message', ev => {
       const m = ev.data;
       if (!m || !m.t) return;
+      if (m.t === 'csrc' || m.t === 'cfile' || m.t === 'cget') { UserCards.onHost(m); return; }   // 自定义卡片要的脚本、文件、网上的数据：和画面无关
       switch (m.t) {
         case 'layout': {
-          const g0 = L.ground;
+          const g0 = L.ground, dk0 = L.defKey;
           Object.assign(L, m); gotLayout = true;
           festAt = -1e9;   // 「节日装饰与彩蛋」可能刚开 / 关：马上重新算今天的节日
           if (m.keys) for (const k of Object.keys(weathers)) if (!m.keys.includes(k)) delete weathers[k];   // 不再用到的城市（卡片换了城市）：丢掉它的天气数据
@@ -2070,13 +2098,17 @@
           if (L.ground !== g0) { drops.length = 0; flakes.length = 0; firstFill = true; }   // 地平线变了：雨雪按新的落点重新生成
           if (syncSkyAlpha()) { resize(); frame(performance.now()); }   // 切换壁纸叠加：天空画布整个换掉，重新分配后马上画一帧——别让合成器拿到一张空白的新画布
           pickWeather(); renderPanel(); applyBackdrop(); reportViewport();
+          if (L.defKey !== dk0) UserCards.weatherChanged();   // 默认卡片换了城市（新城市的天气可能早就有了，不会再单独发来）
           break;
         }
-        case 'weather': weathers[m.key || ''] = m; pickWeather(); renderPanel(); break;
+        case 'weather':
+          weathers[m.key || ''] = m; pickWeather(); renderPanel();
+          if ((m.key || '') === L.defKey) UserCards.weatherChanged();   // 自定义卡片的 api.weather 是默认卡片城市的天气
+          break;
         case 'preview': setPreview(m.mode, m.day); break;
         case 'fx': fxKind = m.kind || null; tgt = targetScene(); break;
         case 'backdrop': backdrop = m; applyBackdrop(); break;
-        case 'pause': paused = true; break;
+        case 'pause': paused = true; UserCards.setPaused(true); break;
         case 'perf': L.fps = clamp(m.fps | 0, 5, 60); break;
         case 'unlock': flagWant = true; festAt = -1e9; break;   // 解锁屏幕：国庆节当天这块屏还没升过旗就升一次；锁屏期间可能过了零点，节日马上重算
       }
@@ -2084,7 +2116,7 @@
       // 暂停中（被最大化窗口遮挡）也要保证画面是最新的静态帧，取消遮挡时不会闪黑
       if (paused && !asleep) { firstScene = true; update(0.016); draw(); }
       switch (m.t) {
-        case 'resume': if (paused) { paused = false; last = performance.now(); if (flagWant) festAt = -1e9; } break;   // 桌面重新露出来：等着的升旗马上开始
+        case 'resume': if (paused) { paused = false; last = performance.now(); if (flagWant) festAt = -1e9; } UserCards.setPaused(false); break;   // 桌面重新露出来：等着的升旗马上开始
       }
       postScene();
       wake();
@@ -2120,6 +2152,33 @@
     }
     // ?effects=birthday&fxbase=/web/effects/ 加载自定义效果脚本（调试；宿主里是 layout 带来的文件列表）
     if (q.get('effects')) { userFxSig = '[]'; loadUserFx(q.get('effects').split(',').map(f => ({ f, v: 0 }))); }
+    // ?ucard=clock&uh=220&ubase=/web/cards/ 把那张卡片换成自定义卡片（调试；宿主里脚本列表在 layout 里，由宿主读 cards 文件夹）。
+    // 浏览器里没有宿主：脚本和 api.readText / image 从 ubase 取，api.fetch* 直接 fetch（对方要允许跨域）；出错写在控制台
+    if (q.get('ucard')) {
+      const base = q.get('ubase') || '/web/cards/';
+      const reply = m => setTimeout(() => UserCards.onHost(m), 0);
+      const toData = b => new Promise(ok => { const f = new FileReader(); f.onload = () => ok(f.result); f.readAsDataURL(b); });
+      UserCards.init({
+        post: m => {
+          if (!m || typeof m !== 'object') return;
+          if (m.t === 'csrc') fetch(base + m.f + '.js').then(r => r.ok ? r.text() : Promise.reject(new Error('找不到 ' + m.f + '.js')))
+            .then(src => reply({ t: 'csrc', f: m.f, v: 0, src }), e => reply({ t: 'csrc', f: m.f, err: e.message }));
+          else if (m.t === 'cfile' || m.t === 'cget') {
+            fetch(m.t === 'cfile' ? base + m.path : m.url, m.t === 'cget' ? { method: m.method, body: m.body, headers: m.headers } : undefined)
+              .then(async r => {
+                if (m.t === 'cfile' && !r.ok) throw new Error('cards 文件夹里没有 ' + m.path);
+                const o = { t: m.t, rid: m.rid, ok: true, status: r.status, type: r.headers.get('content-type') || '' };
+                if (m.kind === 'image') o.data = await toData(await r.blob()); else o.text = await r.text();
+                return o;
+              })
+              .then(reply, e => reply({ t: m.t, rid: m.rid, ok: false, err: e.message }));
+          } else if (m.t === 'cstate' && !m.gone) console[m.err ? 'warn' : 'log']('[自定义卡片] ' + (m.err || '正常'));
+        },
+        weather: () => weathers.dbg && weathers.dbg.fc ? WX.summary(weathers.dbg, Date.now()) : null,
+        width: () => CARD_W,
+      });
+      L.cards[0] = { id: 'dbg', script: q.get('ucard'), v: 0, h: clamp(parseInt(q.get('uh'), 10) || 160, 64, 720), x: L.cards[0].x, y: L.cards[0].y };
+    }
     const dd = Date.parse(q.get('date') + 'T00:00:00');   // ?date=2026-11-24 换一天（看月相）
     if (!isNaN(dd)) { const d0 = new Date().setHours(0, 0, 0, 0), real = Date.now; Date.now = () => real() + dd - d0; }
     const apply = () => {

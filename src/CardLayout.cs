@@ -49,10 +49,11 @@ namespace WeatherWallpaper
         /// <summary>
         /// 卡片高度（CSS 像素）：按显示的内容把各段的高度加起来。各段高度、间距与 style.css 里 .card 下各元素写死的 height / margin-top 一一对应，
         /// 改一处要连着改另一处（页面按宿主给的高度画卡片，两边对不上内容会被裁掉或留白）。
-        /// 全显示（不含日期）446，去掉未来几天 291，只留上面部分 166。
+        /// 全显示（不含日期）446，去掉未来几天 291，只留上面部分 166。自定义卡片的高度是设置里写的（Normalize 已限制在 64–720）。
         /// </summary>
         public static float HeightOf(CardSpec c)
         {
+            if (c.IsCustom()) return c.Height ?? CustomCards.DefaultHeight;
             float h = 1 + 18 + 20;                                                 // 上边框 + 上内边距 + 城市行
             if (c.Has("date") || c.Has("week") || c.Has("lunar")) h += 3 + 17;      // 日期行
             h += 6 + 76;                                                            // 当前天气
@@ -146,8 +147,10 @@ namespace WeatherWallpaper
 
         public static RectangleF?[] Place(RectangleF area, IList<CardSpec> cards)
         {
-            // 屏幕太矮（小屏开了高缩放）、可用区域比卡片还矮：按最高那张卡片的高度算，卡片贴着上边、下面一截被任务栏挡住（和旧版一样），不至于一张都放不下
-            float tallest = cards.Count == 0 ? 0 : cards.Max(HeightOf);
+            // 屏幕太矮（小屏开了高缩放）、可用区域比卡片还矮：按最高那张天气卡片的高度算，卡片贴着上边、下面一截被任务栏挡住（和旧版一样），不至于一张都放不下。
+            // 自定义卡片不算：它的高度是自己设的（最高 720，常见的屏都比这矮），放不下就提示调小；算进来的话区域被它拉高，同屏贴底的卡片都会压到任务栏下面。
+            // 这样区域也和自定义卡片多高无关：高的放得下、矮的一定放得下（CardFitJson 靠这个少试几次）
+            float tallest = cards.Where(c => !c.IsCustom()).Select(HeightOf).DefaultIfEmpty(0).Max();
             if (area.Height < tallest) area.Height = tallest;
             if (area.Width < W) area.Width = W;   // 同理：竖屏 / 窄屏开了高缩放比卡片还窄，贴着左边放，右边一截露不出来
             var placed = new List<RectangleF>();

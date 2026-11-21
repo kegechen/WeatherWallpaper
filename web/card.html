@@ -154,6 +154,32 @@
   #showSec.off .seg, #showSec.off .shows { opacity: .4; pointer-events: none; }
   #showSec.off :disabled { opacity: 1; }   /* 整块已经变暗，别再暗一层 */
 
+  /* 自定义卡片（内容由 cards 文件夹里的脚本画）：没有城市、卡片内容勾选、天气画面，换成脚本和高度；脚本出错的原因显示在这里 */
+  body.custom .wx { display: none !important; }
+  body:not(.custom) .cu { display: none !important; }
+  #custSec .hd { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  #custSec .hd h2 { margin: 0; }
+  #hTag { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #script { flex: 1; min-width: 0; }
+  #openCards { flex: none; padding: 0 10px; }
+  .hstep { flex: none; width: 140px; }
+  #custSec > .hint { margin-top: 8px; }
+  #custSec.off .hstep { opacity: .4; pointer-events: none; }
+  #custSec.off :disabled { opacity: 1; }
+  #cerrNote { align-items: flex-start; }
+  #cerrNote b { display: block; margin-top: 3px; font-weight: 600; white-space: pre-wrap; word-break: break-word; user-select: text; cursor: text; }
+
+  /* 「＋ 新增卡片」弹出的菜单：天气卡片 / cards 文件夹里的各个脚本 / 打开文件夹 */
+  #addMenu { position: fixed; z-index: 20; display: none; min-width: 250px; max-width: 360px; max-height: 70vh; overflow-y: auto; padding: 4px; border-radius: 8px;
+    background: #2b2b2b; border: 1px solid rgba(255,255,255,.12); box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+  #addMenu.open { display: block; }
+  #addMenu button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; height: auto; padding: 6px 10px; border: none; border-radius: 5px; background: transparent; text-align: left; }
+  #addMenu button:hover:not(:disabled) { background: var(--ctl2); }
+  #addMenu button .hint { font-size: 11.5px; }
+  #addMenu .mh { padding: 6px 10px 2px; color: var(--dim); font-size: 11.5px; }
+  #addMenu .sep { height: 1px; margin: 4px 6px; background: var(--line); }
+  #addMenu .msg { padding: 4px 10px 6px; color: var(--dim); font-size: 12px; }
+
   footer { display: flex; align-items: center; gap: 8px; padding: 12px 22px 16px; border-top: 1px solid var(--line); background: rgba(0,0,0,.12); }
   footer .sp { flex: 1; }
   footer button { min-width: 96px; }
@@ -170,6 +196,7 @@
   <button id="tabR" class="tarr" title="往右看更多卡片"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
   <button id="tabNew">＋ 新增卡片</button>
 </nav>
+<div id="addMenu"></div>
 <main>
   <div class="cols">
     <div class="col">
@@ -179,13 +206,13 @@
         <div class="form">
           <label for="name">名称</label>
           <input id="name" placeholder="卡片名称（留空用城市名）" spellcheck="false" maxlength="24">
-          <label>城市</label>
-          <div class="seg"><button id="mAuto">自动定位</button><button id="mCity">指定城市</button></div>
-          <div id="cityBox" class="c2">
+          <label class="wx">城市</label>
+          <div class="seg wx"><button id="mAuto">自动定位</button><button id="mCity">指定城市</button></div>
+          <div id="cityBox" class="c2 wx">
             <div class="row"><input id="q" placeholder="输入城市名，如 杭州、Tokyo" spellcheck="false"><button id="go">搜索</button></div>
             <div id="results"></div>
           </div>
-          <div id="cur" class="hint c2"></div>
+          <div id="cur" class="hint c2 wx"></div>
           <label for="screen">显示器</label>
           <div class="row"><select id="screen"></select><button id="identify" title="在每块屏中间显示编号，对照这里的“显示器 N”">识别</button></div>
           <div class="hint c2">天气画面只出现在放了卡片的屏上，没有卡片的屏保持系统壁纸</div>
@@ -193,7 +220,20 @@
         <div id="scrNote" class="note warn"></div>
       </section>
 
-      <section id="showSec">
+      <section id="custSec" class="cu">
+        <div class="hd"><h2>自定义卡片</h2><span id="hTag"></span></div>
+        <div class="form">
+          <label for="script">脚本</label>
+          <div class="row"><select id="script"></select><button id="openCards" title="打开 cards 文件夹：在里面新建、修改卡片脚本（自带几个示例）">打开文件夹</button></div>
+          <label for="hgt">高度</label>
+          <div class="row"><div class="step hstep"><button data-hd="-10">−</button><input id="hgt" type="number" step="1"><button data-hd="10">+</button></div><span class="hint" id="hRange"></span></div>
+        </div>
+        <div class="hint">内容由 cards 文件夹里的脚本决定，脚本改好保存后桌面上马上更新；写法见文件夹里的示例</div>
+        <div id="cerrNote" class="note bad"></div>
+        <div id="hNote" class="note bad"></div>
+      </section>
+
+      <section id="showSec" class="wx">
         <div class="hd"><h2>卡片内容</h2><span id="sizeTag"></span></div>
         <div class="seg" id="sizes">
           <button data-s="l" title="逐小时、未来几天、底部的日出日落和更新时间都显示">大卡片</button>
@@ -228,7 +268,7 @@
       <div id="fitNote" class="note bad"></div>
     </section>
 
-    <section>
+    <section class="wx">
       <h2>天气画面</h2>
       <label class="chk"><input type="checkbox" id="scene"><span>全屏天气画面跟随这张卡片的城市<br><span class="hint" id="sceneHint"></span></span></label>
       <label class="chk"><input type="checkbox" id="hidden"><span>只显示天气画面，不显示卡片<br><span class="hint">桌面上不画这张卡片，只用它的城市决定这块屏的全屏天气画面（想连天气画面也不要，用底部的「隐藏卡片」）</span></span></label>
@@ -313,7 +353,7 @@
       b.classList.toggle('on', !!card && c.id === card.Id);
       b.classList.toggle('hid', !!c.hidden);
       b.classList.toggle('offc', !!c.off);
-      b.title = c.name + (c.off ? '（已隐藏：桌面上不显示，也不更新天气）' : c.hidden ? '（只显示天气画面：不画卡片，只决定这块屏的天气画面）' : '');   // 名字太长会被截断，悬停看全名
+      b.title = c.name + (c.custom ? '（自定义卡片）' : '') + (c.off ? '（已隐藏：桌面上不显示' + (c.custom ? '' : '，也不更新天气') + '）' : c.hidden ? '（只显示天气画面：不画卡片，只决定这块屏的天气画面）' : '');   // 名字太长会被截断，悬停看全名
       if (b._html !== html) { b._html = html; b.innerHTML = html; }   // 跟上次写入的比：innerHTML 读回来会被浏览器规范化（svg 自闭合、引号转义），永远对不上
     });
     const n = $('tabNew');
@@ -359,11 +399,37 @@
     if (!t || t.classList.contains('on')) return;
     flushThen({ t: 'switch', id: t.dataset.id });
   };
-  $('tabNew').onclick = () => {
+  // 「＋ 新增卡片」：弹出菜单选天气卡片，还是 cards 文件夹里的哪个自定义卡片脚本（放不下的变灰）
+  function openAddMenu() {
+    const m = $('addMenu'), S = (fit && fit.scripts) || [];
+    const wOk = !fit || fit.addWeather !== false;
+    let h = '<button data-w="1"' + (wOk ? '' : ' disabled title="所有屏幕都放不下新的天气卡片了"') + '>天气卡片<span class="hint">一个城市的天气，可以决定这块屏的天气画面</span></button>'
+      + '<div class="sep"></div><div class="mh">自定义卡片 · 内容由 cards 文件夹里的脚本决定</div>';
+    h += S.length ? S.map(s => '<button data-f="' + esc(s.f) + '"' + (s.fits ? '' : ' disabled title="这么高（' + s.height + ' px）的卡片哪块屏都放不下了"') + '>'
+      + esc(s.name || s.f) + '<span class="hint">' + esc(s.f) + '.js · 高 ' + s.height + ' px</span></button>').join('')
+      : '<div class="msg">文件夹里还没有卡片脚本</div>';
+    h += '<div class="sep"></div><button data-open="1">打开 cards 文件夹…<span class="hint">放进去的每个 .js 文件就是一种卡片，自带几个示例</span></button>';
+    m.innerHTML = h;
+    m.classList.add('open');
+    const r = $('tabNew').getBoundingClientRect();
+    m.style.top = (r.bottom + 4) + 'px';
+    m.style.left = Math.max(8, Math.min(window.innerWidth - m.offsetWidth - 8, r.left)) + 'px';
+  }
+  const menuOpen = () => $('addMenu').classList.contains('open');
+  const closeAddMenu = () => $('addMenu').classList.remove('open');
+  $('tabNew').onclick = () => { if (menuOpen()) closeAddMenu(); else openAddMenu(); };
+  $('addMenu').onclick = e => {
+    const b = e.target.closest('button');
+    if (!b || b.disabled) return;
+    closeAddMenu();
+    if (b.dataset.open) { post({ t: 'opencards' }); return; }
     if (adding) return;
     adding = true; setTimeout(() => { adding = false; }, 3000);   // 宿主没建成（不回 init）时 3 秒后放开
-    flushThen({ t: 'add' });
+    flushThen({ t: 'add', script: b.dataset.f || null });
   };
+  document.addEventListener('mousedown', e => { if (menuOpen() && !e.target.closest('#addMenu, #tabNew')) closeAddMenu(); });
+  window.addEventListener('blur', closeAddMenu);
+  window.addEventListener('resize', closeAddMenu);
 
   // ---------------------------------------------------------------- 界面
   function renderCity() {
@@ -398,6 +464,7 @@
   const setShow = s => { card.Show = SHOW_KEYS.filter(k => s.has(k)).join(','); };
   const sizeOf = s => Object.keys(SIZES).find(z => SIZE_KEYS.every(k => s.has(k) === SIZES[z].includes(k))) || null;
   function renderShow() {
+    if (renderCustom()) return;
     const s = showSet(), z = sizeOf(s), off = !!(card.Hidden || card.Off);
     $('showSec').classList.toggle('off', off);
     for (const b of document.querySelectorAll('#sizes button')) { b.classList.toggle('on', b.dataset.s === z); b.disabled = off; }
@@ -410,6 +477,78 @@
     $('showNote').textContent = mine ? fit.msg || '' : '';
     $('fitNote').textContent = fresh() && !mine ? fit.msg || '' : '';
   }
+  // 自定义卡片：脚本下拉框、高度、脚本出错的原因（桌面上不显示它的原因，宿主转来的）。返回是不是自定义卡片
+  let cerr = '';
+  const WARN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 1.8 14.6 13.6H1.4z" stroke-linejoin="round"/><path d="M8 6.2v3.6M8 11.6v.3"/></svg>';
+  const hLim = () => [fit && fit.hmin || 64, fit && fit.hmax || 720];
+  let scriptList = null;   // 上次 fit 带来的 cards 文件夹脚本列表；null = 还没收到过
+  // 列表里的哪个脚本：文件名不分大小写（和宿主的 FindScript 一样；settings.json 里手写的 "clock" 就是 Clock.js）
+  const findScript = (S, f) => f == null ? undefined : S.find(s => s.f.toLowerCase() === String(f).toLowerCase());
+  function renderCustom() {
+    const cu = card.Script != null;
+    document.body.classList.toggle('custom', cu);
+    $('name').placeholder = cu ? '卡片名称（留空用脚本名）' : '卡片名称（留空用城市名）';
+    if (!cu) return false;
+    // fit 还没到（刚切卡片、刚改过设置）就用上次的列表：不然还在的脚本会被当成「文件不见了」
+    if (fresh() && fit.scripts) scriptList = fit.scripts;
+    const S = scriptList || [], sel = $('script');
+    const key = JSON.stringify(S.map(s => [s.f, s.name])) + '\n' + card.Script;
+    if (sel.dataset.key !== key) {   // 脚本列表变了才重建（避免打开着时被关掉）
+      sel.dataset.key = key;
+      const opt = (v, t) => '<option value="' + esc(v) + '">' + esc(t) + '</option>';
+      sel.innerHTML = (findScript(S, card.Script) ? '' : opt(card.Script, card.Script + '.js' + (scriptList ? '（文件不见了）' : '')))
+        + S.map(s => opt(s.f, s.name && s.name !== s.f ? s.name + '（' + s.f + '.js）' : s.f + '.js')).join('');
+    }
+    const cur = findScript(S, card.Script);
+    sel.value = cur ? cur.f : card.Script;   // 下拉框的值区分大小写：按列表里的写法选
+    const off = !!card.Off, [lo, hi] = hLim();
+    if (document.activeElement !== $('hgt')) $('hgt').value = card.Height;   // 正在输入时不改（打到一半的数字会被换掉）
+    $('hgt').min = lo; $('hgt').max = hi;
+    $('custSec').classList.toggle('off', off);
+    for (const el of document.querySelectorAll('#custSec .step button, #hgt')) el.disabled = off;
+    $('hRange').textContent = lo + '–' + hi + ' px，宽固定 ' + (fresh() && fit.cw ? Math.round(fit.cw) : 336);
+    $('hTag').textContent = (fresh() && fit.cw ? Math.round(fit.cw) : 336) + ' × ' + (fresh() && fit.ch ? Math.round(fit.ch) : card.Height);
+    // 放不下的提示：这次改的是高度（和设置里保存的不一样）就写在这里，否则写在「位置」下面
+    const mine = fresh() && !!fit.saved && fit.saved.height !== card.Height;
+    $('hNote').textContent = mine ? fit.msg || '' : '';
+    $('fitNote').textContent = fresh() && !mine ? fit.msg || '' : '';
+    const err = fresh() && !off ? cerr : '';
+    $('cerrNote').innerHTML = err ? WARN + '<span>桌面上暂时没有显示这张卡片：脚本出错了。改好脚本保存后会自动重新运行（出错原因也写在日志里）<b>' + esc(err) + '</b></span>' : '';
+    return true;
+  }
+  // 新增自定义卡片时宿主起的名字（Program.NewCard）：s.auto（宿主按脚本里的 name / 文件名截好的），和别的卡片重名加「 2」「 3」…
+  const isAutoName = (n, b) => n === b || (n.startsWith(b + ' ') && /^\d+$/.test(n.slice(b.length + 1)));
+  $('script').onchange = () => {
+    const f = $('script').value, S = (fit && fit.scripts) || [];
+    const was = findScript(S, card.Script), now = findScript(S, f);
+    // 高度、名称还是原来那个脚本建议的：跟着换成新脚本的；改过的保持不动（原来的脚本不在列表里了：不知道它建议的是什么，名称不动）
+    if (was && now && card.Height === was.height) card.Height = now.height;
+    if (was && now && isAutoName(card.Name || '', was.auto)) {
+      const b = now.auto, others = ((fit && fit.cards) || []).filter(c => c.id !== card.Id).map(c => c.name);
+      let n = b;
+      for (let k = 2; others.includes(n); k++) n = b + ' ' + k;
+      card.Name = n; $('name').value = n;
+    }
+    card.Script = f;
+    cerr = '';   // 新脚本跑起来怎么样，等桌面那边报
+    renderCustom(); sendDraft(true);
+  };
+  $('openCards').onclick = () => post({ t: 'opencards' });
+  const setHeight = v => { const [lo, hi] = hLim(); card.Height = Math.max(lo, Math.min(hi, v)); };
+  for (const b of document.querySelectorAll('#custSec .step button'))
+    b.onclick = () => {
+      setHeight((Math.round(Number($('hgt').value)) || card.Height || 160) + Number(b.dataset.hd));
+      $('hgt').value = card.Height;
+      renderCustom(); sendDraft(false);
+    };
+  $('hgt').addEventListener('input', () => {
+    // 清空、写了一半（比如要写 150 先打的 1、15）：先不动，失焦时显示回实际生效的值
+    const n = Math.round(Number($('hgt').value));
+    if ($('hgt').value === '' || !isFinite(n) || n < hLim()[0]) return;
+    setHeight(n); sendDraft(false);
+  });
+  $('hgt').addEventListener('blur', () => { $('hgt').value = card.Height; renderCustom(); });
+
   // 隐藏 / 显示按钮、顶部说明（默认卡片不能隐藏，和不能删除一样）
   function renderVis() {
     const v = $('vis'), off = !!card.Off;
@@ -715,8 +854,8 @@
   // 按"和保存的不一样"判断，不看 fit.ok：刚挪过（方向键防抖中、拖完松手）宿主还没判定时 fit.ok 还是上一次的结果
   const dropUnsaved = () => {
     const s = fresh() && fit.saved;
-    if (!s || (s.pos === card.Pos && s.x === card.OffsetX && s.y === card.OffsetY && s.show === card.Show)) return;
-    card.Pos = s.pos; card.OffsetX = s.x; card.OffsetY = s.y; card.Show = s.show;
+    if (!s || (s.pos === card.Pos && s.x === card.OffsetX && s.y === card.OffsetY && s.show === card.Show && s.height === card.Height)) return;
+    card.Pos = s.pos; card.OffsetX = s.x; card.OffsetY = s.y; card.Show = s.show; card.Height = s.height;
     renderOffsets();
   };
   $('hidden').onchange = () => {
@@ -757,6 +896,7 @@
   };
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape' || e.isComposing) return;
+    if (menuOpen()) { closeAddMenu(); return; }
     if (e.target.id === 'q' && ($('q').value || $('results').innerHTML)) { $('q').value = ''; $('results').innerHTML = ''; searching = ''; return; }
     flushThen({ t: 'close' });
   });
@@ -773,7 +913,7 @@
     if (m.t === 'init') {
       clearTimeout(draftTm); draftTm = 0;
       composing = false;   // 组字中途被换掉名称框的值不一定有 compositionend：不复位的话之后打的字一直发不出去
-      card = m.card; autoName = m.autoName || ''; gen = m.gen || 0;
+      card = m.card; autoName = m.autoName || ''; gen = m.gen || 0; cerr = ''; closeAddMenu();
       $('results').innerHTML = ''; $('q').value = ''; searching = ''; armed = keepArmed; keepArmed = false; adding = false;
       clearTimeout(delArm); delArm = 0; $('del').textContent = '删除卡片';
       cityMode = card.Lat != null && card.Lon != null;
@@ -790,7 +930,11 @@
       fit = m;
       if (m.gap != null) GAP = m.gap;
       if (m.margin != null) MARGIN = m.margin;
+      if (card && m.id === card.Id) cerr = m.cerr || '';
       if (card) renderFit();
+    } else if (m.t === 'cerr') {
+      // 桌面上那张自定义卡片出错了 / 好了（宿主转来的）
+      if (card && m.id === card.Id) { cerr = m.err || ''; renderCustom(); }
     }
     else if (m.t === 'search') onSearch(m);
     else if (m.t === 'flush') flushThen({ t: 'close' });   // 点了标题栏 × 等：把还没发出去的编辑交上去再关
