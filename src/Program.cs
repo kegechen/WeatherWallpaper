@@ -464,8 +464,11 @@ namespace WeatherWallpaper
             bool hasTb = tb.HasValue && w.Bounds.Contains(new Point(tb.Value.X + tb.Value.Width / 2, tb.Value.Y + tb.Value.Height / 2));
             if (hasTb) ground = (w.Bounds.Bottom - tb.Value.Top) / (double)w.Bounds.Height;
             bool main = w == MainWall;
-            var cards = string.Join(",", PlacesOn(w).Select(p => "{\"id\":" + WeatherService.JsonStr(p.Card.Id) + ",\"key\":" + WeatherService.JsonStr(p.Card.LocKey())
-                + ",\"x\":" + p.Rect.Value.X.ToString("F1", Inv) + ",\"y\":" + p.Rect.Value.Y.ToString("F1", Inv) + "}"));
+            // 每张卡片带城市键、显示内容和高度（高度按显示的内容算，CardLayout.HeightOf）
+            var cards = string.Join(",", PlacesOn(w).Select(p => "{\"id\":" + WeatherService.JsonStr(p.Card.Id)
+                + ",\"key\":" + WeatherService.JsonStr(p.Card.LocKey()) + ",\"show\":" + WeatherService.JsonStr(p.Card.Show)
+                + ",\"x\":" + p.Rect.Value.X.ToString("F1", Inv) + ",\"y\":" + p.Rect.Value.Y.ToString("F1", Inv)
+                + ",\"h\":" + p.Rect.Value.Height.ToString("F1", Inv) + "}"));
             return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", Inv)
                 + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel)
                 + ",\"fps\":" + w.Fps + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
@@ -1407,7 +1410,7 @@ namespace WeatherWallpaper
             if (cardWin == null)
             {
                 draft = (settings.Cards.FirstOrDefault(c => c.Id == id) ?? settings.Cards[0]).Clone();
-                cardWin = new PageWindow(env, "卡片设置 · 天气壁纸", "card.html", 900, 680) { OnMessage = OnCardMessage };
+                cardWin = new PageWindow(env, "卡片设置 · 天气壁纸", "card.html", 900, 790) { OnMessage = OnCardMessage };
                 cardWin.Reloaded = () => { if (cardWin != null && draft != null) { cardWin.Post(CardInitJson()); cardWin.Post(CardFitJson()); } };
                 cardWin.FormClosed += (s, e) =>
                 {
@@ -1646,20 +1649,24 @@ namespace WeatherWallpaper
                 var before = settings.Cards.Where(k => SameScreen(k.Screen, target) && !k.Hidden && !k.Off).ToList();
                 var br = CardLayout.Place(f.Area.Work, before);
                 var placed = new HashSet<string>(before.Where((k, i) => br[i].HasValue).Select(k => k.Id));
+                var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
+                bool taller = saved != null && CardLayout.HeightOf(c) > CardLayout.HeightOf(saved) + 0.5f;   // 这次多显示了内容、卡片变高了：提示里先建议少显示几项
+                const string lower = "少显示几项内容";
                 if (!f.Rects[me].HasValue)
                 {
-                    // 本来就放不下、这次也没挪它（只改了名称、城市等）：照常保存，只提示；挪到了另一个同样放不下的地方、或者刚取消隐藏 → 不保存
-                    var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
+                    // 本来就放不下、这次也没挪它（只改了名称、城市、显示内容等）：照常保存，只提示；挪到了另一个同样放不下的地方、或者刚取消隐藏 → 不保存
                     bool samePlace = saved != null && saved.Screen == c.Screen && saved.Pos == c.Pos && saved.OffsetX == c.OffsetX && saved.OffsetY == c.OffsetY
                         && saved.Hidden == c.Hidden && saved.Off == c.Off;
                     if (samePlace && !placed.Contains(c.Id))
-                        f.Warn = ScreenName(target) + " 现在放不下这张卡片，桌面上暂时不显示：换个位置、减小偏移，或者换一块屏";
+                        f.Warn = ScreenName(target) + " 现在放不下这张卡片，桌面上暂时不显示：" + lower + "、换个位置、减小偏移，或者换一块屏";
+                    else if (taller && samePlace) f.Msg = ScreenName(target) + " 放不下这么高的卡片：" + lower + "，或者换个位置、换一块屏";
                     else f.Msg = ScreenName(target) + " 已经放不下这张卡片了：换个位置、减小偏移，或者换一块屏";
                 }
                 else
                 {
                     var lost = f.On.Where((k, i) => k.Id != c.Id && !f.Rects[i].HasValue && placed.Contains(k.Id)).FirstOrDefault();
-                    if (lost != null) f.Msg = "这样摆会把「" + CardName(lost) + "」卡片挤得放不下，换个位置试试";
+                    if (lost != null) f.Msg = taller ? "卡片变高后会把「" + CardName(lost) + "」卡片挤得放不下：" + lower + "，或者换个位置"
+                        : "这样摆会把「" + CardName(lost) + "」卡片挤得放不下，换个位置试试";
                 }
             }
             f.Ok = f.Msg == null;
@@ -1757,12 +1764,14 @@ namespace WeatherWallpaper
             var warn = string.Join("；", new[] { f.Warn, !settings.ShowPanel ? "设置文件里 ShowPanel 为 false：桌面上不显示任何卡片（只有天气画面），改成 true 才显示" : null }.Where(s => s != null));
             // 偏移能调到多大：再大卡片也已经贴边、不会再动（方向键、± 按到这里为止）。按左右 / 上下贴边算，居中位置页面自己减半；
             // 只跟所选的屏有关（scr），页面换了屏、新结果还没到时不用它
-            int[] lim = f.Area == null ? null : new[] { (int)Math.Max(0, f.Area.Work.Width - CardLayout.W), (int)Math.Max(0, f.Area.Work.Height - CardLayout.H) };
-            // 设置里保存的位置：页面在放不下（没保存）时点「隐藏卡片」，先换回它再隐藏——没保存的改动作废，和换卡片、关窗口一样
+            float ch = CardLayout.HeightOf(draft);
+            int[] lim = f.Area == null ? null : new[] { (int)Math.Max(0, f.Area.Work.Width - CardLayout.W), (int)Math.Max(0, f.Area.Work.Height - ch) };
+            // 设置里保存的位置和显示内容：页面在放不下（没保存）时点「隐藏卡片」，先换回它再隐藏——没保存的改动作废，和换卡片、关窗口一样
             var stored = settings.Cards.FirstOrDefault(k => k.Id == draft.Id);
-            var saved = stored == null ? null : new { scr = stored.Screen, pos = stored.Pos, x = stored.OffsetX, y = stored.OffsetY };
-            // 拖动吸附用：卡片间距、默认边距（页面 CSS 像素），和这边的排版一致
-            return Js.Serialize(new { t = "fit", id = draft.Id, scr = draft.Screen, ok = f.Ok, msg = f.Msg ?? "", warn, lim, scene = mine.Scene, sceneLock = sceneHint != null, sceneHint = sceneHint ?? "", addable = addHint == null, addHint = addHint ?? "", cards, screens, thumb, saved, gap = CardLayout.Gap, margin = CardSpec.DefaultOffset });
+            var saved = stored == null ? null : new { scr = stored.Screen, pos = stored.Pos, x = stored.OffsetX, y = stored.OffsetY, show = stored.Show };
+            // 拖动吸附用：卡片间距、默认边距（页面 CSS 像素），和这边的排版一致；cw / ch = 这张卡片的大小（「卡片内容」里显示）
+            return Js.Serialize(new { t = "fit", id = draft.Id, scr = draft.Screen, ok = f.Ok, msg = f.Msg ?? "", warn, lim, scene = mine.Scene, sceneLock = sceneHint != null, sceneHint = sceneHint ?? "", addable = addHint == null, addHint = addHint ?? "",
+                cards, screens, thumb, saved, gap = CardLayout.Gap, margin = CardSpec.DefaultOffset, cw = CardLayout.W, ch });
         }
 
         // ---------------------------------------------------------------- 设置文件

@@ -10,7 +10,7 @@
   body { font: 13.5px/1.45 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; }
   main { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 12px 20px 10px; }
   section { padding: 12px 14px; border-radius: 8px; background: rgba(255,255,255,.04); border: 1px solid var(--line); }
-  /* 两栏：左边基本信息 + 天气画面，右边位置（预览图 + 位置按钮 + 偏移）；窗口太窄（小屏收小了窗口）时上下排 */
+  /* 两栏：左边基本信息 + 卡片内容，右边位置（预览图 + 位置按钮 + 偏移）+ 天气画面；窗口太窄（小屏收小了窗口）时上下排 */
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) 404px; gap: 12px; align-items: start; }
   .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   @media (max-width: 800px) { .cols { grid-template-columns: minmax(0, 1fr); } }
@@ -136,10 +136,23 @@
 
   label.chk { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
   label.chk + label.chk { margin-top: 12px; }
-  label.chk input { appearance: none; flex: none; width: 20px; height: 20px; margin: 1px 0 0; padding: 0; border-radius: 4px; border: 1px solid rgba(255,255,255,.6); background: transparent; cursor: pointer; }
-  label.chk input:checked { background: var(--acc) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E") center/14px no-repeat; border-color: var(--acc); }
-  label.chk input:disabled { opacity: .45; cursor: default; }
-  label.chk:has(input:disabled) { cursor: default; }
+  label.chk input, label.ck input { appearance: none; flex: none; width: 20px; height: 20px; margin: 1px 0 0; padding: 0; border-radius: 4px; border: 1px solid rgba(255,255,255,.6); background: transparent; cursor: pointer; }
+  label.chk input:checked, label.ck input:checked { background: var(--acc) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E") center/14px no-repeat; border-color: var(--acc); }
+  label.chk input:disabled, label.ck input:disabled { opacity: .45; cursor: default; }
+  label.chk:has(input:disabled), label.ck:has(input:disabled) { cursor: default; }
+
+  /* 卡片内容：上面大 / 中 / 小三个快捷档（只管逐小时、未来几天、底部一行），下面逐项勾选；勾选正好是某一档时那档亮起，右上角是卡片大小 */
+  #showSec .hd { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  #showSec .hd h2 { margin: 0; }
+  #sizeTag { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #showSec .hint { margin: 6px 0 10px; }
+  .shows { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 9px 10px; align-items: center; }
+  .shows > span { color: var(--dim); }
+  .shows > div { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  label.ck { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; white-space: nowrap; }
+  label.ck input { width: 18px; height: 18px; margin: 0; }
+  #showSec.off .seg, #showSec.off .shows { opacity: .4; pointer-events: none; }
+  #showSec.off :disabled { opacity: 1; }   /* 整块已经变暗，别再暗一层 */
 
   footer { display: flex; align-items: center; gap: 8px; padding: 12px 22px 16px; border-top: 1px solid var(--line); background: rgba(0,0,0,.12); }
   footer .sp { flex: 1; }
@@ -180,13 +193,26 @@
         <div id="scrNote" class="note warn"></div>
       </section>
 
-      <section>
-        <h2>天气画面</h2>
-        <label class="chk"><input type="checkbox" id="scene"><span>全屏天气画面跟随这张卡片的城市<br><span class="hint" id="sceneHint"></span></span></label>
-        <label class="chk"><input type="checkbox" id="hidden"><span>只显示天气画面，不显示卡片<br><span class="hint">桌面上不画这张卡片，只用它的城市决定这块屏的全屏天气画面（想连天气画面也不要，用底部的「隐藏卡片」）</span></span></label>
+      <section id="showSec">
+        <div class="hd"><h2>卡片内容</h2><span id="sizeTag"></span></div>
+        <div class="seg" id="sizes">
+          <button data-s="l" title="逐小时、未来几天、底部的日出日落和更新时间都显示">大卡片</button>
+          <button data-s="m" title="去掉未来几天的预报">中卡片</button>
+          <button data-s="s" title="只留城市、当前天气和指标：去掉逐小时、未来几天和底部一行">小卡片</button>
+        </div>
+        <div class="hint">城市和当前天气总是显示；其余可单独开关，卡片高度随之变化</div>
+        <div class="shows">
+          <span>日期</span><div><label class="ck"><input type="checkbox" data-k="date">公历</label><label class="ck"><input type="checkbox" data-k="week">星期</label><label class="ck"><input type="checkbox" data-k="lunar">农历</label></div>
+          <span>天气</span><div><label class="ck"><input type="checkbox" data-k="hilo">今天最高最低温</label><label class="ck"><input type="checkbox" data-k="src">定位方式</label></div>
+          <span>指标</span><div><label class="ck"><input type="checkbox" data-k="aqi">空气</label><label class="ck"><input type="checkbox" data-k="feel">体感</label><label class="ck"><input type="checkbox" data-k="hum">湿度</label><label class="ck"><input type="checkbox" data-k="wind">风力</label></div>
+          <span>预报</span><div><label class="ck"><input type="checkbox" data-k="hours">今天逐小时</label><label class="ck"><input type="checkbox" data-k="days">未来几天</label></div>
+          <span>底部</span><div><label class="ck"><input type="checkbox" data-k="sun">日出日落</label><label class="ck"><input type="checkbox" data-k="upd">更新时间</label></div>
+        </div>
+        <div id="showNote" class="note bad"></div>
       </section>
     </div>
 
+    <div class="col">
     <section id="posSec">
       <h2>位置</h2>
       <div id="thumb"></div>
@@ -201,6 +227,13 @@
       <div class="hint drag">拖动预览图里的卡片调位置，靠近其他卡片、边距或中线时自动吸附（按住 Ctrl 或 Alt 不吸附）；选中后方向键微调（Shift 加速）</div>
       <div id="fitNote" class="note bad"></div>
     </section>
+
+    <section>
+      <h2>天气画面</h2>
+      <label class="chk"><input type="checkbox" id="scene"><span>全屏天气画面跟随这张卡片的城市<br><span class="hint" id="sceneHint"></span></span></label>
+      <label class="chk"><input type="checkbox" id="hidden"><span>只显示天气画面，不显示卡片<br><span class="hint">桌面上不画这张卡片，只用它的城市决定这块屏的全屏天气画面（想连天气画面也不要，用底部的「隐藏卡片」）</span></span></label>
+    </section>
+    </div>
   </div>
 </main>
 <footer>
@@ -353,6 +386,29 @@
     const off = !!(card.Hidden || card.Off);
     $('posSec').classList.toggle('off', off);
     for (const el of document.querySelectorAll('#posSec .grid button, #posSec .offs button, #posSec .offs input')) el.disabled = off;
+    renderShow();   // 卡片内容也跟着隐藏 / 只显示画面变暗
+  }
+  // 卡片内容：键和宿主 CardSpec.ShowKeys / DefaultShow 一致（顺序也一样：宿主整理后按这个顺序存，页面也按它拼，两边好直接比较）
+  const SHOW_KEYS = ['date', 'week', 'lunar', 'hilo', 'src', 'aqi', 'feel', 'hum', 'wind', 'hours', 'days', 'sun', 'upd'];
+  const DEFAULT_SHOW = 'hilo,src,aqi,feel,hum,wind,hours,days,sun,upd';
+  // 大 / 中 / 小只管这几项，日期、指标等其余勾选保持不变
+  const SIZE_KEYS = ['hours', 'days', 'sun', 'upd'];
+  const SIZES = { l: ['hours', 'days', 'sun', 'upd'], m: ['hours', 'sun', 'upd'], s: [] };
+  const showSet = () => new Set((card.Show == null ? DEFAULT_SHOW : card.Show).split(',').filter(Boolean));
+  const setShow = s => { card.Show = SHOW_KEYS.filter(k => s.has(k)).join(','); };
+  const sizeOf = s => Object.keys(SIZES).find(z => SIZE_KEYS.every(k => s.has(k) === SIZES[z].includes(k))) || null;
+  function renderShow() {
+    const s = showSet(), z = sizeOf(s), off = !!(card.Hidden || card.Off);
+    $('showSec').classList.toggle('off', off);
+    for (const b of document.querySelectorAll('#sizes button')) { b.classList.toggle('on', b.dataset.s === z); b.disabled = off; }
+    for (const i of document.querySelectorAll('#showSec input[data-k]')) { i.checked = s.has(i.dataset.k); i.disabled = off; }
+    // 卡片大小以宿主算的为准（CardLayout.HeightOf，改了勾选后宿主回的 fit 里就是新的）
+    const h = fresh() && fit.ch ? Math.round(fit.ch) : 0;
+    $('sizeTag').textContent = [z ? '' : '自定义', h ? Math.round(fit.cw) + ' × ' + h : ''].filter(Boolean).join(' · ');
+    // 放不下的提示：这次改的是显示内容（和设置里保存的不一样）就写在这里，否则写在「位置」下面
+    const mine = fresh() && !!fit.saved && fit.saved.show !== card.Show;
+    $('showNote').textContent = mine ? fit.msg || '' : '';
+    $('fitNote').textContent = fresh() && !mine ? fit.msg || '' : '';
   }
   // 隐藏 / 显示按钮、顶部说明（默认卡片不能隐藏，和不能删除一样）
   function renderVis() {
@@ -394,9 +450,9 @@
       sel.value = card.Screen;
     }
     $('scrNote').textContent = fit.warn || '';
-    $('fitNote').textContent = fit.msg || '';
     if (!dragging) renderThumb();   // 正在拖：别把手里的框换掉，松手后会按新结果重画
     renderScene();
+    renderShow();   // 卡片大小、放不下的提示（写在「卡片内容」还是「位置」下面）
     renderState();
   }
   function renderThumb() {
@@ -608,7 +664,7 @@
       card.Pos = p;
       renderPos(); renderOffsets(); sendDraft(true);
     };
-  for (const b of document.querySelectorAll('.step button'))
+  for (const b of document.querySelectorAll('#posSec .step button'))
     b.onclick = () => {
       const k = b.dataset.k === 'x' ? 0 : 1, inp = $(k === 0 ? 'ox' : 'oy');
       const v = clampOff(k, (Math.round(Number(inp.value)) || 0) + Number(b.dataset.d));
@@ -654,27 +710,42 @@
   // ---------------------------------------------------------------- 天气画面
   // 画面跟随只在点勾选框时发给宿主（带 scene 字段），其余时候以宿主为准
   $('scene').onchange = () => sendDraft(true, { scene: $('scene').checked });
-  // 隐藏 / 只显示画面的卡片不占位置，总能保存：现在这个位置放不下（没保存）的话，先换回设置里保存的位置——
-  // 没保存的改动作废（和换卡片、关窗口一样），不然放不下的位置会跟着存下来。屏不换回：不占位置的卡片放在哪块屏都合法。
+  // 隐藏 / 只显示画面的卡片不占位置，总能保存：现在这个位置 / 这么高放不下（没保存）的话，先换回设置里保存的位置和显示内容——
+  // 没保存的改动作废（和换卡片、关窗口一样），不然放不下的位置、内容会跟着存下来。屏不换回：不占位置的卡片放在哪块屏都合法。
   // 按"和保存的不一样"判断，不看 fit.ok：刚挪过（方向键防抖中、拖完松手）宿主还没判定时 fit.ok 还是上一次的结果
-  const dropUnsavedPos = () => {
+  const dropUnsaved = () => {
     const s = fresh() && fit.saved;
-    if (!s || (s.pos === card.Pos && s.x === card.OffsetX && s.y === card.OffsetY)) return;
-    card.Pos = s.pos; card.OffsetX = s.x; card.OffsetY = s.y;
+    if (!s || (s.pos === card.Pos && s.x === card.OffsetX && s.y === card.OffsetY && s.show === card.Show)) return;
+    card.Pos = s.pos; card.OffsetX = s.x; card.OffsetY = s.y; card.Show = s.show;
     renderOffsets();
   };
   $('hidden').onchange = () => {
     card.Hidden = $('hidden').checked;
-    if (card.Hidden) dropUnsavedPos();
+    if (card.Hidden) dropUnsaved();
     renderPos(); sendDraft(true);
   };
+
+  // ---------------------------------------------------------------- 卡片内容
+  // 大 / 中 / 小：只改逐小时、未来几天、底部一行；单项勾选。都是马上发给宿主（放得下就保存，放不下标红、不保存）
+  for (const b of document.querySelectorAll('#sizes button'))
+    b.onclick = () => {
+      const s = showSet(), want = SIZES[b.dataset.s];
+      for (const k of SIZE_KEYS) { if (want.includes(k)) s.add(k); else s.delete(k); }
+      setShow(s); renderShow(); sendDraft(true);
+    };
+  for (const i of document.querySelectorAll('#showSec input[data-k]'))
+    i.onchange = () => {
+      const s = showSet();
+      if (i.checked) s.add(i.dataset.k); else s.delete(i.dataset.k);
+      setShow(s); renderShow(); sendDraft(true);
+    };
 
   // ---------------------------------------------------------------- 底部按钮
   // 隐藏 / 显示：发给宿主马上生效（隐藏总能保存；重新显示时放不下就和挪位置一样标红、不保存）
   $('vis').onclick = () => {
     if (card.Id === 'default') return;
     card.Off = !card.Off;
-    if (card.Off) dropUnsavedPos();
+    if (card.Off) dropUnsaved();
     renderPos(); renderVis(); sendDraft(true);   // 预览图、页签、画面跟随等宿主回的 fit 到了再按新状态重画
   };
   $('done').onclick = () => flushThen({ t: 'close' });

@@ -87,7 +87,7 @@
   const rand = Math.random;
   function prng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
-  // cards：这块屏上的卡片 [{id, key, x, y}]（位置由宿主算好，CSS 像素）；scene：全屏天气画面跟着哪个城市（城市键）
+  // cards：这块屏上的卡片 [{id, key, show, x, y, h}]（位置、高度由宿主算好，CSS 像素）；scene：全屏天气画面跟着哪个城市（城市键）
   // overlayWall：壁纸叠加——天空半透明、系统壁纸常驻垫底；skyOpacity：天空那层的不透明度（0.05–1）；
   // cloudAlpha：云的不透明度（极简模式不叠壁纸时恒为 1）
   const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, scene: '', cards: [] };
@@ -656,7 +656,7 @@
       night: 1 - daylight, daylight,                      // 0 白天 … 1 深夜
       weather: { rain: cur.rain, snow: cur.snow, cloud: cur.cloud, fog: cur.fog, thunder: cur.thunder, wind: cur.windX },   // 0–1；wind 正 = 往右吹
       date: fxDate(), preview: preview !== 'live',
-      cards: (L.panel ? L.cards || [] : []).map(c => ({ x: c.x, y: c.y, w: CARD_W, h: CARD_H })),
+      cards: (L.panel ? L.cards || [] : []).map(c => ({ x: c.x, y: c.y, w: CARD_W, h: cardH(c) })),
       state: u.state,                                     // 这个效果自己的存储（每次出现时清空）
       free: (x, w, y0, y1) => placeX(x, w, y0, y1),       // 宽 w 的东西在 [y0, y1] 这段高度上、离 x 最近又不被卡片挡住的中心 x
       glow: (c, x, y, r, a = 1) => {                      // 柔光（叠加发光）；颜色写 #rrggbb
@@ -1226,11 +1226,13 @@
     dragon: { w: 140, h: 110, draw: drawZongzi },
     moon: { w: 140, h: 70, draw: drawMooncakes },
   };   // 国庆的国旗不占左右两个位置：单独立在屏幕正中（drawNationalFlag）
-  // 天气卡片的 CSS 尺寸（改尺寸要连着改：style.css 的 .card、宿主 src/CardLayout.cs 的 W / H、这里的让位边距 16）
-  const CARD_W = 336, CARD_H = 480;
+  // 天气卡片的 CSS 尺寸：宽固定（style.css 的 .card、宿主 src/CardLayout.cs 的 W），高度每张卡片按显示的内容不同，宿主在 layout 里给（CardLayout.HeightOf）；
+  // 没给高度（浏览器里调试）按全显示的高度算。卡片两边的让位边距 16
+  const CARD_W = 336, CARD_H = 446;
+  const cardH = c => c.h || CARD_H;
   // 在 [y0, y1] 这段高度上，卡片没挡住的横向空地 [[a, b], ...]（CSS 像素，卡片两边再让出一点）
   function freeSpans(y0, y1) {
-    const bl = (L.panel ? L.cards || [] : []).filter(c => c.y < y1 && c.y + CARD_H > y0).map(c => [c.x - 16, c.x + CARD_W + 16]).sort((a, b) => a[0] - b[0]);
+    const bl = (L.panel ? L.cards || [] : []).filter(c => c.y < y1 && c.y + cardH(c) > y0).map(c => [c.x - 16, c.x + CARD_W + 16]).sort((a, b) => a[0] - b[0]);
     const out = [];
     let x = 0;
     for (const [a, b] of bl) { if (a > x) out.push([x, a]); x = Math.max(x, b); }
@@ -1833,9 +1835,9 @@
   }
 
   // ------------------------------------------------------------------ 天气卡片
-  // 每张卡片一个固定大小的 .card，按宿主给的位置摆；城市的天气还没到时先显示"正在获取天气…"。
+  // 每张卡片一个 .card，按宿主给的位置和高度摆（高度跟着卡片显示的内容走，c.show）；城市的天气还没到时先显示"正在获取天气…"。
   // 内容没变就不动 DOM：卡片带毛玻璃，重排一次要重新模糊整块背景
-  const cardEls = new Map();   // id → { el, html, x, y }
+  const cardEls = new Map();   // id → { el, html, x, y, h }
   function renderPanel() {
     const list = L.panel ? L.cards || [] : [];
     const seen = new Set();
@@ -1846,16 +1848,18 @@
         const el = document.createElement('div');
         el.className = 'card hidden';
         cardsEl.appendChild(el);
-        e = { el, html: null, x: null, y: null };
+        e = { el, html: null, x: null, y: null, h: null };
         cardEls.set(c.id, e);
       }
       e.gone = false;   // 淡出中又回来了：别让排好的删除把它撤掉
       const x = c.x == null ? 0 : c.x, y = c.y == null ? 0 : c.y;   // 没有位置的消息不会来；这里只是防御
       if (x !== e.x || y !== e.y) { e.x = x; e.y = y; e.el.style.left = x + 'px'; e.el.style.top = y + 'px'; }
+      const h = c.h ? c.h + 'px' : 'auto';   // 浏览器里调试没有宿主算的高度：按内容撑开
+      if (h !== e.h) { e.h = h; e.el.style.height = h; }
       const w = weathers[c.key];
       let html;
       try {
-        html = w ? WX.panelHtml(w, Date.now() + w.fc.utc_offset_seconds * 1000, c.key === L.scene ? previewLabel() : '')
+        html = w ? WX.panelHtml(w, Date.now() + w.fc.utc_offset_seconds * 1000, c.key === L.scene ? previewLabel() : '', c.show)
           : '<div class="wait">正在获取天气…</div>';
         e.err = '';   // 好了：之后再出同样的错要重新记日志
       } catch (err) {
@@ -2091,6 +2095,7 @@
     const q = new URLSearchParams(location.search);
     L.panel = q.get('panel') !== '0'; L.primary = true; L.ground = 0.0444;
     L.scene = 'dbg'; L.cards = [{ id: 'dbg', key: 'dbg', x: Math.max(0, window.innerWidth - CARD_W - 28), y: 28 }];   // 一张卡片，右上角（尺寸同 .card）
+    if (q.has('show')) L.cards[0].show = q.get('show');   // ?show=date,week,lunar,hilo 只显示这几项（高度按内容撑开）
     const cp = /^(\d+),(\d+)$/.exec(q.get('card') || '');   // ?card=40,560 把卡片挪到别处（看节日装饰会不会让开）
     if (cp) { L.cards[0].x = +cp[1]; L.cards[0].y = +cp[2]; }
     L.minimal = q.get('minimal') === '1'; fxKind = q.get('fx') || null;   // ?minimal=1&fx=rainbow 调试极简模式

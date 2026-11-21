@@ -32,6 +32,22 @@ namespace WeatherWallpaper
         public bool Hidden { get; set; }                      // 只显示天气画面：卡片不画出来，但这块屏的天气城市由它决定
         // 隐藏这张卡片（相当于暂时删掉，不用删了再加）：不显示、不占位置、不取天气、不参与天气画面，也不让它的屏显示天气壁纸。默认卡片不能隐藏
         public bool Off { get; set; }
+        // 卡片上显示哪些内容（城市和当前天气总是显示），逗号分隔，见 ShowKeys；卡片高度按它算（CardLayout.HeightOf）。null = 默认（DefaultShow）
+        public string Show { get; set; } = DefaultShow;
+
+        // 可选内容，按卡片上从上到下的顺序：公历日期、星期、农历（日期行）；今日最高 / 最低、定位来源（手动 / IP 定位）；
+        // 空气、体感、湿度、风（指标标签）；今天逐小时预报、未来几天预报；日出日落、更新时间（底部）。
+        // 页面里各有一份同样的：web/card.html 的 SHOW_KEYS / DEFAULT_SHOW、web/weather.js 的 DEFAULT_SHOW，改了要一起改
+        public static readonly string[] ShowKeys = { "date", "week", "lunar", "hilo", "src", "aqi", "feel", "hum", "wind", "hours", "days", "sun", "upd" };
+        public const string DefaultShow = "hilo,src,aqi,feel,hum,wind,hours,days,sun,upd";   // 和加这个设置之前的卡片一样（没有日期行）
+        /// <summary>卡片上显示不显示这一项。逐个比对、不拼字符串：排版时每张卡片要问十几次，卡片设置开着拖动时一秒要排几十遍</summary>
+        public bool Has(string key)
+        {
+            var s = Show ?? "";
+            for (int i = s.IndexOf(key, StringComparison.Ordinal); i >= 0; i = s.IndexOf(key, i + 1, StringComparison.Ordinal))
+                if ((i == 0 || s[i - 1] == ',') && (i + key.Length == s.Length || s[i + key.Length] == ',')) return true;
+            return false;
+        }
 
         public bool IsDefault() => Id == DefaultId;
         public bool IsAuto() => !(Lat.HasValue && Lon.HasValue);
@@ -54,6 +70,13 @@ namespace WeatherWallpaper
             OffsetX = Math.Max(Pos[1] == 'c' ? -4000 : 0, Math.Min(4000, OffsetX));   // 只有居中位置的水平偏移可以是负数（往左）
             OffsetY = Math.Max(0, Math.Min(4000, OffsetY));
             if (IsAuto() || Math.Abs(Lat.Value) > 90 || Math.Abs(Lon.Value) > 180) { Lat = Lon = null; City = null; }
+            // 显示内容：去掉不认识的、重复的，按固定顺序排（比较改没改过、写进文件都用同一个样子）；"" = 只显示城市和当前天气
+            if (Show == null) Show = DefaultShow;
+            else
+            {
+                var want = new HashSet<string>(Show.Split(',').Select(s => s.Trim().ToLowerInvariant()));
+                Show = string.Join(",", ShowKeys.Where(want.Contains));
+            }
         }
 
         public static string NewId() => "c" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -341,7 +364,9 @@ namespace WeatherWallpaper
                 "OffsetX / OffsetY 离屏幕边缘的距离，单位像素（按 100% 缩放计）；City / Lat / Lon 都为 null = 自动定位；" +
                 "Name 卡片名称；Scene = true 表示这块屏的全屏天气画面跟随这张卡片的城市（每块屏恰好一张，没有会自动补上）；" +
                 "Hidden = true 不画卡片、只显示天气画面（这块屏的天气城市由它决定）；" +
-                "Off = true 隐藏这张卡片（默认卡片除外）：不显示、不占位置、不更新天气，也不决定天气画面，相当于暂时删掉，改回 false 即恢复",
+                "Off = true 隐藏这张卡片（默认卡片除外）：不显示、不占位置、不更新天气，也不决定天气画面，相当于暂时删掉，改回 false 即恢复；" +
+                "Show 卡片上显示的内容（城市和当前天气总是显示，卡片高度随之变化），逗号分隔：date 公历日期、week 星期、lunar 农历、hilo 今日最高 / 最低、src 定位来源、" +
+                "aqi 空气、feel 体感、hum 湿度、wind 风、hours 今天逐小时、days 未来几天、sun 日出日落、upd 更新时间（\"\" = 只显示城市和当前天气）",
             ["Fps"] = "帧率：30 或 60",
             ["TaskbarFx"] = "任务栏雨雪效果：true 开 / false 关",
             ["ShowPanel"] = "桌面天气卡片总开关：true 显示 / false 全部隐藏（隐藏后可左键点托盘图标查看）",

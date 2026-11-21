@@ -1,7 +1,8 @@
-// fest.js 单测：已知节日日期 + 烟花时段 + 复活节
+// fest.js / lunar.js 单测：已知节日日期 + 烟花时段 + 复活节 + 农历日期
 import fs from 'node:fs';
+eval(fs.readFileSync(new URL('../web/lunar.js', import.meta.url), 'utf8'));
 eval(fs.readFileSync(new URL('../web/fest.js', import.meta.url), 'utf8'));
-const F = globalThis.FEST;
+const F = globalThis.FEST, LU = globalThis.LUNAR;
 const L = (s, hh = 12, mm = 0) => Date.parse(s + 'T00:00:00Z') + (hh * 60 + mm) * 60000;   // 当地时间（按 UTC 表示）
 let fail = 0;
 const eq = (name, got, want) => { const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) fail++; console.log((ok ? 'ok  ' : 'FAIL') + ' ' + name + ' -> ' + JSON.stringify(got) + (ok ? '' : ' want ' + JSON.stringify(want))); };
@@ -46,7 +47,22 @@ eq('跨年 12/31 23:55 最密', fw('2026-12-31', 23, 55), 2);
 eq('跨年 12/31 22:00 放', fw('2026-12-31', 22), 1);
 eq('元旦 00:10 最密', fw('2027-01-01', 0, 10), 2);
 eq('元旦 白天不放', fw('2027-01-01', 14), 0);
-// 表外年份走 ICU
+// 节日表外的年份按 lunar.js 逐日推算
 const ly = F.lunarDays(2060);
-eq('2060 走 ICU：春节在 1–2 月', [new Date(ly.cny).getUTCMonth() + 1 <= 2, !!ly.moon], [true, true]);
+eq('2060 逐日推算：春节在 1–2 月', [new Date(ly.cny).getUTCMonth() + 1 <= 2, !!ly.moon], [true, true]);
+// 农历日期（卡片日期行）：查表，和香港天文台一致
+eq('农历 2026-11-21 = 十月十三', LU.text(L('2026-11-21')), '十月十三');
+eq('农历 2027-02-05 = 腊月廿九（ICU 算成三十）', LU.text(L('2027-02-05')), '腊月廿九');
+eq('农历 2027-02-06 = 正月初一', LU.text(L('2027-02-06')), '正月初一');
+eq('农历 2025-07-25 = 闰六月初一', LU.text(L('2025-07-25')), '闰六月初一');
+eq('农历 2033-12-22 = 闰冬月初一', LU.text(L('2033-12-22')), '闰冬月初一');
+eq('农历 2026-04-07 = 二月二十', LU.text(L('2026-04-07')), '二月二十');
+eq('自定义效果 lunar 2027-02-06', F.lunar(L('2027-02-06')), { month: 1, day: 1, leap: false });
+{
+  // 2025–2050 每年的春节、元宵、端午、七夕、中秋（fest.js 里抄自天文台的表）换算回农历都要对得上
+  const want = [[1, 1], [1, 15], [5, 5], [7, 7], [8, 15]], names = ['cny', 'lantern', 'dragon', 'qixi', 'moon'];
+  let bad = 0;
+  for (let y = 2025; y <= 2050; y++) names.forEach((k, i) => { const l = LU.of(F.lunarDays(y)[k]); if (!l || l.leap || l.month !== want[i][0] || l.day !== want[i][1]) bad++; });
+  eq('2025–2050 天文台节日表 ↔ 农历查表', bad, 0);
+}
 console.log(fail ? `\n${fail} FAILED` : '\nALL PASS');

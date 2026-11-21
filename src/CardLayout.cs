@@ -43,8 +43,25 @@ namespace WeatherWallpaper
     /// </summary>
     static class CardLayout
     {
-        public const float W = 336, H = 480, Gap = 12;   // 与 style.css 里 .card 的尺寸一致
-        const float Tol = 0.6f;                          // 判断重叠的容差，见 Scan
+        public const float W = 336, Gap = 12;   // 卡片宽度与 style.css 里 .card 一致；高度随显示的内容变（HeightOf）
+        const float Tol = 0.6f;                 // 判断重叠的容差，见 Scan
+
+        /// <summary>
+        /// 卡片高度（CSS 像素）：按显示的内容把各段的高度加起来。各段高度、间距与 style.css 里 .card 下各元素写死的 height / margin-top 一一对应，
+        /// 改一处要连着改另一处（页面按宿主给的高度画卡片，两边对不上内容会被裁掉或留白）。
+        /// 全显示（不含日期）446，去掉未来几天 291，只留上面部分 166。
+        /// </summary>
+        public static float HeightOf(CardSpec c)
+        {
+            float h = 1 + 18 + 20;                                                 // 上边框 + 上内边距 + 城市行
+            if (c.Has("date") || c.Has("week") || c.Has("lunar")) h += 3 + 17;      // 日期行
+            h += 6 + 76;                                                            // 当前天气
+            if (c.Has("aqi") || c.Has("feel") || c.Has("hum") || c.Has("wind")) h += 8 + 22;   // 指标标签
+            if (c.Has("hours")) h += 10 + 1 + 8 + 79;                               // 分隔线 + 逐小时
+            if (c.Has("days")) h += (c.Has("hours") ? 4 : 10) + 1 + 8 + 142;        // 分隔线 + 未来几天（紧跟逐小时的分隔线离得近些）
+            if (c.Has("sun") || c.Has("upd")) h += 12 + 15;                         // 底部一行（日出日落 / 更新时间）
+            return h + 14 + 1;                                                      // 下内边距 + 下边框
+        }
 
         /// <summary>卡片所在屏的分组键：屏存在 = 它的 DeviceName，屏不在（拔掉了）= 保存的标识。</summary>
         public static string GroupKey(CardSpec c)
@@ -128,8 +145,9 @@ namespace WeatherWallpaper
 
         public static RectangleF?[] Place(RectangleF area, IList<CardSpec> cards)
         {
-            // 屏幕太矮（小屏开了高缩放）、可用区域比卡片还矮：按卡片高度算，卡片贴着上边、下面一截被任务栏挡住（和旧版一样），不至于一张都放不下
-            if (area.Height < H) area.Height = H;
+            // 屏幕太矮（小屏开了高缩放）、可用区域比卡片还矮：按最高那张卡片的高度算，卡片贴着上边、下面一截被任务栏挡住（和旧版一样），不至于一张都放不下
+            float tallest = cards.Count == 0 ? 0 : cards.Max(HeightOf);
+            if (area.Height < tallest) area.Height = tallest;
             if (area.Width < W) area.Width = W;   // 同理：竖屏 / 窄屏开了高缩放比卡片还窄，贴着左边放，右边一截露不出来
             var placed = new List<RectangleF>();
             var res = new RectangleF?[cards.Count];
@@ -155,6 +173,7 @@ namespace WeatherWallpaper
         {
             bool bottom; char hz;
             AnchorOf(c, out bottom, out hz);
+            float H = HeightOf(c);
             float x = hz == 'l' ? area.Left + c.OffsetX : hz == 'r' ? area.Right - c.OffsetX - W : area.Left + (area.Width - W) / 2 + c.OffsetX;
             float y = bottom ? area.Bottom - c.OffsetY - H : area.Top + c.OffsetY;
             x = Math.Max(area.Left, Math.Min(x, area.Right - W));
@@ -164,6 +183,7 @@ namespace WeatherWallpaper
 
         static RectangleF? PlaceOne(RectangleF area, CardSpec c, List<RectangleF> placed)
         {
+            float H = HeightOf(c);
             if (area.Width < W - 0.5f || area.Height < H - 0.5f) return null;
             bool bottom; char hz;
             AnchorOf(c, out bottom, out hz);
@@ -172,7 +192,7 @@ namespace WeatherWallpaper
 
             float step = W + Gap;
             var dirs = hz == 'r' ? new[] { -1 } : hz == 'l' ? new[] { 1 } : new[] { 1, -1 };
-            var r = Scan(area, x, y, bottom, placed);
+            var r = Scan(area, x, y, H, bottom, placed);
             for (int k = 1; r == null && k < 64; k++)
             {
                 bool any = false;
@@ -181,7 +201,7 @@ namespace WeatherWallpaper
                     float cx = x + d * step * k;
                     if (cx < area.Left - 0.5f || cx + W > area.Right + 0.5f) continue;
                     any = true;
-                    r = Scan(area, cx, y, bottom, placed);
+                    r = Scan(area, cx, y, H, bottom, placed);
                     if (r != null) break;
                 }
                 if (!any) break;
@@ -189,8 +209,8 @@ namespace WeatherWallpaper
             return r;
         }
 
-        /// <summary>在 x 这一列从 y 开始，沿 up（往上）或往下推，找第一个不和已有卡片重叠的位置。</summary>
-        static RectangleF? Scan(RectangleF area, float x, float y, bool up, List<RectangleF> placed)
+        /// <summary>在 x 这一列从 y 开始，沿 up（往上）或往下推，找第一个不和已有卡片重叠的位置（这张卡片高 H）。</summary>
+        static RectangleF? Scan(RectangleF area, float x, float y, float H, bool up, List<RectangleF> placed)
         {
             for (int guard = 0; guard < 256; guard++)
             {

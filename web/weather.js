@@ -92,7 +92,12 @@ const WX = (() => {
   const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
   const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
-  function panelHtml(w, localMs, previewLabel) {
+  // 卡片上显示哪些内容（城市和当前天气总是显示）：和宿主 CardSpec.Show 同一套键，默认值也一样（托盘面板总是用默认值）
+  const DEFAULT_SHOW = 'hilo,src,aqi,feel,hum,wind,hours,days,sun,upd';
+  /** show = 逗号分隔的内容键（宿主已整理过）；null / undefined = 默认。各段高度写死在 style.css 里，和宿主 CardLayout.HeightOf 一一对应 */
+  function panelHtml(w, localMs, previewLabel, show) {
+    const S = new Set((show == null ? DEFAULT_SHOW : show).split(','));
+    const has = k => S.has(k);
     const fc = w.fc, c = fc.current, d = fc.daily, h = fc.hourly;
     const now = info(c.weather_code), day = c.is_day === 1;
     const aqi = aqiLevel(chinaAqi(w.aq && w.aq.current));
@@ -125,30 +130,47 @@ const WX = (() => {
         <span class="hi">${r(d.temperature_2m_max[i])}°</span></div>`;
     }
 
-    const upd = new Date(w.ts + fc.utc_offset_seconds * 1000).toISOString().slice(11, 16);
-    const src = { gps: '定位', ip: 'IP 定位', manual: '手动' }[w.loc.src] || '';
+    const upd = new Date(w.ts + fc.utc_offset_seconds * 1000).toISOString().slice(11, 16) + ' 更新';
+    const src = has('src') ? { gps: '定位', ip: 'IP 定位', manual: '手动' }[w.loc.src] || '' : '';
+    // 日期行：卡片所在城市的当地日期（和节日装饰同一个口径），如「11月21日 周六 · 十月十三」；只勾农历时写成「农历十月十三」免得看不出是什么
+    const dateRow = has('date') || has('week') || has('lunar');
+    let date = '';
+    if (dateRow) {
+      const t = new Date(localMs), parts = [];
+      if (has('date')) parts.push((t.getUTCMonth() + 1) + '月' + t.getUTCDate() + '日');
+      if (has('week')) parts.push(WEEK[t.getUTCDay()]);
+      const lu = has('lunar') && window.LUNAR ? LUNAR.text(localMs) : '';
+      date = parts.join(' ') + (lu ? (parts.length ? ' · ' + lu : '农历' + lu) : '');
+    }
+    // 指标标签（空气没有数据时不显示）：一个都不显示时整行去掉，卡片也跟着变矮（宿主按"勾了几项"算高度，没数据的空气不影响）
+    const chips = [
+      has('aqi') && aqi ? `<span class="chip" style="color:${aqi.color}"><i style="background:${aqi.color}"></i><span class="aqit" style="color:#fff" data-short="${aqi.text}">空气 ${aqi.text} ${aqi.value}</span></span>` : '',
+      has('feel') ? `<span class="chip">体感 ${r(c.apparent_temperature)}°</span>` : '',
+      has('hum') ? `<span class="chip">湿度 ${r(c.relative_humidity_2m)}%</span>` : '',
+      has('wind') ? `<span class="chip">${wind(c.wind_speed_10m, c.wind_direction_10m)}</span>` : '',
+    ].join('');
+    const anyChip = has('aqi') || has('feel') || has('hum') || has('wind');
+    const foot = [has('sun') ? `<span>日出 ${hm(d.sunrise[di])} · 日落 ${hm(d.sunset[di])}</span>` : '', has('upd') ? `<span class="upd">${upd}</span>` : ''].join('');
     return `
       <div class="loc">${Icons.pin}<span>${w.loc.name ? esc(w.loc.name) : '当前位置'}</span>${previewLabel ? `<span class="tag">预览 · ${previewLabel}</span>` : ''}<span class="src">${src}</span></div>
+      ${dateRow ? `<div class="date">${date}</div>` : ''}
       <div class="now"><div class="big">${Icons.svg(now.kind, day)}</div>
         <div class="temp">${r(c.temperature_2m)}°</div>
-        <div class="desc"><b>${now.text}</b><span>最高 ${r(d.temperature_2m_max[di])}° 最低 ${r(d.temperature_2m_min[di])}°</span></div></div>
-      <div class="chips">
-        ${aqi ? `<span class="chip" style="color:${aqi.color}"><i style="background:${aqi.color}"></i><span class="aqit" style="color:#fff" data-short="${aqi.text}">空气 ${aqi.text} ${aqi.value}</span></span>` : ''}
-        <span class="chip">体感 ${r(c.apparent_temperature)}°</span>
-        <span class="chip">湿度 ${r(c.relative_humidity_2m)}%</span>
-        <span class="chip">${wind(c.wind_speed_10m, c.wind_direction_10m)}</span>
-      </div>
-      <div class="sep"></div><div class="hours">${hours}</div>
-      <div class="sep"></div><div class="days">${days}</div>
-      <div class="foot"><span>日出 ${hm(d.sunrise[di])} · 日落 ${hm(d.sunset[di])}</span><span>${upd} 更新</span></div>`;
+        <div class="desc"><b>${now.text}</b>${has('hilo') ? `<span>最高 ${r(d.temperature_2m_max[di])}° 最低 ${r(d.temperature_2m_min[di])}°</span>` : ''}</div></div>
+      ${anyChip ? `<div class="chips">${chips}</div>` : ''}
+      ${has('hours') ? `<div class="sep"></div><div class="hours">${hours}</div>` : ''}
+      ${has('days') ? `<div class="sep"></div><div class="days">${days}</div>` : ''}
+      ${foot ? `<div class="foot">${foot}</div>` : ''}`;
   }
 
   /** 卡片里的四个标签尽量排成一行：一行放不下就按当前宽度估算能放下的字号（一次设定 + 校验），校验不过再半档半档收（每档一次强制重排）；
-   *  还放不下先把空气标签缩成级别名（「空气 轻度污染 145」→「轻度污染」，颜色不变）；实在放不下才换行（卡片高度固定，换两行会把五日预报顶进底部的日出日落行）。root 是卡片元素，要在它插入页面后调用。 */
+   *  还放不下先把空气标签缩成级别名（「空气 轻度污染 145」→「轻度污染」，颜色不变）；实在放不下从后往前去掉标签（不换行：卡片高度是宿主按一行算好的，
+   *  换成两行会把下面的内容挤出卡片）。root 是卡片元素，要在它插入页面后调用。 */
   function fitChips(root) {
     const el = root && root.querySelector('.chips');
     if (!el) return;
-    el.classList.remove('wrap');
+    const chips = el.querySelectorAll('.chip');
+    for (const c of chips) c.style.display = '';
     el.style.fontSize = '';
     const shrink = () => {
       let fs = parseFloat(getComputedStyle(el).fontSize) || 12;
@@ -161,7 +183,7 @@ const WX = (() => {
     shrink();
     const aqi = el.querySelector('.aqit');
     if (el.scrollWidth > el.clientWidth + 0.5 && aqi && aqi.dataset.short) { aqi.textContent = aqi.dataset.short; el.style.fontSize = ''; shrink(); }
-    if (el.scrollWidth > el.clientWidth + 0.5) { el.style.fontSize = ''; el.classList.add('wrap'); }
+    for (let i = chips.length - 1; i > 0 && el.scrollWidth > el.clientWidth + 0.5; i--) chips[i].style.display = 'none';
   }
 
   return { info, scene, chinaAqi, aqiLevel, wind, panelHtml, fitChips };

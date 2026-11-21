@@ -1,6 +1,6 @@
 // 节日判定：按"当地日期"（天气所在城市的时区）算今天有哪些节日、夜里放不放烟花。
 // 农历节日用香港天文台《公历与农历日期对照表》抽出来的公历日期（ICU 的 chinese 历法个别年份会差一天，比如把 2027 年春节算成 2 月 7 日）；
-// 表外的年份才退回 ICU 逐日推算。
+// 表外的年份才按 lunar.js（1900–2100 查表，再往外是 ICU）逐日推算。
 (function (root) {
   'use strict';
   // 每年：春节（正月初一）、元宵、端午、七夕、中秋 的公历 MMDD（2025–2050，闰月不算）
@@ -22,24 +22,20 @@
     table[y] = o;
   }
 
-  // 表外年份：ICU 逐日扫一遍（每年只算一次）；ICU 不支持 chinese 历法时就没有农历节日
-  const icuCache = {};
-  function icuDays(y) {
-    if (icuCache[y]) return icuCache[y];
+  // 表外年份：按农历逐日扫一遍（每年只算一次）；算不出农历（表外又没有 ICU 的 chinese 历法）时就没有农历节日
+  const scanCache = {};
+  function scanDays(y) {
+    if (scanCache[y]) return scanCache[y];
     const out = {};
-    try {
-      const fmt = new Intl.DateTimeFormat('en-u-ca-chinese', { timeZone: 'UTC', month: 'numeric', day: 'numeric' });
-      const want = { '1-1': 'cny', '1-15': 'lantern', '5-5': 'dragon', '7-7': 'qixi', '8-15': 'moon' };   // 闰月是 "5bis" 这种，不会命中
-      for (let t = utc(y, 1, 1); t < utc(y + 1, 1, 1); t += DAY) {
-        const p = fmt.formatToParts(new Date(t + DAY / 2));
-        const get = k => (p.find(x => x.type === k) || {}).value;
-        const k = want[get('month') + '-' + get('day')];
-        if (k && out[k] == null) out[k] = t;
-      }
-    } catch (e) { /* 没有 chinese 历法 */ }
-    return (icuCache[y] = out);
+    const want = { '1-1': 'cny', '1-15': 'lantern', '5-5': 'dragon', '7-7': 'qixi', '8-15': 'moon' };
+    for (let t = utc(y, 1, 1); t < utc(y + 1, 1, 1); t += DAY) {
+      const l = lunar(t);
+      const k = l && !l.leap ? want[l.month + '-' + l.day] : null;   // 闰月不算
+      if (k && out[k] == null) out[k] = t;
+    }
+    return (scanCache[y] = out);
   }
-  const lunarDays = y => table[y] || icuDays(y);
+  const lunarDays = y => table[y] || scanDays(y);
 
   // 复活节（西方教会）：春分月圆后的第一个星期日，匿名公历算法
   function easter(y) {
@@ -80,23 +76,8 @@
     return { keys, fw };
   }
 
-  // 某一天的农历月 / 日（自定义效果的 'lunar:08-15' 用）：ICU 的 chinese 历法。
-  // 朔日正好落在北京时间午夜前后几分钟时 ICU 会把初一算晚一天（如 2027 年春节），二十多年里也就一两次
-  let lunarFmt = null;
-  const lunarCache = {};
-  function lunar(localMs) {
-    const day = Math.floor(localMs / DAY) * DAY;
-    if (lunarCache[day] !== undefined) return lunarCache[day];
-    let r = null;
-    try {
-      lunarFmt = lunarFmt || new Intl.DateTimeFormat('en-u-ca-chinese', { timeZone: 'UTC', month: 'numeric', day: 'numeric' });
-      const p = lunarFmt.formatToParts(new Date(day + DAY / 2));
-      const mon = (p.find(x => x.type === 'month') || {}).value || '', dd = parseInt((p.find(x => x.type === 'day') || {}).value, 10);
-      r = { month: parseInt(mon, 10), day: dd, leap: /bis/i.test(mon) };   // 闰月是 "6bis" 这种
-      if (!(r.month >= 1 && r.day >= 1)) r = null;
-    } catch (e) { r = null; /* 没有 chinese 历法 */ }
-    return (lunarCache[day] = r);
-  }
+  // 某一天的农历月 / 日 { month, day, leap }（自定义效果的 'lunar:08-15' 用）：见 lunar.js
+  const lunar = localMs => root.LUNAR ? root.LUNAR.of(localMs) : null;
 
   root.FEST = { at, lunarDays, easter, lunar };
 })(typeof window !== 'undefined' ? window : globalThis);
