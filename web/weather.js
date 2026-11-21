@@ -131,7 +131,10 @@ const WX = (() => {
     }
 
     const upd = new Date(w.ts + fc.utc_offset_seconds * 1000).toISOString().slice(11, 16) + ' 更新';
-    const src = has('src') ? { gps: '定位', ip: 'IP 定位', manual: '手动' }[w.loc.src] || '' : '';
+    // 不显示定位方式和日出日落、只显示更新时间：更新时间放到城市行右边（定位方式那个位置），省掉底部一行。
+    // 按勾选判断（不看定位方式有没有数据），和宿主 CardLayout.HeightOf 一致
+    const updTop = has('upd') && !has('sun') && !has('src');
+    const src = updTop ? upd : has('src') ? { gps: '定位', ip: 'IP 定位', manual: '手动' }[w.loc.src] || '' : '';
     // 日期行：卡片所在城市的当地日期（和节日装饰同一个口径），如「11月21日 周六 · 十月十三」；只勾农历时写成「农历十月十三」免得看不出是什么
     const dateRow = has('date') || has('week') || has('lunar');
     let date = '';
@@ -150,7 +153,7 @@ const WX = (() => {
       has('wind') ? `<span class="chip">${wind(c.wind_speed_10m, c.wind_direction_10m)}</span>` : '',
     ].join('');
     const anyChip = has('aqi') || has('feel') || has('hum') || has('wind');
-    const foot = [has('sun') ? `<span>日出 ${hm(d.sunrise[di])} · 日落 ${hm(d.sunset[di])}</span>` : '', has('upd') ? `<span class="upd">${upd}</span>` : ''].join('');
+    const foot = [has('sun') ? `<span>日出 ${hm(d.sunrise[di])} · 日落 ${hm(d.sunset[di])}</span>` : '', has('upd') && !updTop ? `<span class="upd">${upd}</span>` : ''].join('');
     return `
       <div class="loc">${Icons.pin}<span>${w.loc.name ? esc(w.loc.name) : '当前位置'}</span>${previewLabel ? `<span class="tag">预览 · ${previewLabel}</span>` : ''}<span class="src">${src}</span></div>
       ${dateRow ? `<div class="date">${date}</div>` : ''}

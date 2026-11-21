@@ -60,6 +60,7 @@ canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 .card .day .bar > i { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: linear-gradient(90deg, #8fd3ff, #ffd36b, #ff9b5e); }
 .card .day .hi { font-weight: 600; }
 
-/* 底部一行（日出日落 / 更新时间）跟在内容后面，离上面 12px；只显示更新时间时靠右 */
+/* 底部一行（日出日落 / 更新时间）跟在内容后面，离上面 12px；只显示更新时间时靠右。
+   定位方式和日出日落都不显示时，更新时间放到城市行右边（.loc .src），没有这一行（weather.js panelHtml、CardLayout.HeightOf） */
 .card .foot { margin-top: 12px; height: 15px; line-height: 15px; display: flex; justify-content: space-between; font-size: 11.5px; opacity: .72; white-space: nowrap; }
 .card .foot .upd { margin-left: auto; }

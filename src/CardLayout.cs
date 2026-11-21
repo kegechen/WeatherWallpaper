@@ -59,7 +59,8 @@ namespace WeatherWallpaper
             if (c.Has("aqi") || c.Has("feel") || c.Has("hum") || c.Has("wind")) h += 8 + 22;   // 指标标签
             if (c.Has("hours")) h += 10 + 1 + 8 + 79;                               // 分隔线 + 逐小时
             if (c.Has("days")) h += (c.Has("hours") ? 4 : 10) + 1 + 8 + 142;        // 分隔线 + 未来几天（紧跟逐小时的分隔线离得近些）
-            if (c.Has("sun") || c.Has("upd")) h += 12 + 15;                         // 底部一行（日出日落 / 更新时间）
+            // 底部一行。只有更新时间、又不显示定位方式时，更新时间放在城市行右边（定位方式的位置），没有底部一行（见 weather.js panelHtml）
+            if (c.Has("sun") || (c.Has("upd") && c.Has("src"))) h += 12 + 15;
             return h + 14 + 1;                                                      // 下内边距 + 下边框
         }
 
