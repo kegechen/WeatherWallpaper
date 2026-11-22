@@ -142,7 +142,7 @@ namespace WeatherWallpaper
                 // 换壁纸（幻灯片每次切换）也走这里：工作区没变就不用重排
                 var wa = string.Join("|", Screen.AllScreens.Select(x => x.DeviceName + x.WorkingArea));
                 if (wa != lastWorkAreas) { lastWorkAreas = wa; ConfigureOverlay(); }
-                if (NeedsBackdrop) UpdateBackdrops(true);
+                if (AnyBackdrop) UpdateBackdrops(true);
             };
             cardSaveTimer.Tick += (s, e) => FlushCardSave();
             SystemEvents.PowerModeChanged += (s, e) =>
@@ -339,13 +339,19 @@ namespace WeatherWallpaper
         WallpaperWindow NewWall(Screen s)
         {
             var w = new WallpaperWindow(s, env, wallsLayered, settings.DevTools);
+            // 先按卡片定好画不画天气（UpdateLayout 里 PickScene 再按排好的位置定一次）：不然新窗口先当成不画天气，
+            // 重建时任务栏效果先关后开、weatherMoved 成立又多生成一遍底图
+            w.HasWeather = EffectiveCards().Any(c => !c.IsCustom() && SameScreen(c.Screen, s));
             w.OnReady += OnWallReady;
             w.OnString += OnWallString;
             w.OnJson += OnWallJson;
             return w;
         }
 
-        /// <summary>天气跟着卡片走：放了卡片（含只显示天气画面的卡片、设置窗口里正在编辑的那张；隐藏（Off）的不算）的屏才显示天气壁纸，其余屏只有系统壁纸。</summary>
+        /// <summary>
+        /// 放了卡片（含只显示天气画面的卡片、设置窗口里正在编辑的那张；隐藏（Off）的不算）的屏要壁纸窗口，其余屏只有系统壁纸。
+        /// 天气只跟着天气卡片走：只放了自定义卡片的屏也有窗口（卡片画在里面），但不画天气，只垫系统壁纸（见 PickScene）。
+        /// </summary>
         List<Screen> WallScreens()
         {
             var cards = EffectiveCards();
@@ -388,8 +394,9 @@ namespace WeatherWallpaper
             return true;
         }
 
-        /// <summary>上报场景（任务栏 / 屋檐雨雪、托盘提示）的那块：主屏在显示就用主屏，否则用第一块。</summary>
-        WallpaperWindow MainWall => walls.FirstOrDefault(w => w.Primary) ?? walls.FirstOrDefault();
+        /// <summary>上报场景（任务栏 / 屋檐雨雪、托盘提示）的那块：优先画着天气的屏，其中主屏优先，否则用第一块。</summary>
+        WallpaperWindow MainWall => walls.FirstOrDefault(w => w.Primary && w.HasWeather) ?? walls.FirstOrDefault(w => w.HasWeather)
+            ?? walls.FirstOrDefault(w => w.Primary) ?? walls.FirstOrDefault();
 
         static Rectangle? TaskbarRect(out IntPtr hwnd)
         {
@@ -405,12 +412,16 @@ namespace WeatherWallpaper
         {
             IntPtr tbh;
             var tb = TaskbarRect(out tbh);
-            var prim = Screen.PrimaryScreen.Bounds;
+            ConfigureTaskbarFx(tb, tbh);
+            UpdateLayout(tb, true);
+        }
+
+        /// <summary>任务栏效果只画在主屏任务栏上：主屏没在画天气（没有卡片，或只有自定义卡片）就不画。</summary>
+        void ConfigureTaskbarFx(Rectangle? tb, IntPtr tbh)
+        {
             float scale = tbh != IntPtr.Zero ? Native.GetDpiForWindow(tbh) / 96f : 1f;
             if (scale <= 0) scale = 1;
-            // 任务栏效果只画在主屏任务栏上：主屏上没有卡片（没显示天气壁纸）就不画
-            overlay.Configure(tb, prim, scale, settings.TaskbarFx && walls.Any(w => w.Primary));
-            UpdateLayout(tb, true);
+            overlay.Configure(tb, Screen.PrimaryScreen.Bounds, scale, settings.TaskbarFx && walls.Any(w => w.Primary && w.HasWeather));
         }
 
         // ---------------------------------------------------------------- 卡片布局与每块屏的画面城市
@@ -433,17 +444,18 @@ namespace WeatherWallpaper
         IEnumerable<CardPlace> PlacesOn(WallpaperWindow w) => places.Where(p => p.Host != null && p.Host.DeviceName == w.DeviceName && p.Rect.HasValue);
 
         /// <summary>
-        /// 每块屏只能画一种全屏天气，画面跟着哪个城市：这块屏上勾了"画面跟随"的卡片 → 这块屏的第一张卡片。
-        /// 这块屏上一张卡片都没有（卡片刚被删光、壁纸窗口还在等着销毁——旧桌面结构下延迟重建）：保持原来的画面城市，
-        /// 别切成默认城市闪一下。
+        /// 每块屏只能画一种全屏天气，画面跟着哪个城市：这块屏上勾了"画面跟随"的天气卡片 → 这块屏的第一张天气卡片。
+        /// 只放了自定义卡片的屏不画天气（自定义卡片没有城市，也不该把天气带过来）：SceneKey = ""、HasWeather = false，页面只垫系统壁纸。
+        /// 这块屏上一张卡片都没有（卡片刚被删光、壁纸窗口还在等着销毁——旧桌面结构下延迟重建）：保持原样，别闪一下。
         /// </summary>
-        string SceneKeyOf(WallpaperWindow w)
+        void PickScene(WallpaperWindow w)
         {
             var mine = places.Where(p => p.Host != null && p.Host.DeviceName == w.DeviceName).ToList();
-            var on = mine.Where(p => !p.Card.IsCustom()).ToList();   // 自定义卡片没有城市，不决定天气画面
+            if (mine.Count == 0) return;
+            var on = mine.Where(p => !p.Card.IsCustom()).ToList();
             var pick = on.FirstOrDefault(p => p.Card.Scene) ?? on.FirstOrDefault();
-            if (pick != null) return pick.Card.LocKey();
-            return mine.Count > 0 ? DefaultKey() : w.SceneKey;   // 这块屏上只有自定义卡片：天气画面用默认卡片的城市
+            w.HasWeather = pick != null;
+            w.SceneKey = pick != null ? pick.Card.LocKey() : "";
         }
 
         /// <summary>重新排卡片、定每块屏的画面城市，发给各页面（卡片设置窗口开着时一并更新它的"放不放得下"）。</summary>
@@ -456,14 +468,19 @@ namespace WeatherWallpaper
             places = CardLayout.Arrange(EffectiveCards(), shown, AreaOf);
             // 哪块屏都没在运行的卡片（挪到了放不下的屏、原来那块屏的窗口跟着撤掉了——没有页面再报 gone）：记着的错误清掉，卡片设置里别再显示
             foreach (var id in cardErrs.Keys.Where(id => !places.Any(p => p.Card.Id == id && p.Host != null && p.Rect.HasValue)).ToList()) cardErrs.Remove(id);
+            var hadWeather = walls.Select(w => w.HasWeather).ToList();
+            foreach (var w in walls) PickScene(w);   // 先全部定好：LayoutJson 里的 primary（MainWall）要看所有屏画不画天气
+            // 有屏开始 / 不再画天气（天气卡片挪走了、只剩自定义卡片，或者反过来）：任务栏效果跟着主屏走，底图换成要 / 不要系统壁纸
+            bool weatherMoved = !walls.Select(w => w.HasWeather).SequenceEqual(hadWeather);
+            if (weatherMoved) ConfigureTaskbarFx(tb, Native.FindWindow("Shell_TrayWnd", null));
             foreach (var w in walls)
             {
-                w.SceneKey = SceneKeyOf(w);
                 var j = LayoutJson(w, tb);
                 if (j == w.LayoutSent) continue;   // 这块屏的布局没变（如在卡片设置里改的是别的屏的卡片）：页面不用重排一遍
                 w.LayoutSent = j;
                 w.Post(j);
             }
+            if (weatherMoved) UpdateBackdrops(false);   // 在 layout 之后：页面先知道这块屏画不画天气，再收底图（撤底图要等天气画面淡入完）
             FxStep();
             PostFx();
             cardWin?.Post(CardFitJson());
@@ -482,7 +499,8 @@ namespace WeatherWallpaper
                 + ",\"x\":" + p.Rect.Value.X.ToString("F1", Inv) + ",\"y\":" + p.Rect.Value.Y.ToString("F1", Inv)
                 + ",\"h\":" + p.Rect.Value.Height.ToString("F1", Inv) + "}"));
             return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", Inv)
-                + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary) + ",\"panel\":" + B(settings.ShowPanel)
+                + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary && w.HasWeather) + ",\"panel\":" + B(settings.ShowPanel)
+                + ",\"noWeather\":" + B(!w.HasWeather)   // 只有自定义卡片的屏：不画天气，只垫系统壁纸（每次都带上：页面是 Object.assign 合并的）
                 + ",\"fps\":" + w.Fps + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
                 + ",\"overlayWall\":" + B(settings.OverlayWall) + ",\"skyOpacity\":" + settings.SkyOpacityValue().ToString("F3", Inv)
                 + ",\"cloudAlpha\":" + settings.CloudAlphaValue().ToString("F3", Inv) + ",\"festive\":" + B(settings.Festive)
@@ -529,8 +547,10 @@ namespace WeatherWallpaper
                 {
                     case "csrc": { var f = str("f"); w.Post(CustomCards.ReadScript(f, FindScript(f) != null)); return; }
                     case "cfile": w.Post("{\"t\":\"cfile\",\"rid\":" + (long)num("rid") + "," + CustomCards.ReadFile(str("path"), str("kind")) + "}"); return;
-                    case "cget": CardFetch(w, (long)num("rid"), str("id"), str("kind"), str("url"), str("method"), str("body"), d.ContainsKey("headers") ? d["headers"] as Dictionary<string, object> : null); return;
+                    case "cget": CardFetch(w, (long)num("rid"), str("id"), str("kind"), str("url"), str("method"), str("body"), d.ContainsKey("headers") ? d["headers"] as Dictionary<string, object> : null, d.ContainsKey("fresh") && true.Equals(d["fresh"])); return;
                     case "cstate": CardState(w, str("id"), str("script"), str("err"), d.ContainsKey("gone")); return;
+                    // 点了「刷新」的那一轮画完了（ok = 画好了，err = 出错的原因）：告诉卡片设置窗口，按钮那里显示结果
+                    case "crefreshed": cardWin?.Post(Js.Serialize(new { t = "refreshed", id = str("id"), err = str("err") ?? "" })); return;
                 }
                 if (t == "viewport")
                 {
@@ -565,10 +585,10 @@ namespace WeatherWallpaper
         void Broadcast(string json) { foreach (var w in walls) w.Post(json); flyout?.Post(json); }
 
         /// <summary>自定义卡片的 api.fetchText / fetchJson / fetchImage：宿主替它发请求（限制见 CustomCards.Fetch），结果按 rid 发回那个页面。</summary>
-        async void CardFetch(WallpaperWindow w, long rid, string id, string kind, string url, string method, string body, Dictionary<string, object> headers)
+        async void CardFetch(WallpaperWindow w, long rid, string id, string kind, string url, string method, string body, Dictionary<string, object> headers, bool fresh)
         {
             string r;
-            try { r = await CustomCards.Fetch(id ?? "", kind == "image" ? "image" : "text", url, method, body, headers); }
+            try { r = await CustomCards.Fetch(id ?? "", kind == "image" ? "image" : "text", url, method, body, headers, fresh); }
             catch (Exception ex) { r = "\"ok\":false,\"err\":" + WeatherService.JsonStr(ex.Message); }
             if (quitStage == 0 && walls.Contains(w)) w.Post("{\"t\":\"cget\",\"rid\":" + rid + "," + r + "}");   // 这期间页面换掉了：旧请求的回复页面自己会丢掉
         }
@@ -714,7 +734,7 @@ namespace WeatherWallpaper
                 w.SetPerf(pause, fps);
                 w.Shown = !pause;
                 if (w.Primary) overlay.SetCovered(vis < 0.03);
-                if (!pause) { running++; minFps = Math.Min(minFps, fps); }
+                if (!pause && w.HasWeather) { running++; minFps = Math.Min(minFps, fps); }   // 不画天气的屏（只有自定义卡片）不算帧率
             }
             overlay.SetSuppressed(fullscreenOnPrimary || locked);
             overlay.SetFps(perf.Busy ? 20 : perf.OnBattery ? 30 : settings.Fps);
@@ -725,7 +745,7 @@ namespace WeatherWallpaper
             eaves.SetFps(perf.OnBattery ? 20 : 30);
             if (settings.WindowFx && !locked && !perf.Busy)
             {
-                var shown = walls.Select(w => w.Bounds).ToList();
+                var shown = walls.Where(w => w.HasWeather).Select(w => w.Bounds).ToList();   // 只有自定义卡片的屏不画天气，那里的窗口也不溅雨雪
                 var picked = new List<IntPtr>();
                 for (int i = 0; i < rects.Count && picked.Count < 6; i++)
                 {
@@ -759,10 +779,11 @@ namespace WeatherWallpaper
             // walls 为空时要判一次"是一张卡片都不在已连接的屏上，还是壁纸没建好 / 在排队重建"：FxStep 和下面的 perfText 都要用，算一次传下去
             var emptyScreens = walls.Count == 0 ? WallScreens() : null;
             FxStep(emptyScreens);
-            if (NeedsBackdrop && ++backdropCheck >= 43) { backdropCheck = 0; CheckBackdrops(); }   // 约 30 秒查一次（幻灯片放映换图不一定有广播）
+            if (AnyBackdrop && ++backdropCheck >= 43) { backdropCheck = 0; CheckBackdrops(); }   // 约 30 秒查一次（幻灯片放映换图不一定有广播）
 
             if (locked) perfText = "已暂停（锁屏）";
             else if (walls.Count == 0) perfText = emptyScreens.Count == 0 ? "没有显示天气壁纸（已连接的屏上都没有卡片）" : "正在准备桌面…";
+            else if (!walls.Any(w => w.HasWeather)) perfText = "没有天气画面（只放了自定义卡片）";
             else if (running == 0) perfText = "已暂停（桌面被遮挡）";
             else if (settings.Minimal && !AnyFx() && preview == "live" && !previewDay) perfText = "极简模式：静止，天气有变化时播放动画";
             else perfText = $"{minFps} FPS" + (reasons.Count > 0 ? "（" + string.Join("，", reasons) + "）" : minFps < settings.Fps ? "（桌面大部分被遮挡）" : "");
@@ -786,41 +807,54 @@ namespace WeatherWallpaper
         readonly WinTimer backdropTimer = new WinTimer { Interval = 1000 };
         int backdropGen, backdropCheck, backdropFails;
         string backdropKeys = "", backdropProbe;
+        readonly Dictionary<string, string> backdropFiles = new Dictionary<string, string>();   // 屏（设备名）→ 上次给它生成的底图文件（null = 纯色）
         DateTime backdropRetryAt;
 
-        /// <summary>需要系统壁纸底图的模式：极简模式（平时只有它）和壁纸叠加（它从半透明的天空里透出来）。</summary>
-        bool NeedsBackdrop => settings.Minimal || settings.OverlayWall;
+        /// <summary>
+        /// 这块屏要不要系统壁纸底图：极简模式（平时只有它）、壁纸叠加（它从半透明的天空里透出来）、
+        /// 只放了自定义卡片的屏（不画天气，底下就是系统壁纸）。
+        /// </summary>
+        bool NeedsBackdrop(WallpaperWindow w) => settings.Minimal || settings.OverlayWall || !w.HasWeather;
+        bool AnyBackdrop => walls.Any(NeedsBackdrop);
+        const string NoBackdrop = "{\"t\":\"backdrop\",\"url\":null}";
 
         /// <summary>
-        /// 把每块屏的系统壁纸缩放好交给页面垫底（极简模式 / 壁纸叠加）；onlyIfChanged = 只在壁纸设置变了时才重新生成（定时检查用）。
-        /// 两种模式都关时通知页面撤掉底图。
+        /// 把要底图的屏的系统壁纸缩放好交给页面垫底；onlyIfChanged = 只在壁纸设置变了时才重新生成（定时检查用）。
+        /// 不要底图的屏通知页面撤掉。
         /// </summary>
         async void UpdateBackdrops(bool onlyIfChanged)
         {
-            var list = walls.ToList();
-            if (!NeedsBackdrop)
+            var all = walls.ToList();
+            var list = all.Where(NeedsBackdrop).ToList();
+            foreach (var w in all) if (!list.Contains(w) && w.BackdropJson != NoBackdrop) SendBackdrop(w, NoBackdrop);
+            if (list.Count == 0)
             {
                 ++backdropGen;   // 作废还在生成中的底图
                 backdropKeys = "";
-                foreach (var w in list) SendBackdrop(w, "{\"t\":\"backdrop\",\"url\":null}");
-                return;
+                return;   // 也别拿空列表去清缓存（桌面还没就绪时 walls 也是空的）
             }
-            if (list.Count == 0) return;   // 桌面还没就绪：别拿空列表去清缓存
             try
             {
+                // 只查要底图的屏（IDesktopWallpaper 是跨进程的，在 UI 线程上，资源管理器卡住时会拖住）
                 var infos = list.Select(w => Backdrop.Query(w.Bounds)).ToList();
-                var keys = string.Join("\n", infos.Select(i => i.Key));
+                // 指纹带上哪几块屏要底图：要底图的屏变了（天气卡片挪了屏）也算变化
+                var keys = string.Join("\n", list.Select((w, i) => w.DeviceName + "=" + infos[i].Key));
                 if (onlyIfChanged && keys == backdropKeys) return;   // 没变：也不能作废正在生成的那一次
                 int gen = ++backdropGen;
                 backdropKeys = keys;
                 var files = await Task.Run(() => infos.Select(Backdrop.Render).ToList());
                 if (gen != backdropGen) return;
                 for (int i = 0; i < list.Count; i++)
+                {
                     SendBackdrop(list[i], "{\"t\":\"backdrop\",\"url\":" + (files[i] == null ? "null" : WeatherService.JsonStr("https://" + Backdrop.Host + "/" + files[i]))
                         + ",\"color\":" + WeatherService.JsonStr(infos[i].Css) + "}");
-                Backdrop.Clean(files);
+                    backdropFiles[list[i].DeviceName] = files[i];
+                }
+                // 现在不要底图的屏：上次给它生成的文件也留着（天气卡片挪来挪去时不用重新生成；那块屏的壁纸这期间换了的话，到时候指纹不同会重新生成）
+                string kept;
+                Backdrop.Clean(files.Concat(all.Where(w => !list.Contains(w)).Select(w => backdropFiles.TryGetValue(w.DeviceName, out kept) ? kept : null)));
                 backdropFails = 0;
-                Log.Write("backdrop: " + string.Join(", ", infos.Select((x, i) => (files[i] ?? "color " + x.Css) + " pos " + x.Pos)));
+                Log.Write("backdrop: " + string.Join(", ", all.Select(w => { int i = list.IndexOf(w); return i < 0 ? "-" : (files[i] ?? "color " + infos[i].Css) + " pos " + infos[i].Pos; })));
                 GC.Collect();   // 解码大图留下的大对象堆，生成完就还回去
             }
             catch (Exception ex)
@@ -1476,6 +1510,7 @@ namespace WeatherWallpaper
             {
                 draft = (settings.Cards.FirstOrDefault(c => c.Id == id) ?? settings.Cards[0]).Clone();
                 cardWin = new PageWindow(env, "卡片设置 · 天气壁纸", "card.html", 900, 790) { OnMessage = OnCardMessage };
+                cardWin.Warm();   // 先让 WebView2 启动起来，下面算布局（CardFitJson）的同时它在加载页面；窗口等页面画好才现身
                 cardWin.Reloaded = () => { if (cardWin != null && draft != null) { cardWin.Post(CardInitJson()); cardWin.Post(CardFitJson()); } };
                 cardWin.FormClosed += (s, e) =>
                 {
@@ -1625,10 +1660,24 @@ namespace WeatherWallpaper
                 case "identify": ScreenBadge.ShowAll(); break;
                 case "add": AddCard(d.ContainsKey("script") && d["script"] != null ? CustomCards.CleanName(Convert.ToString(d["script"])) : null); break;
                 case "opencards": OpenCardsDir(); break;
+                case "crefresh": RefreshCard(draft.Id); break;
                 case "switch": SwitchCard(d.ContainsKey("id") ? Convert.ToString(d["id"]) : ""); break;
                 case "delete": DeleteCard(); break;
                 case "close": cardWin.CloseNow(); break;
             }
+        }
+
+        /// <summary>
+        /// 卡片设置里点了自定义卡片的「刷新」：让桌面上运行它的那个页面马上重画一轮（联网的内容不用缓存，真去取），
+        /// 画完由页面回 crefreshed。桌面上没在运行它（隐藏了、放不下、屏没接）就直接回一个原因（places 里没有隐藏的卡片，见 EffectiveCards）。
+        /// 页面还没就绪（刚崩溃在重新载入）也直接回：排队的话它会抢在补发的 layout 前面到，那时页面里还没有这张卡片，回的是假的「没在运行」。
+        /// </summary>
+        void RefreshCard(string id)
+        {
+            var p = places.FirstOrDefault(x => x.Card.Id == id && x.Host != null && x.Rect.HasValue);
+            var w = p == null ? null : walls.FirstOrDefault(x => x.DeviceName == p.Host.DeviceName);
+            if (w != null && w.Ready) w.Post(Js.Serialize(new { t = "crefresh", id }));
+            else cardWin?.Post(Js.Serialize(new { t = "refreshed", id, err = w != null ? "桌面还在加载，稍后再试" : "这张卡片现在没有显示在桌面上" }));
         }
 
         /// <summary>
@@ -1886,8 +1935,8 @@ namespace WeatherWallpaper
             // 设置里保存的位置和显示内容：页面在放不下（没保存）时点「隐藏卡片」，先换回它再隐藏——没保存的改动作废，和换卡片、关窗口一样
             var stored = settings.Cards.FirstOrDefault(k => k.Id == draft.Id);
             var saved = stored == null ? null : new { scr = stored.Screen, pos = stored.Pos, x = stored.OffsetX, y = stored.OffsetY, show = stored.Show, height = stored.Height };
-            // 自定义卡片：cards 文件夹里的脚本（下拉框、新增菜单用）；这张卡片现在的错误（桌面上不显示它的原因）
-            var scripts = cardScripts.Select(s => new { f = s.File, name = s.Title ?? "", auto = AutoTitle(s, s.File), height = s.Height, fits = fits.Contains(s.Height) }).ToList();
+            // 自定义卡片：cards 文件夹里的脚本（下拉框、新增菜单用；btn = 「刷新」按钮上的字，null = 没有这个按钮）；这张卡片现在的错误（桌面上不显示它的原因）
+            var scripts = cardScripts.Select(s => new { f = s.File, name = s.Title ?? "", auto = AutoTitle(s, s.File), height = s.Height, fits = fits.Contains(s.Height), btn = s.Button }).ToList();
             string cerr;
             if (!draft.IsCustom() || draft.Off || !cardErrs.TryGetValue(draft.Id, out cerr)) cerr = "";
             // 拖动吸附用：卡片间距、默认边距（页面 CSS 像素），和这边的排版一致；cw / ch = 这张卡片的大小（「卡片内容」里显示）
@@ -2194,6 +2243,7 @@ namespace WeatherWallpaper
             if (aboutWin == null)
             {
                 aboutWin = new PageWindow(env, "关于 · 天气壁纸", "about.html", 460, 620) { MinimizeBox = false, OnMessage = OnAboutMessage };
+                aboutWin.Warm();
                 aboutWin.Reloaded = () => { PostAboutIcon(); PostAbout(); };
                 aboutWin.FormClosed += (s, e) => aboutWin = null;
                 PostAboutIcon();

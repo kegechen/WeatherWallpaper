@@ -102,8 +102,9 @@ function fetchOpt(o) {
   }
   return { method: o.method ? String(o.method).toUpperCase() : body != null ? 'POST' : 'GET', body, headers };
 }
-async function get(kind, url, o) {
-  const r = await call('fetch', Object.assign({ kind, url: String(url) }, fetchOpt(o)));
+// fresh：点了「刷新」的那一轮（api.manual）发的请求，宿主不拿 60 秒内取过的结果，真去取一次
+async function get(kind, url, o, fresh) {
+  const r = await call('fetch', Object.assign({ kind, url: String(url), fresh: !!fresh }, fetchOpt(o)));
   if (r.status >= 400) throw new Error('HTTP ' + r.status + '：' + short(url));
   return r;
 }
@@ -111,12 +112,13 @@ async function readJson(p) {
   const t = await call('file', { kind: 'text', path: String(p) }).then(r => r.text);
   try { return JSON.parse(t.replace(/^\\uFEFF/, '')); } catch (e) { throw new SyntaxError('「' + short(p) + '」不是合法的 JSON：' + e.message); }
 }
-// used.w：这一轮有没有读 api.weather（没读过的卡片天气更新时不用重画）。每一轮各记各的：被放弃的那一轮 data() 还在跑、读了天气，不算到新的一轮上
+// used.w：这一轮有没有读 api.weather（没读过的卡片天气更新时不用重画）。每一轮各记各的：被放弃的那一轮 data() 还在跑、读了天气，不算到新的一轮上。
+// manual：这一轮是卡片设置里点了「刷新」画的
 const mkApi = (m, used) => Object.freeze({
-  now: m.now, get weather() { used.w = true; return m.weather || null; }, card: Object.freeze({ width: m.w, height: m.h, name: m.name }),
-  fetchText: async (u, o) => (await get('text', u, o)).text,
-  fetchJson: async (u, o) => { const r = await get('text', u, o); try { return JSON.parse(r.text.replace(/^\\uFEFF/, '')); } catch (e) { throw new SyntaxError('返回的不是 JSON：' + short(u)); } },
-  fetchImage: async (u, o) => (await get('image', u, o)).data,
+  now: m.now, manual: !!m.manual, get weather() { used.w = true; return m.weather || null; }, card: Object.freeze({ width: m.w, height: m.h, name: m.name }),
+  fetchText: async (u, o) => (await get('text', u, o, m.manual)).text,
+  fetchJson: async (u, o) => { const r = await get('text', u, o, m.manual); try { return JSON.parse(r.text.replace(/^\\uFEFF/, '')); } catch (e) { throw new SyntaxError('返回的不是 JSON：' + short(u)); } },
+  fetchImage: async (u, o) => (await get('image', u, o, m.manual)).data,
   readText: async p => (await call('file', { kind: 'text', path: String(p) })).text,
   readJson, image: async p => (await call('file', { kind: 'image', path: String(p) })).data,
   esc, date, daysUntil, nextLunar, icon,
@@ -377,6 +379,9 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
   }
 
   function stop(r) {
+    // 点了「刷新」的那一轮还没画完 / 还没开始：卡片被挪走、改了高度、脚本改过重新加载（卡住被停掉的，kill 已经先报了原因）。
+    // 不用 r.err：那是之前某一轮留下的错误，和这次没画成无关
+    manualEnd(r, '卡片重新加载了，稍后再试', true);
     r.gen++;
     clearTimeout(r.timer); r.timer = 0;
     if (r.worker) { try { r.worker.terminate(); } catch (e) {} r.worker = null; }
@@ -486,12 +491,14 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
           // 不然每一轮都出这个错的卡片每一轮都要「显示 → 藏起来」闪一下
           if (r.errSeq !== r.seq) ok(r);
         } catch (e) { r.html = null; fail(r, e.message); }
+        if (r.manualSeq === m.seq) manualEnd(r, r.err);
         finish(r);
         break;
       case 'fail':
         if (m.seq !== r.seq || !r.busy) return;
         r.usesWeather = !!m.w;
         fail(r, where(m.stack) + m.msg);
+        if (r.manualSeq === m.seq) manualEnd(r, r.err);
         finish(r);
         break;
       case 'stray': failIdle(r, where(m.stack) + m.msg); break;
@@ -510,10 +517,32 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
     if (!r.worker || r.state !== 'ready' || r.busy) return;
     r.busy = true; r.seq++; r.phase = '';
     r.busySince = r.pongAt = Date.now();
+    // 点了「刷新」之后的这一轮：脚本里 api.manual 是 true、联网不用宿主的缓存；画完（或出错）告诉卡片设置窗口（manualEnd）。
+    // freshKeys：这一轮已经真发过的请求，同一个请求再要就用刚取回来的（见 onApi）
+    const manual = !!r.manual;
+    r.manual = false;
+    if (manual) { r.manualSeq = r.seq; r.freshKeys = new Set(); }
     watch();
     let weather = null;
     try { weather = getWeather(); } catch (e) { /* 天气数据有问题：当没有 */ }
-    r.worker.postMessage({ t: 'tick', seq: r.seq, now: Date.now(), weather, w: cardW() - 2, h: Math.round(r.h - 2), name: r.def.name });
+    r.worker.postMessage({ t: 'tick', seq: r.seq, now: Date.now(), weather, w: cardW() - 2, h: Math.round(r.h - 2), name: r.def.name, manual });
+  }
+  /** 点了「刷新」的那一轮结束了（err 为空 = 画好了）：告诉宿主，宿主转给卡片设置窗口。
+   *  queued = 排在正在画的那一轮后面、还没开始的也算：这张卡片画不成了（被停掉、重新加载、这一轮被放弃），告诉它原因（可以再点） */
+  function manualEnd(r, err, queued) {
+    if (!r.manualSeq && !(queued && r.manual)) return;
+    r.manualSeq = 0; r.freshKeys = null;
+    if (queued) r.manual = false;
+    post({ t: 'crefreshed', id: r.id, err: err || '' });
+  }
+  /** 卡片设置里点了「刷新」：马上画一轮（正在画的那一轮画完再来） */
+  function refresh(id) {
+    const r = runners.get(id);
+    const no = err => post({ t: 'crefreshed', id, err });
+    if (!r) return no('这张卡片没有在桌面上运行');
+    if (r.state !== 'ready' || !r.worker) return no(r.state === 'off' ? r.err || '脚本没有在运行' : '脚本还在启动，稍后再试');
+    r.manual = true;
+    if (r.busy) r.again = true; else tick(r);
   }
 
   /** 这一轮结束：排下一轮。按本地时间对齐 refresh 的整数倍（1 = 每秒整、60 = 每分钟整、86400 = 每天零点），
@@ -572,6 +601,7 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
 
   /** 卡住了：杀掉 Worker，按 30 秒、1 分钟、2 分钟…（最多 10 分钟）再重新启动（脚本文件改了马上重新加载） */
   function kill(r, msg) {
+    manualEnd(r, (r.script || '') + '.js：' + msg, true);
     stop(r);
     fail(r, msg);
     r.kills++;
@@ -609,6 +639,12 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
       let n = 0;
       for (const k of Object.keys(a.headers || {})) { if (++n > 20) return reply(false, null, '请求头太多（最多 20 个）'); headers[k] = String(a.headers[k]).slice(0, 2000); }
       msg = { t: 'cget', id: r.id, kind: a.kind === 'image' ? 'image' : 'text', url, method: String(a.method || 'GET'), body, headers };
+      // 点了「刷新」的那一轮发的：宿主不用 60 秒内的缓存（只认正在画的那一轮，画完之后才发的照常）。
+      // 同一个请求这一轮里只真发一次：data() 里要了两遍同一个网址的，第二遍用第一遍刚取回来的（宿主那边还在取就一起等）
+      if (a.fresh === true && r.busy && r.manualSeq === r.seq && r.freshKeys) {
+        const k = JSON.stringify([msg.kind, url, msg.method.toUpperCase(), body, headers]);
+        if (!r.freshKeys.has(k)) { r.freshKeys.add(k); msg.fresh = true; }
+      }
     } else if (m.op === 'file') {
       msg = { t: 'cfile', path: String(a.path || '').slice(0, 300), kind: a.kind === 'image' ? 'image' : 'text' };
     } else return reply(false, null, '不认识的请求');
@@ -661,6 +697,7 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
           // 在循环里一直发请求的由 onApi 按次数停掉）
           r.busy = false; r.seq++;
           fail(r, 'data() 超过 ' + TICK_MAX / 1000 + ' 秒还没有完成');
+          manualEnd(r, r.err, true);   // 放弃的是点了「刷新」的那一轮，或者刷新排在它后面：都告诉卡片设置窗口没刷新成功（可以再点）
           schedule(r);
           continue;
         }
@@ -680,7 +717,7 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
 
   return {
     init(o) { post = o.post; getWeather = o.weather; cardW = o.width; },
-    update, drop,
+    update, drop, refresh,
     /** 宿主发来的：csrc（脚本源码）、cfile / cget（读文件、联网的结果） */
     onHost(m) { if (m.t === 'csrc') onSource(m); else onReply(m); },
     setPaused(p) {

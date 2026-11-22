@@ -11,12 +11,16 @@
 //   height     新增卡片时的高度（像素，64–720；之后在卡片设置里改）。宽度固定 336
 //   refresh    多少秒重画一次（默认 60，最少 1）。按本地时间对齐：60 = 每分钟整、3600 = 每小时整、86400 = 每天零点；
 //              桌面被窗口挡住时最多一分钟一次，出错了 1 分钟后再试
+//   refreshButton  （可选）卡片设置里「刷新」按钮上的字（最多 12 个字，多的截掉），比如 '换一句'。点了马上重画一轮（api.manual 是 true）。
+//              联网的卡片（用了 api.fetchJson 等）不写也有这个按钮，叫「立即刷新」；不联网的不写就没有，写 true 就有；写 false 就不要这个按钮。
+//              要直接写成 '…' 或 true / false（不能是变量）
 //   style      （可选）卡片的 CSS
 //   data(api)  （可选）准备数据，可以写成 async 的：联网、读文件都在这里做。返回值交给 render
 //   render(d, api)  返回卡片的 HTML（字符串）。d = data() 的返回值
 //
 // ---- api ----
 //   api.now                这一次重画的时间（毫秒）
+//   api.manual             这一次是不是卡片设置里点了「刷新」按钮画的（想换个内容就看它，比如「每日一句」换一句）
 //   api.date(t)            日期时间（t 不填 = 现在）：{ year, month, day, hour, minute, second, weekday（0 = 周日）,
 //                          week '星期六', weekShort '周六', text '11月21日', time '08:05', lunar '十月十三', lunarMonth, lunarDay, lunarLeap }
 //   api.daysUntil(t)       离那天还有几天（今天 = 0，过去了是负数）。t 可以是 '2027-01-01'、毫秒数、Date
@@ -32,7 +36,7 @@
 //   await api.fetchJson(网址, 选项) / api.fetchText / api.fetchImage    联网只能用这几个。选项（可选）：{ method: 'POST', body, headers }
 //                          fetchImage 返回 data: 网址，写进 <img src="..."> 用
 //                          限制：只能访问互联网上的网站（本机、局域网里的地址不行）；内容最大 1 MB、15 秒超时；
-//                          同一个请求 60 秒内只真的发一次（再要就给上次的结果）；每张卡片每分钟最多 10 个不同的请求；
+//                          同一个请求 60 秒内只真的发一次（再要就给上次的结果；点了「刷新」的那一轮除外）；每张卡片每分钟最多 10 个不同的请求；
 //                          不保存 Cookie（要用就自己写在 headers 里；跳转到别的网站时不再带 Authorization 和 Cookie）
 //   await api.readText(文件名) / api.readJson / api.image     读这个文件夹里的文件（最大 256 KB；可以带子文件夹，比如 'pic/a.png'）
 //                          image 返回 data: 网址。符号链接、目录联接不能读

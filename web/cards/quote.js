@@ -5,7 +5,8 @@
 //   1. 这个文件夹里的「每日一句.txt」：自己建一个，一行一句，出处写在「 — 」后面，比如：知足者常乐 — 老子
 //   2. 网上的「一言」（hitokoto.cn）
 //   3. 下面内置的几句
-// 演示怎么读文件夹里的文件（api.readText）、怎么联网（api.fetchJson），以及拿不到时怎么兜底。
+// 不想要今天这句：卡片设置里点「换一句」马上换（refreshButton）。
+// 演示怎么读文件夹里的文件（api.readText）、怎么联网（api.fetchJson）、拿不到时怎么兜底，以及点了刷新按钮怎么办（api.manual）。
 // 能用的东西（api 都有什么、有哪些规矩）写在「时钟天气示例.js」的开头。
 // ============================================================================
 
@@ -21,11 +22,13 @@ const BUILTIN = [
   ['人生如逆旅，我亦是行人。', '苏轼《临江仙》'],
 ];
 let today = null;   // 今天从网上取到的那句：{ day, q }。脚本里顶层的变量一直留着，直到脚本重新加载
+let skip = { day: -1, n: 0 };   // 今天点了几次「换一句」：文件里的、内置的句子往后挑几句
 
 WeatherWallpaper.card({
   name: '每日一句',
   height: 116,
   refresh: 86400,   // 每天零点换一句（壁纸启动时也会画一次）
+  refreshButton: '换一句',   // 卡片设置里刷新按钮上的字
 
   style: `
     body { display: flex; flex-direction: column; justify-content: center; }
@@ -35,16 +38,21 @@ WeatherWallpaper.card({
 
   async data(api) {
     const day = Math.floor((api.now - new Date(api.now).getTimezoneOffset() * 60000) / 86400000);   // 今天是第几天：同一天挑同一句
+    // 点了「换一句」（api.manual）：挑下一句
+    if (skip.day !== day) skip = { day, n: 0 };
+    if (api.manual) skip.n++;
+    const k = day + skip.n;
     // 1. 自己写的句子
     try {
       const lines = (await api.readText(FILE)).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
       if (lines.length) {
-        const [text, from] = lines[day % lines.length].split(/\s+[—-]{1,2}\s+/);
+        const [text, from] = lines[k % lines.length].split(/\s+[—-]{1,2}\s+/);
         return { text, from: from || '' };
       }
     } catch (e) { /* 没有这个文件：试下一种 */ }
-    // 2. 网上的。一言每次给的都不一样：今天取到过就一直用那句（同一天也可能重画，比如卡片调了高度）
-    if (today && today.day === day) return today.q;
+    // 2. 网上的。一言每次给的都不一样：今天取到过就一直用那句（同一天也可能重画，比如卡片调了高度）；点了「换一句」才重新取
+    //    （这一轮联网不用 60 秒内的缓存，会真去取一次）
+    if (today && today.day === day && !api.manual) return today.q;
     try {
       const j = await api.fetchJson(API_URL);
       if (j && j.hitokoto) {
@@ -53,7 +61,7 @@ WeatherWallpaper.card({
       }
     } catch (e) { /* 没联网、网站出了问题：用内置的 */ }
     // 3. 内置的
-    const [text, from] = BUILTIN[day % BUILTIN.length];
+    const [text, from] = BUILTIN[k % BUILTIN.length];
     return { text, from };
   },
 

@@ -9,7 +9,7 @@ namespace WeatherWallpaper
 {
     /// <summary>
     /// 一张桌面天气卡片：在哪块屏、什么位置、显示哪个城市。第一张（Id = default）是默认卡片，不能删除。
-    /// 天气跟着卡片走：放了卡片的屏才显示天气壁纸，画面城市由这块屏上负责「画面跟随」的卡片决定。
+    /// 天气跟着天气卡片走：放了天气卡片的屏才显示天气壁纸，画面城市由这块屏上负责「画面跟随」的卡片决定（自定义卡片不带天气）。
     /// </summary>
     public class CardSpec
     {
@@ -240,7 +240,7 @@ namespace WeatherWallpaper
         /// <summary>
         /// 每块屏恰好有一张卡片负责"全屏天气画面跟随"（Scene = true）：没有的补上这块屏的第一张，有多张的只留一张。
         /// 只显示天气画面的卡片（Hidden）就是用来提供天气画面的：同屏有它时总是它。否则 prefer = 刚被用户勾选的那张（同一块屏上有多张标记时留它）。
-        /// 隐藏（Off）的卡片、自定义卡片不参与：不拿画面跟随，这块屏的画面交给其他卡片（只有自定义卡片的屏用默认卡片的城市，见 App.SceneKeyOf）。
+        /// 隐藏（Off）的卡片、自定义卡片不参与：不拿画面跟随，这块屏的画面交给其他卡片（只有自定义卡片的屏不画天气，见 App.PickScene）。
         /// </summary>
         public static void NormalizeScenes(IList<CardSpec> cards, string prefer = null)
         {
@@ -377,7 +377,7 @@ namespace WeatherWallpaper
         /// <summary>写进 settings.json 的字段说明（JSON 不支持注释，用 "// 字段名" 键代替，读取时会被忽略）。</summary>
         static Dictionary<string, string> Help() => new Dictionary<string, string>
         {
-            ["Cards"] = "桌面天气卡片（建议用托盘菜单「卡片设置」修改），第一张是默认卡片、不能删除，最多 " + MaxCards + " 张。放了卡片的屏才显示天气壁纸。每张：" +
+            ["Cards"] = "桌面天气卡片（建议用托盘菜单「卡片设置」修改），第一张是默认卡片、不能删除，最多 " + MaxCards + " 张。放了天气卡片的屏才显示天气壁纸（只放了自定义卡片的屏不画天气）。每张：" +
                 "Screen 所在屏（primary = 主屏，或显示器设备名；away: 开头 = 原来那块显示器没接上）；Monitor 显示器硬件 ID（自动维护，不用改）；Pos 位置：tl 左上 / tc 顶部居中 / tr 右上 / bl 左下 / bc 底部居中 / br 右下；" +
                 "OffsetX / OffsetY 离屏幕边缘的距离，单位像素（按 100% 缩放计）；City / Lat / Lon 都为 null = 自动定位；" +
                 "Name 卡片名称；Scene = true 表示这块屏的全屏天气画面跟随这张卡片的城市（每块屏恰好一张，没有会自动补上）；" +

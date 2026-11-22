@@ -12,6 +12,8 @@ namespace WeatherWallpaper
     /// 网页做内容的设置类窗口（卡片设置 web/card.html、关于 web/about.html）：带标题栏的普通窗口，Mica 背景，
     /// 和宿主用 JSON 消息往来（页面就绪前发的消息先排队）。
     /// 点 × 时先发 {"t":"flush"} 让页面把还没发出来的编辑交上来，页面回 close（宿主调 CloseNow）后再关。
+    /// 打开时先用 DWM cloak 隐身（对 Chromium 来说窗口可见、照常出图），页面拿到数据画好第一帧发 {"t":"painted"} 再现身：
+    /// 慢的机器上 WebView2 建好、页面加载完要一秒左右，不先露一个空窗口框；超时兜底照样显示。
     /// </summary>
     class PageWindow : Form
     {
@@ -19,6 +21,9 @@ namespace WeatherWallpaper
         readonly string page;
         CoreWebView2Controller ctl;
         bool ready, closing, flushing;   // flushing：点了 ×，正在等页面把防抖中的编辑交上来
+        bool initStarted, revealed;
+        readonly Timer revealTimer = new Timer { Interval = 3000 };
+        readonly System.Diagnostics.Stopwatch openWatch = new System.Diagnostics.Stopwatch();
         readonly List<string> pending = new List<string>();
         public Action<string> OnMessage;   // 页面发来的 JSON
         public Action Reloaded;            // 页面重新加载过（状态已丢）：宿主重发 init / fit
@@ -40,6 +45,8 @@ namespace WeatherWallpaper
             var wa = scr.WorkingArea;
             ClientSize = new Size((int)Math.Min(cssW * k, wa.Width - 40 * k), (int)Math.Min(cssH * k, wa.Height - 60 * k));
             Location = new Point(wa.X + (wa.Width - Width) / 2, wa.Y + Math.Max(0, (wa.Height - Height) / 2));
+            openWatch.Start();
+            revealTimer.Tick += (s, e) => { if (!revealed) Log.Write(page + ": page not painted in " + revealTimer.Interval + " ms, showing anyway"); Reveal(); };
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -50,16 +57,46 @@ namespace WeatherWallpaper
             Native.DwmSetWindowAttribute(Handle, 38 /*DWMWA_SYSTEMBACKDROP_TYPE*/, ref mica, 4);
             var m = new Native.MARGINS { L = -1, R = -1, T = -1, B = -1 };
             Native.DwmExtendFrameIntoClientArea(Handle, ref m);
+            if (!revealed) Cloak(true);   // 第一次显示前就隐身：页面画好再现身
+        }
+
+        void Cloak(bool on)
+        {
+            int v = on ? 1 : 0;
+            Native.DwmSetWindowAttribute(Handle, 13 /*DWMWA_CLOAK*/, ref v, 4);
+        }
+
+        /// <summary>页面画好了（或者等太久了）：现身。</summary>
+        void Reveal()
+        {
+            revealTimer.Stop();
+            if (revealed || IsDisposed) return;
+            revealed = true;
+            if (IsHandleCreated) Cloak(false);
+            var ms = openWatch.ElapsedMilliseconds;
+            if (ms > 300) Log.Write(page + ": shown after " + ms + " ms");
+        }
+
+        /// <summary>
+        /// 先把窗口句柄和 WebView2 建起来（不显示）：宿主还在准备要发给页面的数据（卡片设置的布局计算）时，WebView2 已经在启动了。
+        /// 不调也行，第一次 Show 时会自己开始。
+        /// </summary>
+        public void Warm()
+        {
+            if (!IsHandleCreated) CreateHandle();
+            if (!initStarted) Init();
         }
 
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
-            Init();
+            if (!initStarted) Init();
+            if (!revealed) revealTimer.Start();
         }
 
         async void Init()
         {
+            initStarted = true;
             try
             {
                 var c = await env.CreateCoreWebView2ControllerAsync(Handle);
@@ -88,6 +125,7 @@ namespace WeatherWallpaper
                         foreach (var j in list) Post(j);
                         return;
                     }
+                    if (json.StartsWith("{\"t\":\"painted\"")) { Reveal(); return; }   // 页面拿到数据、画好了第一帧
                     // 放回消息循环里再处理：处理时可能会关掉这个窗口（「完成」），不能在 WebView2 自己的事件回调里把它销毁
                     BeginInvoke((Action)(() => { if (!IsDisposed) OnMessage?.Invoke(json); }));
                 };
@@ -100,7 +138,7 @@ namespace WeatherWallpaper
                 wv.Navigate("https://wallpaper.local/" + page);
                 if (ContainsFocus) ctl.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
             }
-            catch (Exception ex) { Log.Write(page + " window init failed: " + ex); }
+            catch (Exception ex) { Log.Write(page + " window init failed: " + ex); Reveal(); }   // 建不起来：别一直隐身，空窗口至少能关掉
         }
 
         public void Post(string json)
@@ -169,7 +207,7 @@ namespace WeatherWallpaper
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { try { ctl?.Close(); } catch { } ctl = null; }
+            if (disposing) { revealTimer.Dispose(); try { ctl?.Close(); } catch { } ctl = null; }
             base.Dispose(disposing);
         }
     }

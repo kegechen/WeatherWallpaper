@@ -171,10 +171,19 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape' || (e.key === 'Enter' && e.target === document.body)) post({ t: 'close' }); });
   document.addEventListener('contextmenu', e => e.preventDefault());
 
+  // 拿到内容、画好第一帧再告诉宿主：窗口这时才现身（PageWindow 打开时先隐身），不先露一个空窗口。图标（宿主先发）解码好再算
+  let painted = false;
+  const paintedOnce = () => {
+    if (painted) return;
+    painted = true;
+    const img = $('icon');
+    Promise.resolve(img.getAttribute('src') ? img.decode().catch(() => {}) : null)
+      .then(() => requestAnimationFrame(() => requestAnimationFrame(() => post({ t: 'painted' }))));
+  };
   if (host) host.addEventListener('message', ev => {
     const m = ev.data;
     if (!m || !m.t) return;
-    if (m.t === 'about') { st = m; render(); }
+    if (m.t === 'about') { st = m; render(); paintedOnce(); }
     else if (m.t === 'icon') $('icon').src = m.src || '';   // 程序图标：每次页面加载宿主单独发一次
     else if (m.t === 'flush') post({ t: 'close' });   // 点了标题栏 ×：这里没有要交的编辑，直接关
   });

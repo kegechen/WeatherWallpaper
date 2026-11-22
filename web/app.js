@@ -90,8 +90,8 @@
   // cards：这块屏上的卡片 [{id, key, x, y}]（位置由宿主算好，CSS 像素）；自定义卡片是 {id, script, v, x, y, h}（v = 脚本文件的修改时间）；
   // scene：全屏天气画面跟着哪个城市（城市键）；defKey：默认卡片的城市键（自定义卡片的 api.weather 用它）
   // overlayWall：壁纸叠加——天空半透明、系统壁纸常驻垫底；skyOpacity：天空那层的不透明度（0.05–1）；
-  // cloudAlpha：云的不透明度（极简模式不叠壁纸时恒为 1）
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, scene: '', defKey: '', cards: [] };
+  // cloudAlpha：云的不透明度（极简模式不叠壁纸时恒为 1）；noWeather：这块屏只放了自定义卡片，不画天气，只垫系统壁纸
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, noWeather: false, scene: '', defKey: '', cards: [] };
 
   let W = 0, H = 0, DPR = 1;
   // weathers：各城市的天气（城市键 → 宿主发来的 weather 消息）；weather：画面城市的那一份（天空、太阳、雨雪都按它）
@@ -127,8 +127,11 @@
   }
   let staleSince = 0, staleTm = 0, staleKey = '';
   // 极简模式：fxKind = 宿主让播放的天气动画（start / rain / heavy / thunder / snow / rainbow，null = 不播）；
-  // asleep = 天气画面整层已淡出并释放（画布缩成 1×1、主循环停掉），只剩系统壁纸 + 卡片
+  // asleep = 天气画面整层已淡出并释放（画布缩成 1×1、主循环停掉），只剩系统壁纸 + 卡片。
+  // 底图：backPainted = 底图画布上已经是系统壁纸（图画好了 / 纯色壁纸），不是占位的黑底；
+  // backWait / backHold = 这块屏刚不再 / 刚开始画天气时，天气画面等底图画好再淡出、底图等天气画面淡入完再撤（见 noWeatherChanged）
   let fxKind = null, asleep = false, sleepTm = 0, backdrop = null, backKey = '', backTok = 0;
+  let backPainted = false, backWait = false, backWaitTm = 0, backHold = 0;
 
   // ------------------------------------------------------------------ 时间与太阳
   function locInfo() {
@@ -775,11 +778,12 @@
     if (!L.primary) { lastSceneMsg = ''; return; }   // 不归这块屏报了：忘掉上次报的，以后重新轮到它时第一份一定发出去（宿主那边已经是别的屏报的值）
     lastScenePost = simT;
     let text = '';
-    if (weather) {
+    // 只放了自定义卡片的屏（哪块屏都没有天气卡片时轮到它报）：不报天气。weather 可能还是之前那个城市的（换城市时最多留 2 分钟）
+    if (weather && !L.noWeather) {
       const c = weather.fc.current;
       text = `${weather.loc.name} ${WX.info(c.weather_code).text} ${Math.round(c.temperature_2m)}°`;
     }
-    const on = sceneWanted();
+    const on = sceneWanted() && !L.noWeather;
     const msg = JSON.stringify({ t: 'scene', rain: on ? +tgt.rain.toFixed(2) : 0, snow: on ? +tgt.snow.toFixed(2) : 0, wind: +tgt.windX.toFixed(2), text });
     if (msg !== lastSceneMsg) { lastSceneMsg = msg; post(JSON.parse(msg)); }
   }
@@ -2002,8 +2006,12 @@
   // 平时天气画面整层淡出后"睡着"：三张画布缩成 1×1、主循环停掉，页面上只剩系统壁纸底图 + 卡片，CPU / GPU 基本为 0。
   // 宿主让播放（fx）、或者在看效果预览时醒来：按当前天气立刻画好一帧再淡入，播完再淡出睡回去。
   const FADE_MS = 1500;
-  // 壁纸叠加不是极简模式：天气画面一直显示（只是天空半透明），所以始终要画
-  function sceneWanted() { return !L.minimal || L.overlayWall || !!fxKind || preview !== 'live' || dayDemo; }
+  // 壁纸叠加不是极简模式：天气画面一直显示（只是天空半透明），所以始终要画。
+  // 只放了自定义卡片的屏（noWeather）不画天气，效果预览也不画；刚从画天气切过来时等系统壁纸底图画好再淡出（backWait），不先褪成黑底
+  function sceneWanted() {
+    if (L.noWeather) return backWait;
+    return !L.minimal || L.overlayWall || !!fxKind || preview !== 'live' || dayDemo;
+  }
   function applyMinimal() {
     if (!gotLayout) return;
     if (sceneWanted()) {
@@ -2036,9 +2044,11 @@
     postScene();
   }
   // 底图画进一张不透明画布后立即丢掉图片：显存里只留一份整屏纹理（CSS 背景图会同时占着解码缓存和光栅瓦片两份）
-  // 极简模式和壁纸叠加都要垫系统壁纸：极简模式是"平时只有它"，壁纸叠加是"它从半透明的天空里透出来"
+  // 极简模式和壁纸叠加都要垫系统壁纸：极简模式是"平时只有它"，壁纸叠加是"它从半透明的天空里透出来"；
+  // 只放了自定义卡片的屏（noWeather）底下也只有它
   function applyBackdrop() {
-    const b = L.minimal || L.overlayWall ? backdrop || {} : null;
+    const b = L.minimal || L.overlayWall || L.noWeather ? backdrop || {} : null;
+    if (!b && backHold) return;   // 天气画面还在淡入：底图先留着，到点再撤
     const hadReady = backReady;
     // 壁纸叠加：底图还没到 / 没有底图时天空画不透明（不然揭掉天空就露出 WebView2 的黑底）
     backReady = !!(b && (b.url || b.color));
@@ -2049,10 +2059,10 @@
     backKey = key;
     const tok = ++backTok, ctx = backEl.getContext('2d', { alpha: false });
     const fill = () => { backEl.width = 1; backEl.height = 1; ctx.fillStyle = (b && b.color) || '#000'; ctx.fillRect(0, 0, 1, 1); };
-    // 纯色壁纸、非极简模式：1×1 纯色拉满全屏（顺带把整屏纹理还回去）
-    if (!b || !b.url) { fill(); return; }
+    // 纯色壁纸、非极简模式：1×1 纯色拉满全屏（顺带把整屏纹理还回去）。宿主发来的底图总带 color，没有就是占位的黑底
+    if (!b || !b.url) { fill(); backPainted = !!(b && b.color); backSettled(); return; }
     // 换图：旧图留到新图加载好再替换，不闪黑；还没有图时先用纯色垫着
-    if (backEl.width <= 1) fill();
+    if (backEl.width <= 1) { fill(); backPainted = false; }
     const img = new Image();
     img.onload = () => {
       img.onload = img.onerror = null;   // 下面清空 src 会再触发一次 error
@@ -2060,6 +2070,7 @@
         // 按图片本身的像素尺寸画（宿主已按屏幕物理分辨率生成）：非整数缩放时 W×DPR 会差一两个像素，整张图被重采样变糊
         backEl.width = img.naturalWidth; backEl.height = img.naturalHeight;
         ctx.drawImage(img, 0, 0);
+        backPainted = true; backSettled();
       }
       img.src = '';
     };
@@ -2074,6 +2085,30 @@
   }
   // GPU 重置后底图画布内容也会丢，按原图重画
   backEl.addEventListener('contextrestored', () => { backKey = ''; applyBackdrop(); });
+  // 底图画好了：等着它的天气画面可以淡出了
+  function backSettled() {
+    if (!backWait || !backPainted) return;
+    backWait = false; clearTimeout(backWaitTm); backWaitTm = 0;
+    applyMinimal();
+  }
+  // 这块屏不再 / 开始画天气（天气卡片挪走了、只剩自定义卡片，或者反过来）：两个方向都别露出 WebView2 的黑底
+  function noWeatherChanged() {
+    if (L.noWeather) {
+      clearTimeout(backHold); backHold = 0;
+      // 天气画面还显示着、系统壁纸底图还没画好（宿主正在生成）：画面先留着，底图画好再淡出；最多等 5 秒
+      if (!asleep && !backPainted) {
+        backWait = true; clearTimeout(backWaitTm);
+        backWaitTm = setTimeout(() => { backWaitTm = 0; backWait = false; applyMinimal(); }, 5000);
+      }
+    } else {
+      backWait = false; clearTimeout(backWaitTm); backWaitTm = 0;
+      // 底图留到天气画面淡入完再撤（极简模式 / 壁纸叠加本来就一直垫着，撤不掉，这里只是晚一点再看一次）
+      if (backEl.style.display !== 'none') {
+        clearTimeout(backHold);
+        backHold = setTimeout(() => { backHold = 0; applyBackdrop(); }, FADE_MS + 200);
+      }
+    }
+  }
   // 宿主模式下先藏着（不带过渡），等第一条 layout 知道是不是极简模式：普通模式立即显示，极简模式直接睡下（不闪一下天气画面）。
   // 宿主在页面 ready 前排队的消息（天气等）会先于 layout 到达，这之前不决定显隐
   let gotLayout = !host;
@@ -2084,10 +2119,12 @@
       const m = ev.data;
       if (!m || !m.t) return;
       if (m.t === 'csrc' || m.t === 'cfile' || m.t === 'cget') { UserCards.onHost(m); return; }   // 自定义卡片要的脚本、文件、网上的数据：和画面无关
+      if (m.t === 'crefresh') { UserCards.refresh(m.id); return; }   // 卡片设置里点了自定义卡片的「刷新」
       switch (m.t) {
         case 'layout': {
-          const g0 = L.ground, dk0 = L.defKey;
+          const g0 = L.ground, dk0 = L.defKey, nw0 = !!L.noWeather, first = !gotLayout;
           Object.assign(L, m); gotLayout = true;
+          if (!first && nw0 !== !!L.noWeather) noWeatherChanged();   // 第一条 layout 不算：画面本来就藏着，直接按它显隐
           festAt = -1e9;   // 「节日装饰与彩蛋」可能刚开 / 关：马上重新算今天的节日
           if (m.keys) for (const k of Object.keys(weathers)) if (!m.keys.includes(k)) delete weathers[k];   // 不再用到的城市（卡片换了城市）：丢掉它的天气数据
           {   // 自定义效果脚本：第一次照列表加载；之后列表变了（增删、改过文件）就整页重载，旧脚本干干净净地卸掉

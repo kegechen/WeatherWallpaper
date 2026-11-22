@@ -35,6 +35,9 @@ namespace WeatherWallpaper
             public long V;        // 修改时间（毫秒）：变了页面就重新加载用它的卡片
             public string Title;
             public int Height = DefaultHeight;
+            /// <summary>卡片设置里「刷新」按钮上的字：脚本里写的 refreshButton: '换一句'（true = 「立即刷新」）；没写的话联网的脚本（用了 api.fetchJson 等）是「立即刷新」，
+            /// 不联网的、写了 refreshButton: false 的是 null（不显示按钮）</summary>
+            public string Button;
             public bool Unread;   // 扫描时正好被占用、没读出来：Title / Height 是上次的（或默认的），过一会儿再扫（RescanCards）
         }
 
@@ -42,6 +45,19 @@ namespace WeatherWallpaper
         static readonly HashSet<string> oddNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);   // 名字用不了、跳过的脚本（日志只记一次）
         // 前后都要断开：CSS 里的 line-height: / min-height: 100% / height: 120px 不算
         static readonly Regex TitleRx = new Regex(@"(?<![\w$-])name\s*:\s*(['""`])([^'""`\r\n]{1,40})\1"), HeightRx = new Regex(@"(?<![\w$-])height\s*:\s*(\d{2,3})(?![\w.%])");
+        static readonly Regex ButtonRx = new Regex(@"(?<![\w$-])refreshButton\s*:\s*(?:(['""`])([^'""`\r\n]{0,200})\1|(true|false)\b)"), NetRx = new Regex(@"(?<![\w$])fetch(?:Text|Json|Image)(?![\w$])");
+        public const string DefaultButton = "立即刷新";
+        const int MaxButton = 12;   // 按钮上最多几个字（多的截掉）
+
+        /// <summary>refreshButton 的值 → 按钮上的字：false = 不要按钮；true、空白 = 默认的字；太长截到 MaxButton 个字（不切开 emoji 这类两个 char 的字）。</summary>
+        static string ButtonText(Match b)
+        {
+            if (b.Groups[3].Success) return b.Groups[3].Value == "true" ? DefaultButton : null;
+            var s = b.Groups[2].Value.Trim();
+            if (s == "") return DefaultButton;
+            if (s.Length > MaxButton) s = s.Substring(0, char.IsHighSurrogate(s[MaxButton - 1]) ? MaxButton - 1 : MaxButton).TrimEnd();
+            return s;
+        }
 
         /// <summary>所有卡片脚本，按文件名排好序（最多 50 个；隐藏的、超过 256 KB 的、名字用不了的不算，见 Usable）。</summary>
         public static List<Script> Scan()
@@ -58,14 +74,18 @@ namespace WeatherWallpaper
                 {
                     // 去掉注释（说明注释里也会写 name: / height:，甚至 WeatherWallpaper.card({...})），只看 card({ ... }) 最外一层：
                     // data() 里返回的 { name: … }、render 里的 { height: … } 不算。认不出这一层（card(def)、括号数乱了）就照整段找
-                    var src = NoComments(File.ReadAllText(fi.FullName, Encoding.UTF8));
-                    int at = src.IndexOf("WeatherWallpaper.card", StringComparison.Ordinal);
-                    src = (at >= 0 ? TopLevel(src.Substring(at)) : null) ?? src;
+                    var all = NoComments(File.ReadAllText(fi.FullName, Encoding.UTF8));
+                    int at = all.IndexOf("WeatherWallpaper.card", StringComparison.Ordinal);
+                    var src = (at >= 0 ? TopLevel(all.Substring(at)) : null) ?? all;
                     var t = TitleRx.Match(src);
                     var h = HeightRx.Match(src);
+                    var b = ButtonRx.Match(src);
                     int hv;
                     if (t.Success) s.Title = t.Groups[2].Value.Trim();
                     if (h.Success && int.TryParse(h.Groups[1].Value, out hv)) s.Height = Math.Max(MinHeight, Math.Min(MaxHeight, hv));
+                    // 联不联网看整个脚本（api.fetchJson 写在 data() 里，最外一层看不到）
+                    // 写成变量之类认不出来的（refreshButton: LABEL）：当没写
+                    s.Button = b.Success ? ButtonText(b) : NetRx.IsMatch(all) ? DefaultButton : null;
                     metaCache[s.File] = s;
                 }
                 catch (Exception)
@@ -74,7 +94,7 @@ namespace WeatherWallpaper
                     // 要等文件夹里再有动静才恢复。名称、高度先用上次读到的（没有就是默认的），不进 metaCache，下次扫描再读；
                     // 脚本本身页面会来要（ReadScript），那时还读不出来就报原因、30 秒后再要
                     if (!File.Exists(fi.FullName)) continue;
-                    if (old != null) { s.Title = old.Title; s.Height = old.Height; }
+                    if (old != null) { s.Title = old.Title; s.Height = old.Height; s.Button = old.Button; }
                     s.Unread = true;
                 }
                 list.Add(s);
@@ -302,7 +322,8 @@ namespace WeatherWallpaper
         // 同一张卡片的同一个请求（方法、网址、内容、请求头都一样）60 秒内只真发一次：其间再要就给上次的结果（还在取就一起等）。
         // 这样 refresh = 1 秒的卡片在 data() 里每次都 fetch 也不会把人家的服务器打爆
         static readonly Dictionary<string, NetEntry> net = new Dictionary<string, NetEntry>();
-        static readonly Dictionary<string, List<DateTime>> perCard = new Dictionary<string, List<DateTime>>();
+        // 每张卡片这一分钟里真发过的请求（键 → 什么时候发的）：限的是不同的请求，同一个请求一分钟里只算一次
+        static readonly Dictionary<string, List<KeyValuePair<string, DateTime>>> perCard = new Dictionary<string, List<KeyValuePair<string, DateTime>>>();
         static readonly Dictionary<string, bool> routes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);   // 网站 → 上次是不是直连走通的
         static readonly Regex HeaderName = new Regex(@"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$");
         static readonly HashSet<string> NoHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -314,8 +335,10 @@ namespace WeatherWallpaper
         /// 只在 UI 线程上调（字典不加锁；await 之后也回到 UI 线程）。kind = text / image；返回 cget 回复里 rid 之后的部分：
         /// "ok":true,"status":200,"type":"application/json","text":"…"（image 是 "data":"data:image/png;base64,…"），或者 "ok":false,"err":"原因"。
         /// HTTP 错误码也算 ok（带 status），由页面那边按 status 决定要不要当成出错。
+        /// fresh = 卡片设置里点了刷新、这一轮的请求：不用 60 秒内取过的结果，真发一次（还在取的照样一起等）。
+        /// 每分钟的次数限制照算，但同一个请求一分钟里只算一次：刚取过的再真发一次不多占名额（不然一轮要联网好几次的卡片，刷新一下就超了）。
         /// </summary>
-        public static Task<string> Fetch(string card, string kind, string url, string method, string body, IDictionary<string, object> headers)
+        public static Task<string> Fetch(string card, string kind, string url, string method, string body, IDictionary<string, object> headers, bool fresh = false)
         {
             Uri u;
             if (string.IsNullOrEmpty(url) || url.Length > 4000 || !Uri.TryCreate(url, UriKind.Absolute, out u) || (u.Scheme != "http" && u.Scheme != "https"))
@@ -339,14 +362,17 @@ namespace WeatherWallpaper
             var key = string.Concat(new[] { card, kind, method, u.AbsoluteUri, body }.Concat(hs.SelectMany(h => new[] { h.Key, h.Value }))
                 .Select(p => p == null ? "-;" : p.Length + ":" + p + ";"));
             NetEntry hit;
-            if (net.TryGetValue(key, out hit)) return hit.Task;
+            if (net.TryGetValue(key, out hit) && !(fresh && hit.Task.IsCompleted)) return hit.Task;
             // 一分钟里没发过请求的卡片不用记了（删掉的卡片也就这样清掉）
-            foreach (var k in perCard.Where(p => p.Value.All(t => (now - t).TotalSeconds >= 60)).Select(p => p.Key).ToList()) perCard.Remove(k);
-            List<DateTime> times;
-            if (!perCard.TryGetValue(card ?? "", out times)) perCard[card ?? ""] = times = new List<DateTime>();
-            times.RemoveAll(t => (now - t).TotalSeconds >= 60);
-            if (times.Count >= MaxPerMinute) return Task.FromResult(Err("请求太频繁：每张卡片每分钟最多 " + MaxPerMinute + " 个不同的请求（同一个请求 60 秒内会直接用上次的结果）"));
-            times.Add(now);
+            foreach (var k in perCard.Where(p => p.Value.All(t => (now - t.Value).TotalSeconds >= 60)).Select(p => p.Key).ToList()) perCard.Remove(k);
+            List<KeyValuePair<string, DateTime>> times;
+            if (!perCard.TryGetValue(card ?? "", out times)) perCard[card ?? ""] = times = new List<KeyValuePair<string, DateTime>>();
+            times.RemoveAll(t => (now - t.Value).TotalSeconds >= 60);
+            if (!times.Any(t => t.Key == key))
+            {
+                if (times.Count >= MaxPerMinute) return Task.FromResult(Err("请求太频繁：每张卡片每分钟最多 " + MaxPerMinute + " 个不同的请求（同一个请求 60 秒内会直接用上次的结果）"));
+                times.Add(new KeyValuePair<string, DateTime>(key, now));
+            }
             if (net.Count >= 64)
             {
                 // 扔最早的已经取完的；还在取的不扔（扔了同一个请求会再真发一遍），全在取就先多存几个（最多 NetSeconds 秒都会结束）

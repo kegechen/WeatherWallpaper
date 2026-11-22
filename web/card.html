@@ -166,6 +166,14 @@
   #custSec > .hint { margin-top: 8px; }
   #custSec.off .hstep { opacity: .4; pointer-events: none; }
   #custSec.off :disabled { opacity: 1; }
+  /* 刷新按钮：联网的脚本（或脚本里写了 refreshButton）才有；等结果时图标转起来 */
+  #cref { flex: none; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; }
+  #cref svg { width: 14px; height: 14px; flex: none; }
+  #cref.busy { cursor: progress; }
+  #cref.busy svg { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #crefNote { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #crefNote.bad { color: var(--bad); }
   #cerrNote { align-items: flex-start; }
   #cerrNote b { display: block; margin-top: 3px; font-weight: 600; white-space: pre-wrap; word-break: break-word; user-select: text; cursor: text; }
 
@@ -215,7 +223,7 @@
           <div id="cur" class="hint c2 wx"></div>
           <label for="screen">显示器</label>
           <div class="row"><select id="screen"></select><button id="identify" title="在每块屏中间显示编号，对照这里的“显示器 N”">识别</button></div>
-          <div class="hint c2">天气画面只出现在放了卡片的屏上，没有卡片的屏保持系统壁纸</div>
+          <div class="hint c2">只有放了天气卡片的屏才有天气画面，其余屏保持系统壁纸</div>
         </div>
         <div id="scrNote" class="note warn"></div>
       </section>
@@ -227,6 +235,8 @@
           <div class="row"><select id="script"></select><button id="openCards" title="打开 cards 文件夹：在里面新建、修改卡片脚本（自带几个示例）">打开文件夹</button></div>
           <label for="hgt">高度</label>
           <div class="row"><div class="step hstep"><button data-hd="-10">−</button><input id="hgt" type="number" step="1"><button data-hd="10">+</button></div><span class="hint" id="hRange"></span></div>
+          <label class="cref">内容</label>
+          <div class="row cref"><button id="cref" title="马上重画桌面上的这张卡片，联网的内容重新获取"></button><span class="hint" id="crefNote"></span></div>
         </div>
         <div class="hint">内容由 cards 文件夹里的脚本决定，脚本改好保存后桌面上马上更新；写法见文件夹里的示例</div>
         <div id="cerrNote" class="note bad"></div>
@@ -514,6 +524,7 @@
     $('fitNote').textContent = fresh() && !mine ? fit.msg || '' : '';
     const err = fresh() && !off ? cerr : '';
     $('cerrNote').innerHTML = err ? WARN + '<span>桌面上暂时没有显示这张卡片：脚本出错了。改好脚本保存后会自动重新运行（出错原因也写在日志里）<b>' + esc(err) + '</b></span>' : '';
+    renderRefresh(cur, off);
     return true;
   }
   // 新增自定义卡片时宿主起的名字（Program.NewCard）：s.auto（宿主按脚本里的 name / 文件名截好的），和别的卡片重名加「 2」「 3」…
@@ -534,6 +545,42 @@
     renderCustom(); sendDraft(true);
   };
   $('openCards').onclick = () => post({ t: 'opencards' });
+
+  // 「刷新」按钮（联网的脚本才有，字由脚本的 refreshButton 定）：桌面上的这张卡片马上重画一轮、联网的内容重新取。
+  // 那一轮画完（或出错）宿主转回 refreshed；45 秒还没回（脚本一轮最多 40 秒）就不等了
+  const SPIN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.6 8.6A5.6 5.6 0 1 1 11.9 4"/><path d="M12.4 1.4v3h-3"/></svg>';
+  let refreshing = '', refTm = 0, refNoteTm = 0;
+  function renderRefresh(cur, off) {
+    const label = cur && cur.btn, b = $('cref');
+    for (const el of document.querySelectorAll('.cref')) el.style.display = label ? '' : 'none';
+    if (!label) return;
+    if (b.dataset.label !== label) { b.dataset.label = label; b.innerHTML = SPIN + '<span>' + esc(label) + '</span>'; }
+    b.disabled = off;
+    b.classList.toggle('busy', refreshing === card.Id);
+  }
+  function refreshNote(text, bad, ms) {
+    clearTimeout(refNoteTm); refNoteTm = 0;
+    const n = $('crefNote');
+    n.textContent = text; n.title = bad ? text : ''; n.classList.toggle('bad', !!bad);
+    if (ms) refNoteTm = setTimeout(() => { refNoteTm = 0; n.textContent = ''; n.title = ''; }, ms);
+  }
+  function refreshEnd(err) {
+    refreshing = ''; clearTimeout(refTm); refTm = 0;
+    // 卡片脚本的错误带着「xxx.js：」开头（下面的出错提示里有完整的）：这里只写原因
+    if (err) refreshNote('没有刷新成功：' + String(err).replace(/^[^：\n]*\.js：/, ''), true, 0);
+    else refreshNote('已刷新', false, 3000);
+    renderCustom();
+  }
+  $('cref').onclick = () => {
+    if (refreshing || card.Off) return;
+    refreshing = card.Id;
+    refreshNote('', false, 0);
+    // 等多久：刷新可能排在正在画的那一轮后面，两轮的 data() 各最多 40 秒（cards.js 的 TICK_MAX），都会回话。
+    // 比这短的话，超时后再点一次会把上一次迟到的结果当成这一次的
+    refTm = setTimeout(() => refreshEnd('桌面那边没有回应'), 90000);
+    post({ t: 'crefresh' });
+    renderCustom();
+  };
   const setHeight = v => { const [lo, hi] = hLim(); card.Height = Math.max(lo, Math.min(hi, v)); };
   for (const b of document.querySelectorAll('#custSec .step button'))
     b.onclick = () => {
@@ -916,6 +963,7 @@
       card = m.card; autoName = m.autoName || ''; gen = m.gen || 0; cerr = ''; closeAddMenu();
       $('results').innerHTML = ''; $('q').value = ''; searching = ''; armed = keepArmed; keepArmed = false; adding = false;
       clearTimeout(delArm); delArm = 0; $('del').textContent = '删除卡片';
+      refreshing = ''; clearTimeout(refTm); refTm = 0; refreshNote('', false, 0);   // 换了卡片：上一张的刷新结果不显示了
       cityMode = card.Lat != null && card.Lon != null;
       renderAll();
       // 新的 fit 还没到：别按旧 fit 的卡片列表重画页签（被删的卡片会闪回来），只把高亮挪过去，列表等新 fit 到了再画
@@ -935,10 +983,15 @@
     } else if (m.t === 'cerr') {
       // 桌面上那张自定义卡片出错了 / 好了（宿主转来的）
       if (card && m.id === card.Id) { cerr = m.err || ''; renderCustom(); }
+    } else if (m.t === 'refreshed') {
+      if (card && refreshing && m.id === refreshing) refreshEnd(m.err);   // 点了「刷新」的那一轮画完了 / 出错了
     }
     else if (m.t === 'search') onSearch(m);
     else if (m.t === 'flush') flushThen({ t: 'close' });   // 点了标题栏 × 等：把还没发出去的编辑交上去再关
+    // 卡片和布局结果都到了、页面画好第一帧再告诉宿主：窗口这时才现身（PageWindow 打开时先隐身），不先露一个空窗口
+    if (!painted && card && fit) { painted = true; requestAnimationFrame(() => requestAnimationFrame(() => post({ t: 'painted' }))); }
   });
+  let painted = false;
   post({ t: 'ready' });
 })();
 </script>
