@@ -23,6 +23,7 @@ const BUILTIN = [
 ];
 let today = null;   // 今天从网上取到的那句：{ day, q }。脚本里顶层的变量一直留着，直到脚本重新加载
 let skip = { day: -1, n: 0 };   // 今天点了几次「换一句」：文件里的、内置的句子往后挑几句
+let netDown = 0;   // 上次没从网上取到的时间：之后 10 分钟不再去取，直接用内置的（连不上的网络要等十几秒才失败，每次「换一句」都等就像没反应）
 
 WeatherWallpaper.card({
   name: '每日一句',
@@ -53,13 +54,16 @@ WeatherWallpaper.card({
     // 2. 网上的。一言每次给的都不一样：今天取到过就一直用那句（同一天也可能重画，比如卡片调了高度）；点了「换一句」才重新取
     //    （这一轮联网不用 60 秒内的缓存，会真去取一次）
     if (today && today.day === day && !api.manual) return today.q;
-    try {
-      const j = await api.fetchJson(API_URL);
-      if (j && j.hitokoto) {
-        today = { day, q: { text: j.hitokoto, from: (j.from_who || '') + (j.from ? '《' + j.from + '》' : '') } };
-        return today.q;
-      }
-    } catch (e) { /* 没联网、网站出了问题：用内置的 */ }
+    if (api.now - netDown > 10 * 60000) {
+      try {
+        const j = await api.fetchJson(API_URL);
+        if (j && j.hitokoto) {
+          today = { day, q: { text: j.hitokoto, from: (j.from_who || '') + (j.from ? '《' + j.from + '》' : '') } };
+          return today.q;
+        }
+      } catch (e) { /* 没联网、网站出了问题、这个网络上不去：用内置的 */ }
+      netDown = api.now;
+    }
     // 3. 内置的
     const [text, from] = BUILTIN[k % BUILTIN.length];
     return { text, from };

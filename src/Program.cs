@@ -2242,7 +2242,7 @@ namespace WeatherWallpaper
             if (env == null) return;
             if (aboutWin == null)
             {
-                aboutWin = new PageWindow(env, "关于 · 天气壁纸", "about.html", 460, 620) { MinimizeBox = false, OnMessage = OnAboutMessage };
+                aboutWin = new PageWindow(env, "关于 · 天气壁纸", "about.html", 460, 666) { MinimizeBox = false, OnMessage = OnAboutMessage };
                 aboutWin.Warm();
                 aboutWin.Reloaded = () => { PostAboutIcon(); PostAbout(); };
                 aboutWin.FormClosed += (s, e) => aboutWin = null;
