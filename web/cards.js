@@ -134,7 +134,8 @@ function init() {
   const refresh = d.refresh == null ? 60 : Number(d.refresh);
   if (!(refresh >= 1)) return bad('refresh 要是不小于 1 的秒数（现在是 ' + short(d.refresh) + '）');
   if (d.style != null && typeof d.style !== 'string') return bad('style 要是 CSS 文本（字符串）');
-  send({ t: 'def', name: d.name == null ? '' : String(d.name), refresh, style: d.style || '' });
+  // auto：autoHeight: true（直接写 true，宿主也是这么认的）= 卡片高度随内容变，由页面量出来报给宿主
+  send({ t: 'def', name: d.name == null ? '' : String(d.name), refresh, style: d.style || '', auto: d.autoHeight === true });
 }
 async function tick(m) {
   seqNow = m.seq;
@@ -191,6 +192,7 @@ listen('message', e => {
   const FRAME = `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
 <style>html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+html.auto, html.auto body { height: auto; }   /* 高度随内容变（autoHeight）：不撑满，内容多高 html 就多高，页面按它量卡片该多高（fit） */
 body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   text-shadow: 0 1px 4px rgba(0,0,0,.3); user-select: none; cursor: default; }</style>
 <style id="u"></style></head><body></body></html>`;
@@ -346,13 +348,17 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
     if (!r) { r = { id: c.id, gen: 0, seq: 0, pn: 0, kills: 0, err: '', reported: null, shown: false }; runners.set(c.id, r); }
     const h = c.h || 160, resized = r.h != null && r.h !== h;
     r.h = h;
+    // 自动高度的卡片：版面里的高度就是刚才报的（fitH）→ 内容没变，不用因为「高度改了」重画；对不上（宿主那边没记下、还没来得及采用）就再报一次
+    const fitted = !!(r.def && r.def.auto && r.fitH);
+    const same = fitted && Math.round(h) === r.fitH;
+    if (fitted && !same) post({ t: 'cfit', id: r.id, h: r.fitH });
     if (r.el !== el) { r.el = el; makeFrame(r); }
     if (r.script !== c.script || r.v !== c.v) {
       r.script = c.script; r.v = c.v; r.kills = 0;
       stop(r);
       if (NOCARDS) { fail(r, '壁纸页面接连崩溃了几次，自定义卡片先停止运行：半小时后或者改过卡片脚本后会重新运行'); return; }
       load(r);
-    } else if (resized && r.state === 'ready') { if (r.busy) r.again = true; else tick(r); }   // 卡片高度改了：按新尺寸马上重画（正在画的那张画完再来一轮）
+    } else if (resized && !same && r.state === 'ready') { if (r.busy) r.again = true; else tick(r); }   // 卡片高度改了：按新尺寸马上重画（正在画的那张画完再来一轮）
   }
 
   /** 卡片没了（删掉、挪到别的屏、开始淡出）：停掉脚本。el = 那张卡片的元素（同一个 id 已经换成新元素时不动新的） */
@@ -473,6 +479,7 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
         r.pongAt = Date.now();
         r.def = m; r.state = 'ready';
         r.html = null;   // 脚本重新加载过：只改了 style 的话 render 的结果和上次一样，也要重画
+        if (!m.auto && r.fitH) { r.fitH = 0; post({ t: 'cfit', id: r.id, h: 0 }); }   // 改成了固定高度：宿主不用再记着量出来的高度
         if (r.url) { try { spawner.URL.revokeObjectURL(r.url); } catch (e) {} r.url = null; }
         if (m.style) { try { checkCss(m.style, 'style 字段'); } catch (e) { stop(r); fail(r, e.message); return; } }
         tick(r);
@@ -486,7 +493,7 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
         r.usesWeather = !!m.w;
         try {
           if (m.html.length > MAX_HTML) throw new Error('render() 返回的内容太大（超过 1 MB）');
-          if (m.html !== r.html || r.err) { const nodes = sanitize(m.html); r.html = m.html; paint(r, { nodes, style: r.def.style }); }
+          if (m.html !== r.html || r.err) { const nodes = sanitize(m.html); r.html = m.html; paint(r, { nodes, style: r.def.style, auto: !!r.def.auto }); }
           // 画的期间报了没接住的错（failIdle）：画是画上了，这一轮还是算出错（照样藏着、1 分钟后再试）。
           // 不然每一轮都出这个错的卡片每一轮都要「显示 → 藏起来」闪一下
           if (r.errSeq !== r.seq) ok(r);
@@ -613,10 +620,27 @@ body { box-sizing: border-box; padding: 16px 20px; color: #fff; font: 14px/1.45 
   function paint(r, p) {
     if (!r.doc) { r.pending = p; return; }
     const d = r.doc;
+    d.documentElement.classList.toggle('auto', !!p.auto);
     d.getElementById('u').textContent = p.style || '';
     const frag = d.createDocumentFragment();
     for (const n of p.nodes) frag.appendChild(d.importNode(n, true));
     d.body.replaceChildren(frag);
+    if (p.auto) {
+      fit(r);
+      // 图片还没解码完：它撑开的高度等加载完（解码失败也算）再量一次
+      for (const img of d.images) if (!img.complete) for (const ev of ['load', 'error']) img.addEventListener(ev, () => fit(r), { once: true });
+    }
+  }
+
+  /** 自动高度（autoHeight）的卡片：量内容多高（上下边框各 1px 加上），变了就报给宿主。宿主按它重排，再把新高度发回 layout（update 里认出来，不重画）。
+   *  和宿主 CustomCards.MinHeight / MaxHeight 一致 */
+  const FIT_MIN = 64, FIT_MAX = 720;
+  function fit(r) {
+    if (!r.doc || !r.def || !r.def.auto) return;
+    const h = Math.max(FIT_MIN, Math.min(FIT_MAX, Math.ceil(r.doc.documentElement.getBoundingClientRect().height) + 2));
+    if (h === r.fitH) return;
+    r.fitH = h;
+    post({ t: 'cfit', id: r.id, h });
   }
 
   // ------------------------------------------------------------------ api：Worker 的请求转给宿主

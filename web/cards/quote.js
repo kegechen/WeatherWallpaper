@@ -6,7 +6,8 @@
 //   2. 网上的「一言」（hitokoto.cn）
 //   3. 下面内置的几句
 // 不想要今天这句：卡片设置里点「换一句」马上换（refreshButton）。
-// 演示怎么读文件夹里的文件（api.readText）、怎么联网（api.fetchJson）、拿不到时怎么兜底，以及点了刷新按钮怎么办（api.manual）。
+// 演示怎么读文件夹里的文件（api.readText）、怎么联网（api.fetchJson）、拿不到时怎么兜底，以及点了刷新按钮怎么办（api.manual）；
+// 还有高度怎么跟着内容走（autoHeight）：句子短卡片就矮、句子长卡片就高，不用自己去调高度。
 // 能用的东西（api 都有什么、有哪些规矩）写在「时钟天气示例.js」的开头。
 // ============================================================================
 
@@ -27,13 +28,13 @@ let netDown = 0;   // 上次没从网上取到的时间：之后 10 分钟不再
 
 WeatherWallpaper.card({
   name: '每日一句',
-  height: 116,
+  height: 96,   // 新增卡片、还没画出来时先用这个高度
+  autoHeight: true,   // 画好之后卡片高度按内容来（卡片设置里的高度就不用调了）。要直接写成 true（不能是变量）
   refresh: 86400,   // 每天零点换一句（壁纸启动时也会画一次）
   refreshButton: '换一句',   // 卡片设置里刷新按钮上的字
 
   style: `
-    body { display: flex; flex-direction: column; justify-content: center; }
-    .q { font-size: 16px; line-height: 1.6; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+    .q { font-size: 16px; line-height: 1.6; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }   /* 最多 6 行，再长的才截掉 */
     .from { margin-top: 4px; text-align: right; font-size: 12.5px; opacity: .7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   `,
 
@@ -58,7 +59,8 @@ WeatherWallpaper.card({
       try {
         const j = await api.fetchJson(API_URL);
         if (j && j.hitokoto) {
-          today = { day, q: { text: j.hitokoto, from: (j.from_who || '') + (j.from ? '《' + j.from + '》' : '') } };
+          const book = String(j.from || '').replace(/^《+|》+$/g, '');   // 有的出处自己带了书名号，别套成《《三体》》
+          today = { day, q: { text: j.hitokoto, from: (j.from_who || '') + (book ? '《' + book + '》' : '') } };
           return today.q;
         }
       } catch (e) { /* 没联网、网站出了问题、这个网络上不去：用内置的 */ }

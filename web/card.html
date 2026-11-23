@@ -164,7 +164,7 @@
   #openCards { flex: none; padding: 0 10px; }
   .hstep { flex: none; width: 140px; }
   #custSec > .hint { margin-top: 8px; }
-  #custSec.off .hstep { opacity: .4; pointer-events: none; }
+  #custSec.off .hstep, #custSec.auto .hstep { opacity: .4; pointer-events: none; }   /* auto：脚本写了 autoHeight，高度由内容定，不能调 */
   #custSec.off :disabled { opacity: 1; }
   /* 刷新按钮：联网的脚本（或脚本里写了 refreshButton）才有；等结果时图标转起来 */
   #cref { flex: none; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; }
@@ -415,8 +415,8 @@
     const wOk = !fit || fit.addWeather !== false;
     let h = '<button data-w="1"' + (wOk ? '' : ' disabled title="所有屏幕都放不下新的天气卡片了"') + '>天气卡片<span class="hint">一个城市的天气，可以决定这块屏的天气画面</span></button>'
       + '<div class="sep"></div><div class="mh">自定义卡片 · 内容由 cards 文件夹里的脚本决定</div>';
-    h += S.length ? S.map(s => '<button data-f="' + esc(s.f) + '"' + (s.fits ? '' : ' disabled title="这么高（' + s.height + ' px）的卡片哪块屏都放不下了"') + '>'
-      + esc(s.name || s.f) + '<span class="hint">' + esc(s.f) + '.js · 高 ' + s.height + ' px</span></button>').join('')
+    h += S.length ? S.map(s => '<button data-f="' + esc(s.f) + '"' + (s.fits ? '' : ' disabled title="' + (s.autoH ? '这张卡片' : '这么高（' + s.height + ' px）的卡片') + '哪块屏都放不下了"') + '>'
+      + esc(s.name || s.f) + '<span class="hint">' + esc(s.f) + '.js · ' + (s.autoH ? '高度随内容' : '高 ' + s.height + ' px') + '</span></button>').join('')
       : '<div class="msg">文件夹里还没有卡片脚本</div>';
     h += '<div class="sep"></div><button data-open="1">打开 cards 文件夹…<span class="hint">放进去的每个 .js 文件就是一种卡片，自带几个示例</span></button>';
     m.innerHTML = h;
@@ -511,12 +511,16 @@
     }
     const cur = findScript(S, card.Script);
     sel.value = cur ? cur.f : card.Script;   // 下拉框的值区分大小写：按列表里的写法选
-    const off = !!card.Off, [lo, hi] = hLim();
-    if (document.activeElement !== $('hgt')) $('hgt').value = card.Height;   // 正在输入时不改（打到一半的数字会被换掉）
+    // auto：脚本里写了 autoHeight: true，卡片高度由内容定（桌面上画完量出来的，宿主算进 fit.ch），这里不能调，显示量出来的值
+    // （注意是 autoH：scripts[].auto 是自动取的卡片名）
+    const off = !!card.Off, auto = !!(cur && cur.autoH), [lo, hi] = hLim();
+    const shown = auto && fresh() && fit.ch ? Math.round(fit.ch) : card.Height;
+    if (document.activeElement !== $('hgt')) $('hgt').value = shown;   // 正在输入时不改（打到一半的数字会被换掉）
     $('hgt').min = lo; $('hgt').max = hi;
     $('custSec').classList.toggle('off', off);
-    for (const el of document.querySelectorAll('#custSec .step button, #hgt')) el.disabled = off;
-    $('hRange').textContent = lo + '–' + hi + ' px，宽固定 ' + (fresh() && fit.cw ? Math.round(fit.cw) : 336);
+    $('custSec').classList.toggle('auto', auto);
+    for (const el of document.querySelectorAll('#custSec .step button, #hgt')) el.disabled = off || auto;
+    $('hRange').textContent = (auto ? '随内容自动调整' : lo + '–' + hi + ' px') + '，宽固定 ' + (fresh() && fit.cw ? Math.round(fit.cw) : 336);
     $('hTag').textContent = (fresh() && fit.cw ? Math.round(fit.cw) : 336) + ' × ' + (fresh() && fit.ch ? Math.round(fit.ch) : card.Height);
     // 放不下的提示：这次改的是高度（和设置里保存的不一样）就写在这里，否则写在「位置」下面
     const mine = fresh() && !!fit.saved && fit.saved.height !== card.Height;

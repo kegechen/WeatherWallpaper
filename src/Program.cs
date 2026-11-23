@@ -463,6 +463,8 @@ namespace WeatherWallpaper
         void UpdateLayout(Rectangle? tb = null, bool tbKnown = false)
         {
             if (SyncWalls()) return;   // 卡片换了屏 / 增删：先增减壁纸窗口（里面会再调到这里）
+            // 删掉的卡片量过的高度不用再记着（正在编辑、还没保存的那张不算删掉）
+            foreach (var k in CustomCards.Fit.Keys.Where(k => k != draft?.Id && !settings.Cards.Any(c => c.Id == k)).ToList()) CustomCards.Fit.Remove(k);
             if (!tbKnown) { IntPtr h; tb = TaskbarRect(out h); }
             var shown = walls.Select(w => Screen.AllScreens.FirstOrDefault(s => s.DeviceName == w.DeviceName)).Where(s => s != null).ToList();
             places = CardLayout.Arrange(EffectiveCards(), shown, AreaOf);
@@ -495,6 +497,7 @@ namespace WeatherWallpaper
             // 天气卡片带城市键和显示内容；自定义卡片带脚本名和脚本的修改时间（0 = 文件不在，页面照样去要、拿到"找不到脚本"的错误）
             var cards = string.Join(",", PlacesOn(w).Select(p => "{\"id\":" + WeatherService.JsonStr(p.Card.Id)
                 + (p.Card.IsCustom() ? ",\"script\":" + WeatherService.JsonStr(p.Card.Script) + ",\"v\":" + ScriptVersion(p.Card.Script)
+                    + (CustomCards.IsAuto(p.Card.Script) ? ",\"auto\":true" : "")   // 页面不用它；宿主晚一步才读到脚本写了 autoHeight（文件被占着）时，靠它让 layout 变一下、页面再报一次量出的高度
                     : ",\"key\":" + WeatherService.JsonStr(p.Card.LocKey()) + ",\"show\":" + WeatherService.JsonStr(p.Card.Show))
                 + ",\"x\":" + p.Rect.Value.X.ToString("F1", Inv) + ",\"y\":" + p.Rect.Value.Y.ToString("F1", Inv)
                 + ",\"h\":" + p.Rect.Value.Height.ToString("F1", Inv) + "}"));
@@ -549,6 +552,8 @@ namespace WeatherWallpaper
                     case "cfile": w.Post("{\"t\":\"cfile\",\"rid\":" + (long)num("rid") + "," + CustomCards.ReadFile(str("path"), str("kind")) + "}"); return;
                     case "cget": CardFetch(w, (long)num("rid"), str("id"), str("kind"), str("url"), str("method"), str("body"), d.ContainsKey("headers") ? d["headers"] as Dictionary<string, object> : null, d.ContainsKey("fresh") && true.Equals(d["fresh"])); return;
                     case "cstate": CardState(w, str("id"), str("script"), str("err"), d.ContainsKey("gone")); return;
+                    // 高度随内容变的卡片画好了：页面量出来的高度（h，0 = 脚本不再是自动高度，不用记了）
+                    case "cfit": CardFit(w, str("id"), num("h")); return;
                     // 点了「刷新」的那一轮画完了（ok = 画好了，err = 出错的原因）：告诉卡片设置窗口，按钮那里显示结果
                     case "crefreshed": cardWin?.Post(Js.Serialize(new { t = "refreshed", id = str("id"), err = str("err") ?? "" })); return;
                 }
@@ -559,16 +564,7 @@ namespace WeatherWallpaper
                     if (cw > 0 && Math.Abs(cw - w.CssWidth) > 0.5f)
                     {
                         w.CssWidth = cw;
-                        // 放回消息循环里再重排：重排可能增减、重建壁纸窗口，不能在发消息的这个窗口自己的 WebView2 事件回调里把它销毁。
-                        // 几块屏的页面差不多同时报视口（重建后）：只排一次。
-                        // 同步上下文不在（理论上的防御分支）：宁可跳过这次，也不能在这里同步重排——
-                        // 新的 CssWidth 已经记下，之后任意一次触发重排的事件（设置变化、卡片编辑、重建）会把它用上
-                        var ui = SynchronizationContext.Current;
-                        if (ui != null && !layoutQueued)
-                        {
-                            layoutQueued = true;
-                            ui.Post(_ => { layoutQueued = false; if (quitStage == 0) UpdateLayout(); }, null);
-                        }
+                        QueueLayout();
                     }
                     return;
                 }
@@ -580,6 +576,40 @@ namespace WeatherWallpaper
                 tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
             }
             catch (Exception ex) { Log.Write("scene parse: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// 放回消息循环里再重排：重排可能增减、重建壁纸窗口，不能在发消息的这个窗口自己的 WebView2 事件回调里把它销毁。
+        /// 几块屏的页面差不多同时报（视口、卡片高度，重建后）：只排一次。
+        /// 同步上下文不在（理论上的防御分支）：宁可跳过这次，也不能在这里同步重排——
+        /// 报来的值已经记下，之后任意一次触发重排的事件（设置变化、卡片编辑、重建）会把它用上
+        /// </summary>
+        void QueueLayout()
+        {
+            var ui = SynchronizationContext.Current;
+            if (ui == null || layoutQueued) return;
+            layoutQueued = true;
+            ui.Post(_ => { layoutQueued = false; if (quitStage == 0) UpdateLayout(); }, null);
+        }
+
+        /// <summary>
+        /// 页面报告自动高度（autoHeight）卡片的内容高度：记下来，按它重排。只认真在这块屏上运行的、脚本是自动高度的卡片；
+        /// 一样的不重排（页面每次画完都会量，还会在版面和它量的对不上时再报一次）。h 小于 1 = 清掉。
+        /// </summary>
+        void CardFit(WallpaperWindow w, string id, double h)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            var p = places.FirstOrDefault(x => x.Card.Id == id && x.Host != null && x.Host.DeviceName == w.DeviceName);
+            if (h < 1)
+            {
+                if (CustomCards.Fit.Remove(id)) QueueLayout();
+                return;
+            }
+            if (p == null || !CustomCards.IsAuto(p.Card.Script)) return;
+            int v = CustomCards.ClampHeight(h), old;
+            if (CustomCards.Fit.TryGetValue(id, out old) && old == v) return;
+            CustomCards.Fit[id] = v;
+            QueueLayout();
         }
 
         void Broadcast(string json) { foreach (var w in walls) w.Post(json); flyout?.Post(json); }
@@ -1791,7 +1821,8 @@ namespace WeatherWallpaper
                 var placed = new HashSet<string>(before.Where((k, i) => br[i].HasValue).Select(k => k.Id));
                 var saved = settings.Cards.FirstOrDefault(k => k.Id == c.Id);
                 bool taller = saved != null && CardLayout.HeightOf(c) > CardLayout.HeightOf(saved) + 0.5f;   // 这次多显示了内容、卡片变高了：提示里先建议少显示几项
-                var lower = c.IsCustom() ? "调小卡片高度" : "少显示几项内容";   // 自定义卡片的高度是直接设的
+                // 自定义卡片的高度是直接设的；autoHeight 的卡片高度由内容定，设置里调不了
+                var lower = c.IsCustom() ? (CustomCards.IsAuto(c.Script) ? "缩短卡片内容" : "调小卡片高度") : "少显示几项内容";
                 if (!f.Rects[me].HasValue)
                 {
                     // 本来就放不下、这次也没挪它（只改了名称、城市、显示内容等）：照常保存，只提示；挪到了另一个同样放不下的地方、或者刚取消隐藏 → 不保存
@@ -1936,7 +1967,7 @@ namespace WeatherWallpaper
             var stored = settings.Cards.FirstOrDefault(k => k.Id == draft.Id);
             var saved = stored == null ? null : new { scr = stored.Screen, pos = stored.Pos, x = stored.OffsetX, y = stored.OffsetY, show = stored.Show, height = stored.Height };
             // 自定义卡片：cards 文件夹里的脚本（下拉框、新增菜单用；btn = 「刷新」按钮上的字，null = 没有这个按钮）；这张卡片现在的错误（桌面上不显示它的原因）
-            var scripts = cardScripts.Select(s => new { f = s.File, name = s.Title ?? "", auto = AutoTitle(s, s.File), height = s.Height, fits = fits.Contains(s.Height), btn = s.Button }).ToList();
+            var scripts = cardScripts.Select(s => new { f = s.File, name = s.Title ?? "", auto = AutoTitle(s, s.File), height = s.Height, fits = fits.Contains(s.Height), btn = s.Button, autoH = s.Auto }).ToList();   // auto 是自动取的卡片名；autoH = 脚本写了 autoHeight（高度随内容变）
             string cerr;
             if (!draft.IsCustom() || draft.Off || !cardErrs.TryGetValue(draft.Id, out cerr)) cerr = "";
             // 拖动吸附用：卡片间距、默认边距（页面 CSS 像素），和这边的排版一致；cw / ch = 这张卡片的大小（「卡片内容」里显示）

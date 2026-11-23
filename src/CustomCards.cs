@@ -38,14 +38,33 @@ namespace WeatherWallpaper
             /// <summary>卡片设置里「刷新」按钮上的字：脚本里写的 refreshButton: '换一句'（true = 「立即刷新」）；没写的话联网的脚本（用了 api.fetchJson 等）是「立即刷新」，
             /// 不联网的、写了 refreshButton: false 的是 null（不显示按钮）</summary>
             public string Button;
+            /// <summary>脚本里写了 autoHeight: true：卡片高度随内容变（页面画完量出来报给宿主，见 Fit）；Height 只是量出来之前先用的高度</summary>
+            public bool Auto;
             public bool Unread;   // 扫描时正好被占用、没读出来：Title / Height 是上次的（或默认的），过一会儿再扫（RescanCards）
         }
+
+        /// <summary>
+        /// 高度随内容变的卡片，页面量出来的高度（卡片 id → CSS 像素，已限制在 MinHeight–MaxHeight）。CardLayout.HeightOf 优先用它；
+        /// 还没量过（刚启动、卡片还没画出来）用设置里的高度。卡片因为放不下被撤掉时不清：清了会按矮的重排、放得下、再量出高的、又放不下，来回闪。
+        /// 只在界面线程读写。
+        /// </summary>
+        public static readonly Dictionary<string, int> Fit = new Dictionary<string, int>();
+
+        /// <summary>这个脚本的卡片高度是不是随内容变（按 Scan 读到的，文件名不分大小写）。</summary>
+        public static bool IsAuto(string script)
+        {
+            Script s;
+            return script != null && metaCache.TryGetValue(script, out s) && s.Auto;
+        }
+
+        public static int ClampHeight(double h) => (int)Math.Max(MinHeight, Math.Min(MaxHeight, Math.Round(h)));
 
         static readonly Dictionary<string, Script> metaCache = new Dictionary<string, Script>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> oddNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);   // 名字用不了、跳过的脚本（日志只记一次）
         // 前后都要断开：CSS 里的 line-height: / min-height: 100% / height: 120px 不算
         static readonly Regex TitleRx = new Regex(@"(?<![\w$-])name\s*:\s*(['""`])([^'""`\r\n]{1,40})\1"), HeightRx = new Regex(@"(?<![\w$-])height\s*:\s*(\d{2,3})(?![\w.%])");
         static readonly Regex ButtonRx = new Regex(@"(?<![\w$-])refreshButton\s*:\s*(?:(['""`])([^'""`\r\n]{0,200})\1|(true|false)\b)"), NetRx = new Regex(@"(?<![\w$])fetch(?:Text|Json|Image)(?![\w$])");
+        static readonly Regex AutoRx = new Regex(@"(?<![\w$-])autoHeight\s*:\s*true\b");
         public const string DefaultButton = "立即刷新";
         const int MaxButton = 12;   // 按钮上最多几个字（多的截掉）
 
@@ -82,10 +101,11 @@ namespace WeatherWallpaper
                     var b = ButtonRx.Match(src);
                     int hv;
                     if (t.Success) s.Title = t.Groups[2].Value.Trim();
-                    if (h.Success && int.TryParse(h.Groups[1].Value, out hv)) s.Height = Math.Max(MinHeight, Math.Min(MaxHeight, hv));
+                    if (h.Success && int.TryParse(h.Groups[1].Value, out hv)) s.Height = ClampHeight(hv);
                     // 联不联网看整个脚本（api.fetchJson 写在 data() 里，最外一层看不到）
                     // 写成变量之类认不出来的（refreshButton: LABEL）：当没写
                     s.Button = b.Success ? ButtonText(b) : NetRx.IsMatch(all) ? DefaultButton : null;
+                    s.Auto = AutoRx.IsMatch(src);   // 写成变量之类认不出来的：当没写（页面那边也只认直接写的 true）
                     metaCache[s.File] = s;
                 }
                 catch (Exception)
@@ -94,7 +114,7 @@ namespace WeatherWallpaper
                     // 要等文件夹里再有动静才恢复。名称、高度先用上次读到的（没有就是默认的），不进 metaCache，下次扫描再读；
                     // 脚本本身页面会来要（ReadScript），那时还读不出来就报原因、30 秒后再要
                     if (!File.Exists(fi.FullName)) continue;
-                    if (old != null) { s.Title = old.Title; s.Height = old.Height; s.Button = old.Button; }
+                    if (old != null) { s.Title = old.Title; s.Height = old.Height; s.Button = old.Button; s.Auto = old.Auto; }
                     s.Unread = true;
                 }
                 list.Add(s);

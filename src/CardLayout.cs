@@ -49,11 +49,17 @@ namespace WeatherWallpaper
         /// <summary>
         /// 卡片高度（CSS 像素）：按显示的内容把各段的高度加起来。各段高度、间距与 style.css 里 .card 下各元素写死的 height / margin-top 一一对应，
         /// 改一处要连着改另一处（页面按宿主给的高度画卡片，两边对不上内容会被裁掉或留白）。
-        /// 全显示（不含日期）446，去掉未来几天 291，只留上面部分 166。自定义卡片的高度是设置里写的（Normalize 已限制在 64–720）。
+        /// 全显示（不含日期）446，去掉未来几天 291，只留上面部分 166。自定义卡片的高度是设置里写的（Normalize 已限制在 64–720）；
+        /// 脚本里写了 autoHeight: true 的，用页面量出来的内容高度（CustomCards.Fit），还没量过才用设置里的。
         /// </summary>
         public static float HeightOf(CardSpec c)
         {
-            if (c.IsCustom()) return c.Height ?? CustomCards.DefaultHeight;
+            if (c.IsCustom())
+            {
+                int fit;
+                if (CustomCards.IsAuto(c.Script) && CustomCards.Fit.TryGetValue(c.Id, out fit)) return fit;
+                return c.Height ?? CustomCards.DefaultHeight;
+            }
             float h = 1 + 18 + 20;                                                 // 上边框 + 上内边距 + 城市行
             if (c.Has("date") || c.Has("week") || c.Has("lunar")) h += 3 + 17;      // 日期行
             h += 6 + 76;                                                            // 当前天气
