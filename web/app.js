@@ -312,11 +312,22 @@
   }
 
   // ------------------------------------------------------------------ 云
+  // GPU 重置（GPU 进程崩溃、驱动更新等）后，GPU 上的画布内容全部清空，浏览器重建后发 contextrestored，画布是空白的。
+  // 页面上那三张画布由 resize 重建；这里的离屏画布（云形、上色后的云）只在启动时画一次，不重画的话
+  // 之后所有云都是透明的，天上只剩太阳（实测 WebView2 报 GpuProcessExited 之后就是这样，直到重启程序）
   const SW = 640, SH = 300;
   const masks = [], sprites = [];
+  let spriteKey = '', spriteT = -1e9;
+  const dirtySprites = () => { spriteKey = ''; spriteT = -1e9; };   // 下一次画云时马上按当前颜色重新上色
   function makeMask(seed, flat) {
     const c = document.createElement('canvas'); c.width = SW; c.height = SH;
+    drawMask(c, seed, flat);
+    c.addEventListener('contextrestored', () => { drawMask(c, seed, flat); dirtySprites(); });
+    return c;
+  }
+  function drawMask(c, seed, flat) {
     const g = c.getContext('2d'), R = prng(seed);
+    g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, SW, SH);
     const n = flat ? 26 : 18;
     if (flat) { g.translate(0, SH * 0.3); g.scale(1, 0.45); }
     for (let i = 0; i < n; i++) {
@@ -333,12 +344,14 @@
     const fb = g.createLinearGradient(0, SH * 0.64, 0, SH * 0.86);
     fb.addColorStop(0, 'rgba(0,0,0,0)'); fb.addColorStop(1, 'rgba(0,0,0,1)');
     g.fillStyle = fb; g.fillRect(0, SH * 0.64, SW, SH);
-    return c;
   }
   for (let i = 0; i < 8; i++) masks.push(makeMask(101 + i * 17, false));
   for (let i = 0; i < 4; i++) masks.push(makeMask(907 + i * 31, true));
-  for (let i = 0; i < masks.length; i++) { const c = document.createElement('canvas'); c.width = SW; c.height = SH; sprites.push(c); }
-  let spriteKey = '', spriteT = -1e9;
+  for (let i = 0; i < masks.length; i++) {
+    const c = document.createElement('canvas'); c.width = SW; c.height = SH;
+    c.addEventListener('contextrestored', dirtySprites);
+    sprites.push(c);
+  }
   function recolorSprites(top, bot, t) {
     const key = top.concat(bot).map(v => Math.round(v / 6)).join(',');
     if (key === spriteKey || t - spriteT < 400) return;
@@ -1123,6 +1136,8 @@
     let g = cache.get(c);
     if (!g) {
       g = document.createElement('canvas'); g.width = g.height = 64;
+      const gc = g;
+      gc.addEventListener('contextrestored', () => { if (cache.get(c) === gc) cache.delete(c); });   // GPU 重置后贴图空了：下次用时重画（见「云」那里的说明）
       const gx = g.getContext('2d'), rgb = hex(c), gr = gx.createRadialGradient(32, 32, 0, 32, 32, 32);
       gr.addColorStop(0, css(rgb, 1)); gr.addColorStop(0.3, css(rgb, 0.5)); gr.addColorStop(1, css(rgb, 0));
       gx.fillStyle = gr; gx.fillRect(0, 0, 64, 64);
@@ -1610,6 +1625,7 @@
   function flagSprite() {
     if (flagCvs) return flagCvs;
     const c = document.createElement('canvas'); c.width = 480; c.height = 320;   // 比 1080p 上的旗面（300×200）大一些，2K / 4K 屏上星星也不发虚
+    c.addEventListener('contextrestored', () => { if (flagCvs === c) flagCvs = null; });   // GPU 重置后旗面空了：下次用时重画
     const g = c.getContext('2d'), u = 480 / 30;   // 国旗按 30×20 的网格定星位
     g.fillStyle = '#de2910'; g.fillRect(0, 0, 480, 320);
     g.fillStyle = '#ffde00';
@@ -1784,7 +1800,8 @@
     const dark = [70, 80, 100];
     for (let t = 0; t < 3; t++) {
       const lw = T[t][0] * k * DPR * (1 + 0.4 * lr), ow = lw + 2 * DPR, w = Math.ceil(ow + 2), h = 64;   // 小雨加粗
-      const c = rainSpr[t] || (rainSpr[t] = document.createElement('canvas'));
+      let c = rainSpr[t];
+      if (!c) { c = rainSpr[t] = document.createElement('canvas'); c.addEventListener('contextrestored', () => { rainSprKey = ''; }); }   // GPU 重置后雨丝贴图空了：下一帧重画
       c.width = w; c.height = h;
       const g = c.getContext('2d');
       // 深色描边：落在亮云上的细雨也能看清
