@@ -146,17 +146,19 @@
     if (demo.end && el > demo.end) el = demo.end;   // 快进演示只走一遍，走完停在终点，由宿主切回实时
     return demo.base + el;
   }
-  function sunElev(ms, lat, lon) {
-    const d = ms / 86400000 - 10957.5;
-    const g = (357.529 + 0.98560028 * d) * RAD;
-    const q = 280.459 + 0.98564736 * d;
-    const Lr = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * RAD;
-    const e = (23.439 - 0.00000036 * d) * RAD;
-    const ra = Math.atan2(Math.cos(e) * Math.sin(Lr), Math.cos(Lr));
-    const dec = Math.asin(Math.sin(e) * Math.sin(Lr));
+  // 日、月位置共用的几块（d = 距 J2000.0 的天数）：太阳黄经（度）、黄赤交角、赤经赤纬 → 当地时角与地平高度
+  function sunLon(d) { const g = (357.529 + 0.98560028 * d) * RAD; return 280.459 + 0.98564736 * d + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g); }
+  function obliq(d) { return (23.439 - 0.00000036 * d) * RAD; }
+  function horiz(ra, dec, d, lat, lon) {
     const gmst = ((18.697374558 + 24.06570982441908 * d) % 24 + 24) % 24;
     const ha = (gmst * 15 + lon) * RAD - ra, la = lat * RAD;
-    return Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(ha)) / RAD;
+    return { ha, alt: Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(ha)) / RAD };
+  }
+  function sunElev(ms, lat, lon) {
+    const d = ms / 86400000 - 10957.5, Lr = sunLon(d) * RAD, e = obliq(d);
+    const ra = Math.atan2(Math.cos(e) * Math.sin(Lr), Math.cos(Lr));
+    const dec = Math.asin(Math.sin(e) * Math.sin(Lr));
+    return horiz(ra, dec, d, lat, lon).alt;
   }
   const dayCache = new Map();
   function dayInfo(ms, li) {
@@ -851,9 +853,13 @@
     const storm = clamp(cur.rain * 0.7 + cur.thunder * 0.3 + cur.dark, 0, 1);
     const vis = (1 - smooth(0.45, 1, cur.cloud) * 0.93) * (1 - cur.fog * 0.6);
     const starA = (1 - smooth(-14, -5, e)) * (1 - smooth(0.25, 0.75, cur.cloud)) * (1 - cur.fog);
-    const mp = moonPos(t, li);
-    const moonV = e < -2 && mp.p > 0 && mp.p < 1
-      ? (1 - smooth(-6, -2, e)) * smooth(0, 0.04, mp.p) * (1 - smooth(0.96, 1, mp.p)) * (1 - smooth(0.55, 1, cur.cloud) * 0.9) * (1 - cur.fog * 0.6) : 0;
+    // 月亮升起来就画，不管白天黑夜：夜里亮、带光晕；白天是蓝天上淡淡的一块，细月牙离太阳太近、天一阴、起雾就看不见
+    const mp = moonPos(t, li), night = 1 - smooth(-6, -2, e);
+    const dayMoon = 0.55 * smooth(0.15, 0.4, (1 - Math.cos(TAU * mp.age / SYN)) / 2) * (1 - smooth(0.3, 0.75, cur.cloud)) * (1 - cur.fog);
+    const moonV = mp.p > 0 && mp.p < 1
+      ? smooth(0, 0.04, mp.p) * (1 - smooth(0.96, 1, mp.p)) * (1 - cur.fog * 0.6)
+        * (night * (1 - smooth(0.55, 1, cur.cloud) * 0.9) + (1 - night) * dayMoon) : 0;
+    mp.night = night;
     const sunV = vis * smooth(-4, 0.5, e);
     const rays = sunV > 0.3 && (1 - smooth(1, 22, e)) < 0.97;   // 与 drawSun 画光芒的条件一致
     lastDaylight = daylight;
@@ -921,7 +927,7 @@
     }
 
     // 月亮
-    if (moonV > 0) drawMoon(st.mp, moonV);
+    if (moonV > 0) drawMoon(st.mp, moonV, st.sp);
     // 太阳
     if (e > -4) drawSun(sp, vis);
     // 雨后彩虹（画在天空层，云层盖在上面会自然挡住一部分）
@@ -1736,41 +1742,100 @@
     const pv = PREV[preview];
     if (pv && pv.moon === 'full') return SYN / 2;   // 中秋 / 元宵预览：按满月画（真到了节日那天，月亮本来就是圆的）
     const d = t / 86400000 - 10957.5;
-    const g = (357.529 + 0.98560028 * d) * RAD;
-    const ls = 280.459 + 0.98564736 * d + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g);
-    const Mm = (134.963 + 13.064993 * d) * RAD, D = (297.850 + 12.190749 * d) * RAD;
-    const lm = 218.316 + 13.176396 * d + 6.289 * Math.sin(Mm) + 1.274 * Math.sin(2 * D - Mm) + 0.658 * Math.sin(2 * D)
-      + 0.214 * Math.sin(2 * Mm) - 0.186 * Math.sin(g);
-    return (((lm - ls) % 360 + 360) % 360) / 360 * SYN;
+    return (((moonEcl(d).lm - sunLon(d)) % 360 + 360) % 360) / 360 * SYN;
   }
-  // 月亮每天比太阳晚升起约 50 分钟，即落后太阳 age/SYN 天：把太阳的东升西落整体推迟这么久，就是此刻月亮在天上的位置。
-  // 于是初一与太阳同升同落（夜里看不见），初七八傍晚高挂、半夜落下，十五六日落时东升、整夜可见，二十二三后半夜才升起。
+  // 月亮的黄经、黄纬（度），带上主要摄动项，误差约 0.3°
+  function moonEcl(d) {
+    const S = Math.sin, g = (357.529 + 0.98560028 * d) * RAD;
+    const Mm = (134.963 + 13.064993 * d) * RAD, D = (297.850 + 12.190749 * d) * RAD, F = (93.272 + 13.229350 * d) * RAD;
+    return {
+      lm: 218.316 + 13.176396 * d + 6.289 * S(Mm) + 1.274 * S(2 * D - Mm) + 0.658 * S(2 * D) + 0.214 * S(2 * Mm)
+        - 0.186 * S(g) - 0.114 * S(2 * F),
+      bm: 5.128 * S(F) + 0.281 * S(Mm + F) + 0.278 * S(Mm - F) + 0.173 * S(2 * D - F),
+    };
+  }
+  // 月亮的真实地平高度和时角：黄经黄纬 → 赤经赤纬 → 高度，再扣掉约 1° 的视差（月亮太近，站在地面看要低一点）。
+  // 不能拿"太阳推迟 age/SYN 天"来凑：月亮的赤纬自己会在 ±18.5°～±28.5° 之间摆动，冬天的满月、残月高高在北（太阳在南），
+  // 升得比那样推算的早一两个小时、在天上多待好几个小时（例：2026-11-26 武汉实际 18:51 升起，那样推算要到 20:44）。
+  // 升落时刻都按天气所在城市的经纬度现算（locInfo），不写死任何城市、任何时刻。
+  const MOON_H0 = -0.833;   // 月出月落：月亮上沿碰到地平线（含大气折射），同太阳
+  function moonHz(ms, lat, lon) {
+    const d = ms / 86400000 - 10957.5, S = Math.sin, C = Math.cos, { lm, bm } = moonEcl(d);
+    const L = lm * RAD, B = bm * RAD, ob = obliq(d);
+    const ra = Math.atan2(S(L) * C(ob) - Math.tan(B) * S(ob), C(L));
+    const dec = Math.asin(S(B) * C(ob) + C(B) * S(ob) * S(L));
+    const h = horiz(ra, dec, d, lat, lon);
+    h.alt -= 0.95 * C(h.alt * RAD);
+    return h;
+  }
+  // 包含时刻 t 的这一段：月亮在天上时是 [月出, 月落)，在地平线下时是 [月落, 下次月出)。一段只搜一次，之后直接用缓存。
+  // 高纬度地区月亮可能好几天不落 / 不升，前后 30 小时内找不到升落：这时只缓存半小时，位置按时角算（见 moonPos）
+  let moonSeg = null;
+  function moonArc(t, li) {
+    const c = moonSeg;
+    if (c && c.lat === li.lat && c.lon === li.lon && t >= c.from && t < c.to) return c;
+    const step = 600000, N = 180, el = ms => moonHz(ms, li.lat, li.lon).alt >= MOON_H0;
+    const up = el(t);
+    const edge = dir => {   // 往前 / 往后找升落：步长 10 分钟，找到后二分到 10 秒以内
+      for (let i = 1; i <= N; i++) {
+        let lo = t + dir * (i - 1) * step, hi = t + dir * i * step;
+        if (el(hi) === up) continue;
+        while (Math.abs(hi - lo) > 10000) { const m = (lo + hi) / 2; if (el(m) === up) lo = m; else hi = m; }
+        return (lo + hi) / 2;
+      }
+      return null;
+    };
+    const a = edge(-1), b = edge(1);
+    return moonSeg = a != null && b != null ? { lat: li.lat, lon: li.lon, from: a, to: b, up, a, b }
+      : { lat: li.lat, lon: li.lon, from: t, to: t + 1800000, up, a: null, b: null };
+  }
+  // 月亮在它自己的升落弧上走到哪了：p = 0 刚升起，1 正落下，不在 (0, 1) 里就是在地平线下
   function moonPos(t, li) {
-    const age = moonAge(t);
-    const tm = t - age / SYN * 86400000, di = dayInfo(tm, li);
-    let a = di.rise, b = di.set;
-    if (a == null || b == null) { a = di.mid + 6 * 3600000; b = di.mid + 18 * 3600000; }   // 极夜：按 6 点升 18 点落
-    const p = (tm - a) / (b - a), hz = horizonY();
+    const age = moonAge(t), hz = horizonY(), pv = PREV[preview];
+    let p;
+    if (pv && pv.moon === 'full') {
+      // 中秋 / 元宵预览按满月画，但预览的日子不一定真是满月：满月与太阳相对，就按太阳的东升西落推迟半天
+      const tm = t - 43200000, di = dayInfo(tm, li);
+      let a = di.rise, b = di.set;
+      if (a == null || b == null) { a = di.mid + 6 * 3600000; b = di.mid + 18 * 3600000; }   // 极夜：按 6 点升 18 点落
+      p = (tm - a) / (b - a);
+    } else {
+      const s = moonArc(t, li);
+      if (s.a != null) p = s.up ? (t - s.a) / (s.b - s.a) : -1;
+      else {
+        // 找不到升落（高纬度）：按时角连续地走，中天时在正当中，下中天时在两头（那里会淡出淡入）
+        const h = moonHz(t, li.lat, li.lon), ha = ((h.ha / TAU) % 1 + 1.5) % 1 - 0.5;   // 归到 [-0.5, 0.5) 圈
+        p = h.alt >= MOON_H0 ? 0.5 + ha : -1;
+      }
+    }
     return { age, p, x: W * (0.12 + 0.76 * p), y: hz - (hz - H * 0.16) * Math.sin(Math.PI * p) * 0.9 };
   }
 
-  function drawMoon(mp, v) {
+  function drawMoon(mp, v, sp) {
     if (v < 0.01) return;
-    const { x, y, age, p } = mp, hz = horizonY();
+    const { x, y, age, p, night } = mp, hz = horizonY();
     const ph = Math.cos(TAU * age / SYN), illum = (1 - ph) / 2;
     const r = Math.min(W, H) * 0.026;
-    ctx.globalCompositeOperation = 'lighter';
-    const gg = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 9);
-    gg.addColorStop(0, `rgba(200,215,255,${0.22 * v * (0.3 + illum)})`); gg.addColorStop(1, 'rgba(200,215,255,0)');
-    ctx.fillStyle = gg; ctx.fillRect(x - r * 9, y - r * 9, r * 18, r * 18);
-    ctx.globalCompositeOperation = 'source-over';
-    // 亮面朝向太阳：太阳在同一条天弧上领先月亮 age/SYN 圈（已落到地平线下），取两者连线方向。
-    // 傍晚西边的月牙亮面朝下偏右，后半夜东边的残月亮面朝左下
+    if (night > 0.01) {   // 月晕只在夜里有：白天的天空比它亮
+      ctx.globalCompositeOperation = 'lighter';
+      const gg = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 9);
+      gg.addColorStop(0, `rgba(200,215,255,${0.22 * v * night * (0.3 + illum)})`); gg.addColorStop(1, 'rgba(200,215,255,0)');
+      ctx.fillStyle = gg; ctx.fillRect(x - r * 9, y - r * 9, r * 18, r * 18);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    // 亮面朝向太阳。夜里太阳在地平线下：当它在同一条天弧上领先月亮 age/SYN 圈，取两者连线方向——
+    // 傍晚西边的月牙亮面朝下偏右，后半夜东边的残月亮面朝左下（画面上太阳的横坐标到了午夜会从右头跳到左头，夜里不能拿它算）。
+    // 白天太阳就画在天上：直接朝着它；晨昏两种方向按 night 过渡
     const th = Math.PI * p, ts = th + TAU * age / SYN;
-    const ang = Math.atan2((hz - H * 0.16) * 0.9 * (Math.sin(th) - Math.sin(ts)), W * 0.38 * (Math.cos(th) - Math.cos(ts)));
+    let dx = W * 0.38 * (Math.cos(th) - Math.cos(ts)), dy = (hz - H * 0.16) * 0.9 * (Math.sin(th) - Math.sin(ts));
+    if (night < 0.99) {
+      const n1 = Math.hypot(dx, dy) || 1, sx = sp.x - x, sy = sp.y - y, n2 = Math.hypot(sx, sy) || 1;
+      dx = night * dx / n1 + (1 - night) * sx / n2; dy = night * dy / n1 + (1 - night) * sy / n2;
+    }
+    const ang = Math.atan2(dy, dx);
     ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
-    // 暗面的灰光是地照（"新月抱旧月"）：只有细月牙时看得见，月亮越满越淡，过了上弦就没了
-    const es = 0.12 * v * (1 - smooth(0.12, 0.5, illum));
+    // 暗面的灰光是地照（"新月抱旧月"）：只有细月牙时看得见，月亮越满越淡，过了上弦就没了；白天看不见
+    const es = 0.12 * v * night * (1 - smooth(0.12, 0.5, illum));
     if (es > 0.004) {
       ctx.fillStyle = `rgba(160,170,195,${es})`;
       ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
