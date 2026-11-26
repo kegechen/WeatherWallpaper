@@ -1,0 +1,128 @@
+#!/usr/bin/python3 -I
+# 天气壁纸设置的提权助手：设置窗口 wwp-settings 通过 pkexec 调用（polkit 动作 io.github.wwp.weather.configure，
+# 本机活动会话免密码），把配置写进 /etc/wwp/weather.json，自选的底层壁纸存到 /var/lib/wwp/。
+# factory 以 dde 用户运行，读不到用户家目录，所以配置和图片都要放到系统目录里，普通用户写不了，要经过这里。
+#
+# stdin 是一个 JSON 对象：
+#   config  整份配置（对象，写进 weather.json；值只能是数字、字符串、布尔、null 或字符串数组）
+#   image   可选：底层壁纸的 JPEG 数据（base64）。设置窗口以当前用户身份读图、转成 JPEG 再交过来，
+#           这里只认 JPEG 数据、不按路径读文件（以 root 读用户给的路径，等于让人借 root 读任意文件）。
+#           有它时把 config.backdrop（和指向同一张原图的 lastBackdrop）设成存下来的图片
+# 成功时 stdout 输出写进去的配置；失败时 stderr 一行原因，退出码 1。
+import base64, json, os, sys, time
+
+CFG = '/etc/wwp/weather.json'
+IMG_DIR = '/var/lib/wwp'
+IMG_PREFIX = 'backdrop-'
+MAX_IN = 48 << 20          # stdin 最多 48 MB（图片 base64 之后）
+MAX_CFG = 64 << 10
+# 写文件时的字段顺序（其余按字母排在后面）
+ORDER = ['city', 'lat', 'lon', 'backdrop', 'lastBackdrop', 'minimal', 'playSeconds', 'show', 'hide', 'panel', 'cardPos', 'cardX', 'cardY',
+         'skyOpacity', 'cloudAlpha', 'festive', 'fps', 'refresh']
+
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def check_value(k, v):
+    if v is None or isinstance(v, (bool, int, float, str)):
+        if isinstance(v, str) and len(v) > 4096:
+            fail('配置项 %s 太长' % k)
+        if isinstance(v, float) and (v != v or v in (float('inf'), float('-inf'))):
+            fail('配置项 %s 不是有效的数字' % k)
+        return
+    if isinstance(v, list) and all(isinstance(x, str) and len(x) < 64 for x in v) and len(v) < 64:
+        return
+    fail('配置项 %s 的值不认识：只能是数字、字符串、布尔、null 或字符串数组' % k)
+
+
+def write_atomic(path, data, mode=0o644):
+    tmp = '%s.tmp%d' % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def safe_dir(path):
+    # 目录必须是 root 的、别人不可写（否则可以往里放符号链接）
+    os.makedirs(path, mode=0o755, exist_ok=True)
+    st = os.lstat(path)
+    if not os.path.isdir(path) or os.path.islink(path) or st.st_uid != 0 or st.st_mode & 0o022:
+        fail('%s 不是 root 独占的目录，不往里写' % path)
+
+
+def main():
+    if os.geteuid() != 0:
+        fail('要以 root 运行（设置窗口通过 pkexec 调用）')
+    raw = sys.stdin.buffer.read(MAX_IN + 1)
+    if len(raw) > MAX_IN:
+        fail('数据太大（图片请小于 30 MB）')
+    try:
+        req = json.loads(raw)
+    except ValueError as e:
+        fail('输入不是 JSON：%s' % e)
+    if not isinstance(req, dict) or not isinstance(req.get('config'), dict):
+        fail('输入里没有 config 对象')
+    cfg = req['config']
+    for k, v in cfg.items():
+        if not isinstance(k, str) or not k or len(k) > 64:
+            fail('配置项名字不对')
+        check_value(k, v)
+
+    img = req.get('image')
+    if img:
+        try:
+            data = base64.b64decode(img, validate=True)
+        except ValueError:
+            fail('图片数据不是 base64')
+        if not data.startswith(b'\xff\xd8\xff') or len(data) < 100:
+            fail('图片数据不是 JPEG')
+        safe_dir(IMG_DIR)
+        name = '%s%d.jpg' % (IMG_PREFIX, time.time_ns())
+        write_atomic(os.path.join(IMG_DIR, name), data)
+        stored = os.path.join(IMG_DIR, name)
+        # 设置窗口发来的 backdrop / lastBackdrop 是用户家目录里的原图路径（factory 读不到），都换成存下来的这张：
+        # 不然切回“天气动画”再切回“壁纸叠加”时，会从 lastBackdrop 恢复出那个读不到的路径
+        if cfg.get('lastBackdrop') in (None, '', cfg.get('backdrop')):
+            cfg['lastBackdrop'] = stored
+        cfg['backdrop'] = stored
+
+    # 要保留的已存图片：backdrop（正在叠加的）和 lastBackdrop（天气动画模式下记着、切回叠加时用）引用的
+    keep = set()
+    for k in ('backdrop', 'lastBackdrop'):
+        b = cfg.get(k)
+        if isinstance(b, str) and os.path.dirname(b) == IMG_DIR:
+            keep.add(os.path.basename(b))
+
+    text = json.dumps({k: cfg[k] for k in sorted(cfg, key=lambda k: (ORDER.index(k) if k in ORDER else len(ORDER), k))},
+                      ensure_ascii=False, indent=4) + '\n'
+    if len(text) > MAX_CFG:
+        fail('配置太大')
+    safe_dir(os.path.dirname(CFG))
+    write_atomic(CFG, text.encode('utf-8'))
+
+    # 不再用的旧图片删掉（每次换图都是新文件名：页面按路径判断要不要重新读图）
+    if os.path.isdir(IMG_DIR) and not os.path.islink(IMG_DIR):
+        for n in os.listdir(IMG_DIR):
+            if n.startswith(IMG_PREFIX) and n.endswith('.jpg') and n not in keep:
+                try:
+                    os.unlink(os.path.join(IMG_DIR, n))
+                except OSError:
+                    pass
+    sys.stdout.write(text)
+
+
+main()

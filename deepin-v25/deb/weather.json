@@ -1,0 +1,7 @@
+{
+    "city": "",
+    "backdrop": "",
+    "minimal": false,
+    "playSeconds": 30,
+    "show": "hilo,src,aqi,feel,hum,wind,hours,days,sun,upd"
+}

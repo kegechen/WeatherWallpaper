@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- 天气壁纸设置窗口（wwp-settings）保存配置时用 pkexec 运行 wwp-config：
+     本机正在使用的会话直接放行（和在控制中心换壁纸一样，不弹密码），远程、后台会话要管理员密码 -->
+<policyconfig>
+  <action id="io.github.wwp.weather.configure">
+    <description>Change weather wallpaper settings</description>
+    <description xml:lang="zh_CN">修改天气壁纸的设置</description>
+    <message>Authentication is required to change weather wallpaper settings</message>
+    <message xml:lang="zh_CN">修改天气壁纸的设置需要认证</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/wwp-config</annotate>
+  </action>
+</policyconfig>

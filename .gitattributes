@@ -1,0 +1,4 @@
+# deepin-v25/ 是在 Linux 上编译、运行的（sh 脚本、Python 助手、QML、deb 维护脚本、版本号文件）：
+# 在 Windows 上检出（core.autocrlf=true）也必须保持 LF，否则同步到设备后脚本带 \r 跑不起来。
+# text=auto：图片等二进制文件 git 自己认出来，不做换行转换
+deepin-v25/** text=auto eol=lf

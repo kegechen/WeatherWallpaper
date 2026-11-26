@@ -1,0 +1,148 @@
+name: deepin-v25-deb
+
+# 构建 deepin 25（treeland）版天气壁纸的 deb 安装包（deepin-v25/），arm64、amd64 各一个，
+# 在官方 deepin 25（crimson）容器里原生编译，和真机上 install.sh build + deb/build-deb.sh 走同一套脚本。
+#   * push 到任意分支 / PR：改到 deepin-v25/、web/ 或本文件时试构建，deb 作为 workflow artifact 下载
+#   * 发布 GitHub Release：版本号取 tag（去掉开头的 v），deb 传到该 Release
+#   * 手动触发：可填版本号，留空用 deepin-v25/deb/version
+on:
+  push:
+    # 写了 branches 就不会因为推 tag 再跑一遍（发版走下面的 release 事件）
+    branches: ['**']
+    paths:
+      - 'deepin-v25/**'
+      - 'web/**'
+      - '.github/workflows/deepin-v25-deb.yml'
+  pull_request:
+    paths:
+      - 'deepin-v25/**'
+      - 'web/**'
+      - '.github/workflows/deepin-v25-deb.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'deb 版本号，如 0.2.0；留空用 deepin-v25/deb/version'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: deb (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            image: linuxdeepin/deepin:crimson-arm64
+          - arch: amd64
+            runner: ubuntu-24.04
+            image: linuxdeepin/deepin:crimson
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+      # 离线渲染缩略图时 Qt WebEngine（Chromium）要用共享内存，Docker 默认的 64 MB 不够
+      options: --shm-size=2g
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: 装编译依赖
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential cmake ninja-build pkg-config dpkg-dev file python3 \
+            qt6-base-dev qt6-base-private-dev qt6-base-dev-tools qt6-qpa-plugins \
+            qt6-declarative-dev qt6-declarative-private-dev qt6-declarative-dev-tools \
+            qt6-wayland-dev qt6-wayland-private-dev qt6-wayland-dev-tools \
+            qt6-webengine-dev qt6-webengine-dev-tools \
+            libdtk6core-dev treeland-protocols libwayland-dev libwayland-bin libmpv-dev \
+            qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-controls \
+            qml6-module-qtquick-templates qml6-module-qtquick-dialogs qml6-module-qtquick-layouts \
+            qml6-module-qtqml-workerscript qml6-module-qtwebengine \
+            fonts-noto-cjk
+
+      - uses: actions/checkout@v4
+
+      - name: 版本号
+        id: ver
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            release) v=${TAG#v} ;;
+            workflow_dispatch) v=${INPUT_VERSION#v} ;;
+            *) v= ;;
+          esac
+          [ -n "$v" ] || v=$(cat deepin-v25/deb/version)
+          case "$v" in
+            [0-9]*) ;;
+            *) echo "版本号要以数字开头：$v"; exit 1 ;;
+          esac
+          case "$v" in
+            *[!0-9A-Za-z.+~-]*) echo "版本号里有 deb 不允许的字符：$v"; exit 1 ;;
+          esac
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # install.sh build 和 build-deb.sh 都拒绝 root 运行（和真机一样用普通用户）。
+      # 容器里 Chromium 的沙箱用不了（没有 user namespace），离线渲染缩略图时关掉；共享内存也改走 /tmp
+      # （和 kirin9006c-deepin25 一键装机脚本在 chroot 里编译时的做法一样）
+      - name: 编译并离线渲染缩略图
+        run: |
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          runuser -u builder -- env HOME=/home/builder QTWEBENGINE_DISABLE_SANDBOX=1 \
+            QTWEBENGINE_CHROMIUM_FLAGS='--no-sandbox --disable-dev-shm-usage' \
+            sh deepin-v25/install.sh build
+          ls -l deepin-v25/build/pkg/*/
+
+      - name: 打 deb
+        env:
+          DEB_VERSION: ${{ steps.ver.outputs.version }}
+          DEB_MAINTAINER: ${{ github.repository_owner }} <${{ github.repository_owner }}@users.noreply.github.com>
+        run: |
+          runuser -u builder -- env HOME=/home/builder DEB_VERSION="$DEB_VERSION" DEB_MAINTAINER="$DEB_MAINTAINER" \
+            sh deepin-v25/deb/build-deb.sh
+          dpkg-deb -I deepin-v25/build/*.deb
+          dpkg-deb -c deepin-v25/build/*.deb
+
+      # 装一遍再卸一遍：依赖在 deepin 25 仓库里都装得上，postinst / postrm 能跑通，卸载后动态壁纸列表里不留天气壁纸
+      - name: 试装、试卸
+        run: |
+          apt-get install -y --no-install-recommends ./deepin-v25/build/*.deb
+          META=/usr/share/wallpapers/deepin-livewallpapers/metadata.json
+          grep -q '"wwp-weather-web"' "$META"
+          test -f /usr/local/share/wallpapers/wwp/weather-web/weather-web.wwp
+          apt-get remove -y wwp-weather-wallpaper
+          if [ -e "$META" ] && grep -q '"wwp-' "$META"; then echo "卸载后列表里还有天气壁纸"; exit 1; fi
+          test ! -e /usr/local/share/wallpapers/wwp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wwp-weather-wallpaper-${{ steps.ver.outputs.version }}-${{ matrix.arch }}
+          path: deepin-v25/build/*.deb
+          if-no-files-found: error
+
+  release:
+    needs: deb
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wwp-weather-wallpaper-*
+          path: debs
+          merge-multiple: true
+
+      - name: 传到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" debs/*.deb --clobber --repo "$GITHUB_REPOSITORY"

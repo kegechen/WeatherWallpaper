@@ -84,6 +84,10 @@ CPU 按桌面完全露出时测的；桌面被其它窗口大面积遮挡时会�
 
 需要 Windows 10/11 x64 和 WebView2 运行时（Windows 11 自带）。退出程序后会恢复原来的系统壁纸。
 
+deepin 25（treeland）另有一个版本：Releases 里的 `wwp-weather-wallpaper_x.y.z_arm64.deb` / `_amd64.deb`，
+`sudo apt install ./wwp-weather-wallpaper_*.deb` 装好后在控制中心 → 个性化 → 壁纸 → 动态壁纸里选“天气壁纸”，
+启动器里的“天气壁纸设置”可调底层壁纸、卡片位置和内容。说明和源码见 [deepin-v25/](deepin-v25/README.md)。
+
 ## 使用
 
 - **左键**托盘图标：弹出天气面板（刷新天气、卡片设置、更多设置）。程序已在运行时，再从开始菜单打开一次也会弹出这个面板。
