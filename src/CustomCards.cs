@@ -24,9 +24,12 @@ namespace WeatherWallpaper
 
         public static string Dir => Path.Combine(Settings.AppDataDir, "cards");
 
-        /// <summary>文件夹不在就建上，放几个示例进去（随程序分发的 web/cards/ 下的英文名 → 放进用户文件夹时的名字）。</summary>
+        /// <summary>文件夹不在就建上，放几个示例进去（随程序分发的 web/cards/ 下的英文名 → 放进用户文件夹时的名字）；没改过的示例换成新版。
+        /// 后面的指纹是 0.9.4 及以前发过的各版（见 ScriptDir.Ensure），以后改示例不用往这里加。</summary>
         public static void EnsureDir() => ScriptDir.Ensure(Dir, "cards",
-            new[] { @"cards\clock.js", "时钟天气示例.js" }, new[] { @"cards\countdown.js", "倒计时示例.js" }, new[] { @"cards\quote.js", "每日一句示例.js" });
+            new[] { @"cards\clock.js", "时钟天气示例.js", "f2474e27a3f1ab6b", "ee363471c3c10e0c", "a5979dbd2720d9a4" },
+            new[] { @"cards\countdown.js", "倒计时示例.js", "62267d2b0ea780a0" },
+            new[] { @"cards\quote.js", "每日一句示例.js", "7f09bfe6d031f455", "df32e6cdac856ba1", "3cb5464186ea7af6", "b5b566ad256d7d51" });
 
         /// <summary>cards 文件夹里的一个卡片脚本。Title / Height 是从源码里粗略找出来的 name / height（卡片设置里显示、新增时的默认高度用），找不到为 null / DefaultHeight。</summary>
         public class Script
