@@ -79,6 +79,8 @@ rm -rf "$SHL"
 # QML 模块是运行时按 import 加载的，dpkg-shlibdeps 看不到，按 QML 文件里的 import 手写：
 #   factory 的 Image/Video.qml、设置窗口：QtQuick、QtQuick.Controls、QtQuick.Dialogs、QtQuick.Layouts；网页版壁纸包：QtWebEngine
 QML_DEPS="qml6-module-qtquick, qml6-module-qtquick-window, qml6-module-qtquick-controls, qml6-module-qtquick-templates, qml6-module-qtquick-dialogs, qml6-module-qtquick-layouts, qml6-module-qtqml-workerscript, qml6-module-qtwebengine"
+# QtWebEngineProcess（Chromium 的渲染进程）单独在 -bin 包里，WebEngine 的库都不依赖它，没装时网页版壁纸一加载就 abort
+QML_DEPS="$QML_DEPS, libqt6webenginecore6-bin"
 # treeland：factory 由它拉起。这个 factory 是从 treeland 0.11 的 wallpaper-factory 改出来的、和它的私有壁纸协议绑在一起，
 #   限定 0.11.x：treeland 出 0.12 时 apt 会先挡住升级（或要求先卸掉本包），而不是升级完壁纸全黑
 # python3：提权助手 wwp-config；pkexec：设置窗口保存时提权

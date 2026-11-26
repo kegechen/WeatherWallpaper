@@ -31,6 +31,8 @@
 //   playSeconds 每次播放天气动画的秒数（极简模式的播放、雨后彩虹共用，5–3600，默认 30）
 //   skyOpacity  叠加时天空的不透明度（0.05–1，默认 0.45）；cloudAlpha 云的不透明度（0.1–1，默认 0.72）
 //   refresh     取天气的间隔（分钟，5–180，默认 15）
+//   preview     效果预览（默认空 = 实时天气）：clear sunrise sunset night partly cloudy fog drizzle rain heavy thunder snow rainbow，
+//               节日 cny lantern dragon midautumn national newyear halloween xmas easter；后面加 " day" 是按这种天气一天快进
 (() => {
   'use strict';
   if (window.top !== window) return;   // 只管主页面（自定义卡片的 iframe 不要）
@@ -178,7 +180,7 @@
       if (!setUserCfg(t, false)) return;   // 坏文件：cfgText 不更新，下次再读
       cfgText = t;
       if (!ready) return;   // 页面还没好：onReady 会按新配置发
-      sendLayout(); updateBackdrop(); applyLockZoom();
+      sendLayout(); updateBackdrop(); applyLockZoom(); sendPreview();
       if (old.minimal && !minimal() && fx.kind && fx.kind !== 'rainbow') { log('关了极简模式，停掉 ' + fx.kind); fx.kind = null; }
       if (old.loc !== locSig()) {
         log('位置配置变了，重新取天气');
@@ -190,13 +192,26 @@
     } finally { watching = false; }
   }
 
+  // 效果预览（同 Windows 版的托盘“效果预览” / preview 命令，录演示视频、调效果用）：配置里 "preview": "heavy"，
+  // 天气或节日的名字见 web/app.js 的 PREV；"clear day" = 按这种天气一天快进；不填或 "live" = 实时天气。
+  // 缩略图画多云（太阳、白云、蓝天都有，明亮；雨太灰，叠在控制中心列表里像出了故障）
+  let sentPreview = '';
+  function sendPreview(force) {   // force：页面刚好（含渲染进程崩溃后重载），不管上次发过什么都发
+    const w = SNAPSHOT ? ['partly'] : typeof cfg.preview === 'string' ? cfg.preview.trim().toLowerCase().split(/\s+/) : [];
+    const m = { t: 'preview', mode: w[0] || 'live', day: w[1] === 'day' };
+    const sig = m.mode + (m.day ? ' day' : '');
+    if (sig === sentPreview && !force) return;
+    if (sentPreview || m.mode !== 'live') log('效果预览：' + sig);
+    sentPreview = sig;
+    send(m);
+  }
+
   async function onReady() {
     await cfgReady;
     ready = true;
     sendLayout(true);
     if (locked) applyLockZoom();
-    // 缩略图画多云（太阳、白云、蓝天都有，明亮；雨太灰，叠在控制中心列表里像出了故障）。day 是"一天的延时演示"，不是白天，别开
-    send({ t: 'preview', mode: SNAPSHOT ? 'partly' : 'live', day: false });
+    sendPreview(true);
     fxSent = fx.kind;   // 页面重载（渲染进程崩溃）时正在播的接着播
     send({ t: 'fx', kind: fx.kind });
     if (payload) send(payload);

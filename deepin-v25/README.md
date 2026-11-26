@@ -140,6 +140,7 @@ factory 以 `dde` 用户运行，读不到用户家目录，所以放在 /etc）
 | `ground` | 0.0444 | 底部任务栏占屏幕高度的比例（雨雪落在它上沿） |
 | `festive` | true | 节日装饰与彩蛋 |
 | `refresh` | 15 | 取天气的间隔（分钟，5–180） |
+| `preview` | 空 | 效果预览（同 Windows 版托盘的“效果预览”，录演示视频、调效果用）：`clear` `sunrise` `sunset` `night` `partly` `cloudy` `fog` `drizzle` `rain` `heavy` `thunder` `snow` `rainbow`，节日 `cny` `lantern` `dragon` `midautumn` `national` `newyear` `halloween` `xmas` `easter`；后面加 ` day`（如 `"clear day"`）是按这种天气 48 秒走完一天。一直生效到删掉这一项（或写 `live`） |
 
 `backdrop` 指向的图片要让 `dde` 用户读得到：家目录里的图片读不了，请复制到 `/usr/local/share/wallpapers/` 之类的地方
 （系统自带的在 `/usr/share/wallpapers/deepin/`）。读不到时日志里有一行“底层壁纸读不到”，画面退回纯色。
@@ -208,7 +209,7 @@ sudo dpkg -r wwp-weather-wallpaper   # 卸载，见下
   `/etc/wwp/weather.json`（conffile）和 `/var/lib/wwp` 的自选壁纸保留，`dpkg -P` 才删。没登录的用户 treeland 还记着旧路径，
   下次登录后在控制中心重选一张即可。
 - **依赖**：动态库用 `dpkg-shlibdeps` 按二进制直接链接的库算（带版本）；运行时加载的 QML 模块（`qml6-module-*`）、
-  `python3`、`pkexec` 手写；Chameleon 风格是 Recommends。架构随打包机（`dpkg --print-architecture`）。
+  Chromium 渲染进程 `QtWebEngineProcess`（`libqt6webenginecore6-bin`，WebEngine 的库包不依赖它）、`python3`、`pkexec` 手写；Chameleon 风格是 Recommends。架构随打包机（`dpkg --print-architecture`）。
   `treeland` 限定 0.11.x（`>= 0.11~, << 0.12~`）：factory 是从 0.11 改出来的，和它的私有壁纸协议绑定，
   treeland 出新版本时 apt 会先挡住它的升级（或要求先卸掉本包），要拿新版本重新合一遍 factory、发新 deb。
 - **版本号**：`deb/version`；环境变量 `DEB_VERSION` 可覆盖（CI 用）；`DEB_MAINTAINER` 默认 GitHub noreply 地址，

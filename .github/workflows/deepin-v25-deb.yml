@@ -50,6 +50,7 @@ jobs:
       options: --shm-size=2g
     env:
       DEBIAN_FRONTEND: noninteractive
+      LANG: C.UTF-8
     steps:
       - name: 装编译依赖
         run: |
@@ -63,7 +64,7 @@ jobs:
             libdtk6core-dev treeland-protocols libwayland-dev libwayland-bin libmpv-dev \
             qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-controls \
             qml6-module-qtquick-templates qml6-module-qtquick-dialogs qml6-module-qtquick-layouts \
-            qml6-module-qtqml-workerscript qml6-module-qtwebengine \
+            qml6-module-qtqml-workerscript qml6-module-qtwebengine libqt6webenginecore6-bin \
             fonts-noto-cjk
 
       - uses: actions/checkout@v4
@@ -96,7 +97,7 @@ jobs:
         run: |
           useradd -m builder
           chown -R builder: "$GITHUB_WORKSPACE"
-          runuser -u builder -- env HOME=/home/builder QTWEBENGINE_DISABLE_SANDBOX=1 \
+          runuser -u builder -- env HOME=/home/builder LANG=C.UTF-8 QTWEBENGINE_DISABLE_SANDBOX=1 \
             QTWEBENGINE_CHROMIUM_FLAGS='--no-sandbox --disable-dev-shm-usage' \
             sh deepin-v25/install.sh build
           ls -l deepin-v25/build/pkg/*/
