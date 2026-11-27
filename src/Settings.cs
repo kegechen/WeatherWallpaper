@@ -139,8 +139,8 @@ namespace WeatherWallpaper
         // 每次播放天气动画的秒数（极简模式播放、雨后彩虹、效果预览共用）。声明成 object：用户手写成字符串、小数或超出 int 的大数时，按 int 反序列化会让整个文件读取失败；
         // 这里什么值都先收下，加载后由 NormalizePlaySeconds 校验，不合法就回到默认值
         public object PlaySeconds { get; set; } = DefaultPlaySeconds;
-        public bool AutoUpdate { get; set; } = true;   // 启动时及之后每 12 小时自动检查更新
-        public string SkipVersion { get; set; }        // 用户选择"跳过此版本"的版本号
+        public bool AutoUpdate { get; set; } = true;   // 启动时及之后每 12 小时检查更新；查到后后台下载，下次启动自动装上
+        public string SkipVersion { get; set; }        // 旧版本的「跳过此版本」：现在不再有这个选项，只为兼容旧设置文件保留字段
 
         public static string AppDataDir => Dir(Environment.SpecialFolder.ApplicationData);
         public static string LocalDir => Dir(Environment.SpecialFolder.LocalApplicationData);
@@ -418,8 +418,8 @@ namespace WeatherWallpaper
             ["CloudAlpha"] = "壁纸叠加时云的不透明度：" + MinCloudAlpha + "–" + MaxCloudAlpha + " 的小数，如 " + DefaultCloudAlpha +
                 "（越小云越透，壁纸从云后面露出来的越多）",
             ["PlaySeconds"] = "每次播放天气动画的时长（极简模式的天气变化播放、雨后彩虹、托盘「效果预览」都用它），单位秒，" + MinPlaySeconds + "–" + MaxPlaySeconds + " 的整数，如 30；写错按默认 " + DefaultPlaySeconds + " 秒",
-            ["AutoUpdate"] = "自动检查更新：true / false",
-            ["SkipVersion"] = "已选择跳过的版本号，null = 不跳过",
+            ["AutoUpdate"] = "自动更新：true / false（后台下载，下次启动自动装上）",
+            ["SkipVersion"] = "旧版本用来跳过某个版本，现在已经无效，不需要再填",
         };
 
         /// <summary>

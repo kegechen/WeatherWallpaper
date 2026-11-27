@@ -159,10 +159,14 @@
     if (st.state === 'installing') { icon = 'spin'; title = '正在更新'; sub = st.msg || ''; btn = '立即更新'; busy = true; }
     else if (st.state === 'checking') { icon = 'spin'; title = '正在检查更新…'; sub = at; busy = true; }
     else if (st.state === 'newer') {
-      icon = 'up'; cls = 'new'; title = '发现新版本 ' + st.tag + (st.skipped ? '（已选择跳过）' : '');
+      icon = 'up'; cls = 'new'; title = '发现新版本 ' + st.tag;
       // 自动更新失败过：把原因显示出来，按钮仍可重试
-      if (st.msg) { sub = st.msg; subBad = true; } else sub = st.dev ? '开发版不自动更新，可以去下载页手动安装' : '下载后自动安装并重新启动，设置都会保留';
-      btn = st.dev ? '打开下载页' : '立即更新'; primary = true;
+      if (st.msg) { sub = st.msg; subBad = true; }
+      else if (st.dev) sub = '开发版不自动更新，可以去下载页手动安装';
+      else if (!st.auto) sub = '自动检查已关闭 · 点一下立刻下载并重启更新';
+      else sub = st.staged ? '已下载好 · 点一下立刻重启更新，或者下次启动自动生效'
+        : '正在后台下载 · 点一下立刻更新，或者下次启动自动生效';
+      btn = st.dev ? '打开下载页' : '重启更新'; primary = true;
     }
     else if (st.state === 'error') { icon = 'bad'; cls = 'bad'; title = '检查更新失败'; sub = st.msg || ''; subBad = true; btn = '重试'; }
     else if (st.state === 'latest') { icon = 'ok'; cls = 'ok'; title = '已是最新版本'; sub = at; }
@@ -177,7 +181,7 @@
     b.dataset.act = st.state === 'newer' ? 'install' : 'check';
     $('auto').checked = !!st.auto;
     // 有新版本时只在托盘菜单、天气面板和这里提示，不弹窗
-    $('autoS').textContent = st.dev ? '开发版（从源码构建）不自动检查' : '启动时检查一次，之后每 12 小时一次，不弹窗打扰';
+    $('autoS').textContent = st.dev ? '开发版（从源码构建）不自动检查' : '启动时检查一次，之后每 12 小时一次。查到就后台下载，点提示立刻更新，不点则下次启动自动生效';
   }
 
   $('updBtn').onclick = () => {

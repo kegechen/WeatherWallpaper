@@ -22,7 +22,9 @@ namespace WeatherWallpaper
         {
             bool created;
             var first = args.Length > 0 ? args[0].ToLowerInvariant() : "";
-            // 安装包用：quit = 退出运行中的实例并等它结束；uninstall = 同时清掉开机自启
+            // 命令行参数（quit / uninstall / 预览等）一律不在这台进程里装更新：quit 是安装包自己叫来关程序的，
+            // 这时候装 MSI 会和 MSI 自己抢文件。正常启动（包括开机自启）才在下面自动升级。
+            bool normalStart = args.Length == 0;
             if (first == "uninstall") App.SetAutoStart(false);
             using (var mutex = new Mutex(true, "WeatherWallpaper_SingleInstance", out created))
             {
@@ -49,6 +51,7 @@ namespace WeatherWallpaper
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.ThreadException += (s, e) => Log.Write("UI exception: " + e.Exception);
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("fatal: " + e.ExceptionObject);
+                if (normalStart && Updater.ApplyAtStartup()) return;   // 下好的新版本交给后台脚本装，装完它会拉起新版本
                 Log.Write("start");
                 Application.Run(new App());
             }
@@ -573,9 +576,8 @@ namespace WeatherWallpaper
                 if (t != "scene" || w != MainWall) return;
                 overlay.SetScene(num("rain"), num("snow"), num("wind"));
                 eaves.SetScene(num("rain"), num("snow"), num("wind"));
-                sceneText = d.ContainsKey("text") ? Convert.ToString(d["text"]) : "";
-                var tip = "天气壁纸" + (sceneText != "" ? "\n" + sceneText : "");
-                tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
+                string text = d.ContainsKey("text") ? Convert.ToString(d["text"]) : "";
+                UpdateSceneTip(text);
             }
             catch (Exception ex) { Log.Write("scene parse: " + ex.Message); }
         }
@@ -685,7 +687,7 @@ namespace WeatherWallpaper
                 case "refresh": RefreshAll(true); break;
                 case "card": case "city": flyout.HideFlyout(); OpenCardSettings(CardSpec.DefaultId); break;   // 托盘面板显示的就是默认卡片
                 case "hide": flyout.HideFlyout(); break;
-                case "update": flyout.HideFlyout(); if (newer != null) PromptUpdate(newer); break;
+                case "update": flyout.HideFlyout(); if (newer != null) { var _ = StartInstall(newer, true); } break;
                 case "menu":
                     flyout.HideFlyout();
                     // NotifyIcon 没有公开的弹菜单方法，用它内部的 ShowContextMenu（和右键效果一致）
@@ -1231,7 +1233,14 @@ namespace WeatherWallpaper
                 case "quit": Quit(); break;
                 case "checkupdate": CheckUpdate(arg == "manual"); break;
                 case "update-now":   // 不弹确认直接更新（脚本 / 测试用）
-                    try { var ui = await Updater.Check(); if (ui.Version > Updater.Current || arg == "force") await InstallUpdate(ui); }
+                    try
+                    {
+                        var ui = await Updater.Check();
+                        if (ui.Version <= Updater.Current && arg != "force") break;
+                        SetNewer(ui);
+                        // 命令行引发的更新也要先下好再装（不受「自动更新」开关影响）
+                        var _ = StartInstall(ui, true);
+                    }
                     catch (Exception ex) { Log.Write("update-now: " + ex.Message); }
                     break;
                 case "flyout": ToggleFlyout(); break;
@@ -1425,7 +1434,7 @@ namespace WeatherWallpaper
             menu.Items.Add("卡片设置…", null, (s, e) => OpenCardSettings(CardSpec.DefaultId));   // 新增、切换、隐藏、删除卡片都在设置窗口里
 
             // 有新版本时才出现（加粗）；平时检查更新在「关于」里
-            updateItem = new ToolStripMenuItem("更新", null, (s, e) => { if (newer != null) PromptUpdate(newer); }) { Visible = false };
+            updateItem = new ToolStripMenuItem("更新", null, (s, e) => { if (newer != null) { var _ = StartInstall(newer, true); } }) { Visible = false };
             updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
             menu.Items.Add(updateItem);
             menu.Items.Add("关于", null, (s, e) => OpenAbout());
@@ -2191,29 +2200,45 @@ namespace WeatherWallpaper
         // ---------------------------------------------------------------- 检查更新
         UpdateInfo newer;
         ToolStripMenuItem updateItem;
-        bool checking, installing;
+        bool checking, installing, staging;
         string updError, installError, installText;   // 上次检查失败的原因 / 上次自动更新失败的原因 / 正在下载安装的进度（「关于」里显示）
         DateTime lastCheck;             // 上次检查成功的时间（MinValue = 还没查过）
+        StagedUpdate staged;            // 已下好、等着重装的新版本（auto 模式下由后台下载）
         readonly WinTimer updateTimer = new WinTimer();
 
         void StartUpdateTimer()
         {
             // 启动 1 分钟后查一次；之后每小时看一眼，离上次查到满 12 小时才再查——按钟表时间算，电脑睡眠、休眠过也不会一拖好几天；
             // 查失败了（没联网）下个小时再试
+            // 启动时先把上次没装成的更新提上来（比如上次下载完用户关掉了电自），再开始定时检查
+            var pending = Updater.LoadStaged();
+            if (pending != null)
+            {
+                staged = pending;
+                newer = new UpdateInfo { Version = pending.Version, Tag = pending.Tag, MsiUrl = Updater.ReleasePage, ZipUrl = Updater.ReleasePage };
+                updateItem.Text = "已下好 " + pending.Tag + " · 点击重启更新";
+            }
             updateTimer.Interval = 60 * 1000;
             updateTimer.Tick += (s, e) =>
             {
                 updateTimer.Interval = 3600 * 1000;
-                if (settings.AutoUpdate && !Updater.IsDevBuild && (DateTime.Now - lastCheck).Duration() >= TimeSpan.FromHours(12)) CheckUpdate(false);
+                if (staged == null && settings.AutoUpdate && !Updater.IsDevBuild && (DateTime.Now - lastCheck).Duration() >= TimeSpan.FromHours(12)) CheckUpdate(false);
             };
             updateTimer.Start();
         }
+        /// <summary>查到了新版本（不弹窗打扰，托盘菜单、弹出面板和「关于」里提示）。</summary>
+        bool NewerOffered => newer != null;
 
-        /// <summary>有要提示的新版本：查到了，而且不是用户选了「跳过此版本」的那个（托盘菜单、弹出面板只提示这种；「关于」里跳过的也照样显示）。</summary>
-        bool NewerOffered => newer != null && settings.SkipVersion != newer.Version.ToString();
-
-        string UpdateJson() => !NewerOffered ? "{\"t\":\"update\",\"tag\":null}"
-            : "{\"t\":\"update\",\"tag\":" + WeatherService.JsonStr(newer.Tag) + ",\"cur\":" + WeatherService.JsonStr(Updater.CurrentText) + "}";
+        string UpdateJson() => Js.Serialize(new
+        {
+            t = "update",
+            tag = NewerOffered ? newer.Tag : null,
+            cur = Updater.CurrentText,
+            auto = settings.AutoUpdate && !Updater.IsDevBuild && !UpdatingProcess,
+            installing = installing || staging,
+            staged = staged != null,
+        });
+        bool UpdatingProcess => installing || staging;
 
         /// <summary>检查更新。manual：命令行 checkupdate manual，结果用对话框告诉用户；「关于」里点的不弹框，结果显示在窗口里。</summary>
         async void CheckUpdate(bool manual)
@@ -2230,12 +2255,22 @@ namespace WeatherWallpaper
                 if (info.Version <= Updater.Current)
                 {
                     SetNewer(null);   // 之前查到的新版本又撤了
+                    if (settings.AutoUpdate)
+                    {
+                        staged = null; installText = null; Updater.ClearStaged();
+                        UpdateSceneTip(sceneText);
+                        updateItem.Text = "更新";
+                        flyout?.Post(UpdateJson());
+                    }
                     if (manual) MessageBox.Show("已经是最新版本（v" + Updater.Current + "）。", "天气壁纸", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-                // 不弹托盘通知，只在右键菜单（加粗）、左键弹出面板和「关于」里提示
+                // 不弹通知，只在右键菜单（加粗）、左键弹出面板和「关于」里提示；开着自动更新就在后台把它下好，
+                // 点卡片 /「关于」的按钮立刻生效，不点就等下次正常启动时自动装上
                 SetNewer(info);
-                if (manual) PromptUpdate(info);
+                if (settings.AutoUpdate) { var _ = StageUpdate(); }
+                if (manual) MessageBox.Show("发现新版本 " + info.Tag + "。\n\n后台正在下载，点弹出面板或「关于」里的按钮可以立刻更新；也可以等下次启动时自动更新。",
+                    "天气壁纸", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
@@ -2249,55 +2284,92 @@ namespace WeatherWallpaper
         /// <summary>记下查到的新版本（null = 没有）：右键菜单里的更新项只在有新版本时出现（菜单弹出时按 newer 决定显示）。</summary>
         void SetNewer(UpdateInfo info)
         {
-            if (info?.Tag != newer?.Tag) installError = null;   // 换了版本：上一个版本的安装失败不再相关
+            if (info?.Tag != newer?.Tag) { installError = null; staged = null; }   // 换了版本：旧版本的 staged 和失败原因都不再用
             newer = info;
-            if (info != null) updateItem.Text = "发现新版本 " + info.Tag + "，点击更新（当前 " + Updater.CurrentText + "）";
+            if (info != null && staged == null) updateItem.Text = "发现新版本 " + info.Tag + "，点击更新（当前 " + Updater.CurrentText + "）";
             flyout?.Post(UpdateJson());
+            PostAbout();
         }
 
-        async void PromptUpdate(UpdateInfo info)
+        /// <summary>后台下好新版本。不弹进度窗，只把状态写进「关于」和托盘菜单；关掉自动更新就撤掉已下载的更新。</summary>
+        async Task<bool> StageUpdate()
         {
-            if (installing) return;
-            if (Updater.IsDevBuild)
+            if (newer == null || staging || installing || staged != null || Updater.IsDevBuild) return false;
+            staging = true;
+            installError = null;
+            try
             {
-                // 源码构建的版本不自动覆盖（会改掉构建输出目录），只引导去下载页
-                if (MessageBox.Show("发现新版本 " + info.Tag + "。\n\n当前运行的是从源码构建的开发版，不会自动更新。\n是否打开下载页？", "天气壁纸 · 更新",
-                        MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-                    OpenUrl(Updater.ReleasePage);
-                return;
+                var progress = new Progress<string>(t => { installText = t; UpdateItemText(t); PostAbout(); });
+                staged = await Updater.Stage(newer, progress);
+                installText = null;
+                UpdateItemText("已下载 " + newer.Tag + " · 点击重启更新");
+                PostAbout();
+                flyout?.Post(UpdateJson());
+                return true;
             }
-            var res = MessageBox.Show("发现新版本 " + info.Tag + "（当前 v" + Updater.Current + "）。\n\n是否现在下载并更新？完成后会自动重新启动。\n选\"否\"跳过此版本，\"取消\"下次再说。",
-                "天气壁纸 · 更新", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information);
-            if (res == DialogResult.No) { settings.SkipVersion = info.Version.ToString(); settings.Save(); flyout?.Post(UpdateJson()); PostAbout(); return; }
-            if (res != DialogResult.Yes) return;
-            await InstallUpdate(info);
+            catch (Exception ex)
+            {
+                installError = "下载更新失败：" + ex.Message;
+                Log.Write("update stage: " + ex);
+                UpdateItemText("更新到 " + newer.Tag + " · 点击重试");
+                PostAbout();
+                return false;
+            }
+            finally { staging = false; }
         }
 
-        async Task InstallUpdate(UpdateInfo info)
+        void UpdateItemText(string t)
         {
-            if (installing) return;
-            if (Updater.IsDevBuild) { Log.Write("update: dev build, skipped"); return; }
+            updateItem.Text = t;
+            UpdateSceneTip(sceneText);
+        }
+
+        void UpdateSceneTip(string text)
+        {
+            sceneText = text;
+            // 下载 / 安装的进度优先显示，场景文字排在后面（scene 消息每几十秒就来，不能让它把进度抹掉）
+            var tip = "天气壁纸" + (installText != "" ? "\n" + installText : "") + (sceneText != "" ? "\n" + sceneText : "");
+            tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
+        }
+
+        /// <summary>点卡片 / 托盘菜单 /「关于」的按钮：已经下好就直接装；还在下载就先等到下完，再接着装。没有确认框。</summary>
+        async Task StartInstall(UpdateInfo info, bool click)
+        {
+            if (installing || staging) return;
+            if (Updater.IsDevBuild) { OpenUrl(Updater.ReleasePage); return; }
+            if (staged == null || staged.Version != info.Version)
+            {
+                if (!await StageUpdate()) return;    // StageUpdate 把失败写进「关于」了
+            }
+            var _ = InstallUpdate(staged, click);
+        }
+
+        Task InstallUpdate(StagedUpdate s, bool click)
+        {
+            if (installing) return Task.CompletedTask;
             installing = true;
             installError = null;
-            installText = "正在准备更新 " + info.Tag + " …";
+            installText = "正在重启更新 " + s.Tag + " …";
+            UpdateItemText(installText);
             PostAbout();
             try
             {
-                var progress = new Progress<string>(t => { updateItem.Text = t; tray.Text = "天气壁纸 · " + t; installText = t; PostAbout(); });
-                await Updater.Install(info, progress);
-                Quit();   // 让出文件给安装程序；装完由安装包重新拉起
+                Updater.Apply(s);
+                Quit();   // 让出文件给安装程序；装完由安装程序重新拉起（便携版由辅助脚本拉起）
             }
             catch (Exception ex)
             {
                 installing = false;
                 installError = "自动更新失败：" + ex.Message;
-                PostAbout();
-                tray.Text = "天气壁纸";   // 下载进度留在托盘提示上会让人以为还在更新
-                updateItem.Text = "更新到 " + info.Tag + "（当前 " + Updater.CurrentText + "）";
+                installText = null;
+                UpdateSceneTip(sceneText);
+                PostAbout();   // 下载进度留在托盘提示上会让人以为还在更新
+                updateItem.Text = "更新到 " + s.Tag + " · 点击重试";
                 Log.Write("update install: " + ex);
-                if (MessageBox.Show("自动更新失败：" + ex.Message + "\n\n是否打开下载页手动安装？", "天气壁纸 · 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-                    OpenUrl(info.MsiUrl ?? Updater.ReleasePage);
+                if (click && MessageBox.Show("自动更新失败：" + ex.Message + "\n\n是否打开下载页手动安装？", "天气壁纸 · 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                    OpenUrl(Updater.ReleasePage);
             }
+            return Task.CompletedTask;
         }
 
         static void OpenUrl(string url, string args = null)
@@ -2341,7 +2413,7 @@ namespace WeatherWallpaper
         string AboutJson()
         {
             // 更新状态：正在安装 > 正在检查 > 有新版本 > 上次检查失败 > 已是最新 > 还没查过
-            var state = installing ? "installing" : checking ? "checking" : newer != null ? "newer" : updError != null ? "error" : lastCheck != DateTime.MinValue ? "latest" : "idle";
+            var state = installing || staging ? "installing" : checking ? "checking" : newer != null ? "newer" : updError != null ? "error" : lastCheck != DateTime.MinValue ? "latest" : "idle";
             return Js.Serialize(new
             {
                 t = "about",
@@ -2351,9 +2423,9 @@ namespace WeatherWallpaper
                 auto = settings.AutoUpdate,
                 state,
                 tag = newer?.Tag,
-                skipped = newer != null && settings.SkipVersion == newer.Version.ToString(),
                 // 有新版本时只显示自动更新失败的原因（之后某次后台检查没连上不算，新版本照样有效）
-                msg = installing ? installText : state == "newer" ? installError : updError,
+                msg = installing || staging ? installText : state == "newer" ? installError : updError,
+                staged = staged != null && staged.Version == newer?.Version,
                 at = lastCheck == DateTime.MinValue ? null : lastCheck.ToString(lastCheck.Date == DateTime.Today ? "HH:mm" : "M 月 d 日 HH:mm"),
                 repo = Updater.RepoPage,
             });
@@ -2397,14 +2469,15 @@ namespace WeatherWallpaper
             {
                 case "close": aboutWin.CloseNow(); break;
                 case "check": CheckUpdate(false); break;
-                case "install":   // 「关于」里点的「立即更新」：用户已经明确要更新，不再弹确认框
-                    if (newer == null || installing) break;
+                case "install":   // 卡片 /「关于」里的按钮：用户点了就直接重启更新，不再弹确认框
+                    if (newer == null || installing || staging) break;
                     if (Updater.IsDevBuild) OpenUrl(Updater.ReleasePage);   // 源码构建的版本不覆盖，去下载页
-                    else { var _ = InstallUpdate(newer); }
+                    else { var _ = StartInstall(newer, true); }
                     break;
                 case "auto":
                     settings.AutoUpdate = d.ContainsKey("on") && d["on"] is bool && (bool)d["on"];
                     settings.Save();
+                    if (!settings.AutoUpdate) { staged = null; installText = null; Updater.ClearStaged(); UpdateSceneTip(sceneText); flyout?.Post(UpdateJson()); }
                     PostAbout();
                     break;
                 case "open":

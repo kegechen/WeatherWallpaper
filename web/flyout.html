@@ -52,7 +52,9 @@
     if (update && update.tag) {
       const u = document.createElement('div');
       u.className = 'update';
-      u.innerHTML = '<b>发现新版本 ' + update.tag + '</b><span>当前 ' + update.cur + ' · 点击更新 ›</span>';
+      const status = update.installing ? (update.staged ? '正在重启更新…' : '正在后台下载，点这里等下完就更新…')
+        : !update.auto ? '下次启动时自动生效' : update.staged ? '已下载 · 点击立刻重启更新 ›' : '正在后台下载 · 点击立刻更新 ›';
+      u.innerHTML = '<b>发现新版本 ' + update.tag + '</b><span>' + status + '</span>';
       u.onclick = () => post('cmd:update');
       panel.appendChild(u);
     }
