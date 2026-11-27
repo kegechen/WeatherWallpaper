@@ -1710,6 +1710,7 @@ namespace WeatherWallpaper
                     UpdateLayout();
                     break;
                 case "search": SearchCity(d.ContainsKey("q") ? Convert.ToString(d["q"]) : ""); break;
+                case "rgeo": LookupPlace(d); break;
                 case "identify": ScreenBadge.ShowAll(); break;
                 case "add": AddCard(d.ContainsKey("script") && d["script"] != null ? CustomCards.CleanName(Convert.ToString(d["script"])) : null); break;
                 case "opencards": OpenCardsDir(); break;
@@ -1799,6 +1800,21 @@ namespace WeatherWallpaper
                 res = new { t = "search", q, items = list.Select(r => new { name = r.Name, detail = r.Detail, lat = r.Lat, lon = r.Lon }).ToList() };
             }
             catch (Exception ex) { res = new { t = "search", q, error = ex.Message }; }
+            cardWin?.Post(Js.Serialize(res));
+        }
+
+        /// <summary>卡片设置里「输入经纬度」：按经纬度反查地名，回给页面（id 原样带回，页面据此丢掉过时的结果）。</summary>
+        async void LookupPlace(Dictionary<string, object> d)
+        {
+            object id = d.ContainsKey("id") ? d["id"] : null;
+            object res;
+            try
+            {
+                double lat = Convert.ToDouble(d["lat"], Inv), lon = Convert.ToDouble(d["lon"], Inv);
+                if (double.IsNaN(lat) || double.IsNaN(lon) || Math.Abs(lat) > 90 || Math.Abs(lon) > 180) throw new ArgumentException("经纬度超出范围");
+                res = new { t = "rgeo", id, name = await ws.LookupName(lat, lon) };
+            }
+            catch (Exception ex) { Log.Write("reverse geocode failed: " + ex.Message); res = new { t = "rgeo", id, error = ex.Message }; }
             cardWin?.Post(Js.Serialize(res));
         }
 

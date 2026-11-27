@@ -108,16 +108,20 @@ namespace WeatherWallpaper
 
         async Task<string> ReverseName(double lat, double lon)
         {
-            try
-            {
-                var d = Parse(await Get(string.Format(Inv,
-                    "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={0}&longitude={1}&localityLanguage=zh", lat, lon)).ConfigureAwait(false));
-                string city = S(d, "city"), locality = S(d, "locality");
-                if (string.IsNullOrEmpty(city)) city = S(d, "principalSubdivision");
-                if (!string.IsNullOrEmpty(locality) && locality != city) return city + " · " + locality;
-                return city;
-            }
+            try { return await LookupName(lat, lon).ConfigureAwait(false); }
             catch (Exception ex) { Log.Write("reverse geocode failed: " + ex.Message); return ""; }
+        }
+
+        /// <summary>按经纬度反查地名（"城市 · 区县"），查不到是 ""，联网失败抛异常。自动定位和卡片设置里的「输入经纬度」都用它。
+        /// 它的中文名简繁混着给（"武汉市 · 江岸區"），和搜城市一样转成简体。</summary>
+        public async Task<string> LookupName(double lat, double lon)
+        {
+            var d = Parse(await Get(string.Format(Inv,
+                "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={0}&longitude={1}&localityLanguage=zh", lat, lon)).ConfigureAwait(false));
+            string city = ZhMap(S(d, "city"), ToSimplified), locality = ZhMap(S(d, "locality"), ToSimplified);
+            if (string.IsNullOrEmpty(city)) city = ZhMap(S(d, "principalSubdivision"), ToSimplified);
+            if (!string.IsNullOrEmpty(locality) && locality != city) return string.IsNullOrEmpty(city) ? locality : city + " · " + locality;
+            return city;
         }
 
         /// <summary>

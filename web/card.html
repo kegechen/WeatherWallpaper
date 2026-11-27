@@ -62,12 +62,14 @@
   #tabbar .tarr:disabled { opacity: .25; }
   #tabNew { flex: none; height: 28px; margin: 0 0 4px 4px; padding: 0 10px; border-style: dashed; font-size: 12.5px; white-space: nowrap; }
 
-  /* 分段按钮（自动定位 / 指定城市） */
+  /* 分段按钮（自动定位 / 搜索城市 / 输入经纬度） */
   .seg { display: flex; gap: 4px; padding: 3px; border-radius: 7px; background: rgba(0,0,0,.18); }
   .seg button { flex: 1; height: 30px; border: none; background: transparent; padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .seg button.on { background: var(--ctl2); box-shadow: inset 0 0 0 1px var(--line); font-weight: 600; }
   #cityBox { position: relative; }
-  #q { flex: 1; min-width: 0; }
+  #q, #lat, #lon { flex: 1; min-width: 0; }
+  #coordBox label { flex: none; color: var(--dim); }
+  #coordBox label[for=lon] { margin-left: 4px; }
   /* 搜索结果：搜索框下面弹出的列表，盖在下面的内容上（不把整页往下推）；点别处收起 */
   #results { position: absolute; left: 0; right: 0; top: 36px; z-index: 5; max-height: 260px; overflow-y: auto; padding: 4px; border-radius: 7px;
     background: #2b2b2b; border: 1px solid rgba(255,255,255,.12); box-shadow: 0 8px 24px rgba(0,0,0,.5); }
@@ -215,10 +217,13 @@
           <label for="name">名称</label>
           <input id="name" placeholder="卡片名称（留空用城市名）" spellcheck="false" maxlength="24">
           <label class="wx">城市</label>
-          <div class="seg wx"><button id="mAuto">自动定位</button><button id="mCity">指定城市</button></div>
+          <div class="seg wx"><button id="mAuto">自动定位</button><button id="mCity">搜索城市</button><button id="mCoord">输入经纬度</button></div>
           <div id="cityBox" class="c2 wx">
             <div class="row"><input id="q" placeholder="输入城市名，如 杭州、Tokyo" spellcheck="false"><button id="go">搜索</button></div>
             <div id="results"></div>
+          </div>
+          <div id="coordBox" class="c2 wx">
+            <div class="row"><label for="lat">纬度</label><input id="lat" placeholder="如 30.5928，南纬为负" spellcheck="false"><label for="lon">经度</label><input id="lon" placeholder="如 114.3055，西经为负" spellcheck="false"></div>
           </div>
           <div id="cur" class="hint c2 wx"></div>
           <label for="screen">显示器</label>
@@ -312,7 +317,8 @@
 
   let card = null, autoName = '', fit = null;
   let gen = 0;   // 宿主改过这张卡片的屏（显示器换了编号）的次数：发出去的编辑带上它，宿主据此认出改之前发出、还带着旧编号的编辑
-  let cityMode = false;   // 指定城市（还没选好城市时也是 true，但不发给宿主）
+  // auto 自动定位 / city 搜索城市 / coord 输入经纬度。后两种还没定好位置（card.Lat 为空）时不发经纬度给宿主，仍按自动定位
+  let locMode = 'auto';
   let searching = '';
 
   // ---------------------------------------------------------------- 发给宿主（宿主收到后放得下就马上保存）
@@ -325,7 +331,7 @@
   }
   function payload() {
     const c = Object.assign({}, card);   // 偏移、名称（syncName；组字中是上次确定下来的，不带拼音）在改的时候就已经写进 card
-    if (!cityMode || c.Lat == null) { c.City = null; c.Lat = null; c.Lon = null; }
+    if (locMode === 'auto' || c.Lat == null) { c.City = null; c.Lat = null; c.Lon = null; }
     return c;
   }
   // 偏移能调到多大（宿主按所选屏的可用区域算）：再大卡片也已经贴边、不会再动。k = 0 水平 / 1 垂直；居中位置的水平偏移可以往左（负数）
@@ -343,7 +349,7 @@
   function flushThen(m) {
     composing = false;
     clearTimeout(draftTm); draftTm = 0;
-    if (card) { syncName(); post({ t: 'draft', gen, card: payload() }); }   // init 还没到时没有可发的
+    if (card) { syncName(); coordFlush(); post({ t: 'draft', gen, card: payload() }); }   // init 还没到时没有可发的
     post(m);
   }
 
@@ -443,14 +449,20 @@
 
   // ---------------------------------------------------------------- 界面
   function renderCity() {
-    $('mAuto').classList.toggle('on', !cityMode);
-    $('mCity').classList.toggle('on', cityMode);
-    $('mAuto').textContent = autoName ? '自动定位（' + autoName + '）' : '自动定位';
-    $('cityBox').style.display = cityMode ? '' : 'none';
-    const cur = $('cur');
-    if (!cityMode) cur.textContent = '按 IP / 系统位置自动确定城市，换了地方会跟着变';
-    else if (card.Lat != null) cur.innerHTML = '当前：<b>' + esc(card.City || '') + '</b>　' + card.Lat.toFixed(2) + ', ' + card.Lon.toFixed(2);
-    else cur.textContent = '搜索并选择一个城市（选好之前仍按自动定位）';
+    $('mAuto').classList.toggle('on', locMode === 'auto');
+    $('mCity').classList.toggle('on', locMode === 'city');
+    $('mCoord').classList.toggle('on', locMode === 'coord');
+    $('cityBox').style.display = locMode === 'city' ? '' : 'none';
+    $('coordBox').style.display = locMode === 'coord' ? '' : 'none';
+    const cur = $('cur'), d = locMode === 'coord' ? 4 : 2;
+    const ll = () => +card.Lat.toFixed(d) + ', ' + +card.Lon.toFixed(d);
+    if (locMode === 'auto') cur.innerHTML = '按 IP / 系统位置自动确定城市，换了地方会跟着变' + (autoName ? '。现在：<b>' + esc(autoName) + '</b>' : '');
+    else if (locMode === 'coord' && coord.bad) cur.textContent = '纬度在 -90 到 90 之间、经度在 -180 到 180 之间（南纬、西经为负）';
+    else if (locMode === 'coord' && coord.pend) cur.textContent = '正在按经纬度反查地名…';
+    else if (card.Lat != null) cur.innerHTML = '当前：<b>' + esc(card.City || ll()) + '</b>' + (card.City ? '　' + ll() : '')
+      + (locMode === 'coord' && coord.msg ? '<br>' + esc(coord.msg) : '');
+    else if (locMode === 'city') cur.textContent = '搜索并选择一个城市（选好之前仍按自动定位）';
+    else cur.textContent = '填上纬度和经度（填好之前仍按自动定位）。地图上复制的“30.5928, 114.3055”可以直接粘贴进纬度框';
   }
   function renderPos() {
     const p = card.Pos || 'tr';
@@ -797,12 +809,71 @@
   }
 
   // ---------------------------------------------------------------- 城市
-  $('mAuto').onclick = () => { if (!cityMode) return; cityMode = false; renderCity(); sendDraft(true); };
-  $('mCity').onclick = () => {
-    if (cityMode) return;
-    cityMode = true; renderCity();
-    if (card.Lat != null) sendDraft(true); else $('q').focus();
-  };
+  // 选的是哪种方式按卡片记在页面的 localStorage 里（宿主只存经纬度和地名）：下次打开停在同一页
+  const LOC_KEY = id => 'locBy.' + id;
+  function setLocMode(m) {
+    if (locMode === m) return;
+    locMode = m; coordCancel();
+    try { localStorage.setItem(LOC_KEY(card.Id), m); } catch (e) {}
+    if (m === 'coord') coordFill();
+    renderCity();
+    if (m === 'auto' || card.Lat != null) sendDraft(true);   // 已经有经纬度：切过去就按它（从自动定位切回来时宿主那边要换回指定的位置）
+    else $(m === 'city' ? 'q' : 'lat').focus();
+  }
+  $('mAuto').onclick = () => setLocMode('auto');
+  $('mCity').onclick = () => setLocMode('city');
+  $('mCoord').onclick = () => setLocMode('coord');
+
+  // 输入经纬度：停手 0.7 秒后请宿主按经纬度反查地名（和自动定位反查用的同一个服务），查到了地名跟着换，查不到用经纬度当地名，都按新经纬度保存
+  const coord = { tm: 0, seq: 0, pend: null, bad: false, msg: '' };   // pend：等着反查 / 保存的 {lat, lon}；bad：框里的不是合法经纬度
+  const PAIR = /^\s*(-?\d+(?:\.\d+)?)\s*[,，\s]\s*(-?\d+(?:\.\d+)?)\s*$/;
+  function coordFill() {
+    $('lat').value = card.Lat != null ? +card.Lat.toFixed(4) : '';
+    $('lon').value = card.Lon != null ? +card.Lon.toFixed(4) : '';
+    coord.bad = false; coord.msg = '';
+  }
+  function coordCancel() { clearTimeout(coord.tm); coord.tm = 0; coord.seq++; coord.pend = null; }
+  function coordEdited() {
+    coordCancel(); coord.msg = '';
+    const ts = [$('lat').value.trim(), $('lon').value.trim()], v = ts.map(Number);
+    coord.bad = false;
+    if (ts.some(t => t === '')) { renderCity(); return; }   // 还没填全
+    if (!v.every(isFinite) || Math.abs(v[0]) > 90 || Math.abs(v[1]) > 180) { coord.bad = true; renderCity(); return; }
+    if (card.Lat != null && +card.Lat.toFixed(6) === +v[0].toFixed(6) && +card.Lon.toFixed(6) === +v[1].toFixed(6)) { renderCity(); return; }   // 改回了原来的
+    coord.pend = { lat: v[0], lon: v[1] };
+    renderCity();
+    const seq = coord.seq;
+    coord.tm = setTimeout(() => { coord.tm = 0; post({ t: 'rgeo', id: seq, lat: coord.pend.lat, lon: coord.pend.lon }); }, 700);
+  }
+  function coordApply(name, msg) {
+    const p = coord.pend;
+    coordCancel();
+    card.Lat = p.lat; card.Lon = p.lon; card.City = name || null;
+    coord.msg = msg || '';
+    renderCity(); sendDraft(true);
+  }
+  // 关窗口时还在等反查：经纬度先按没有地名保存，别把填好的丢了
+  function coordFlush() { if (coord.pend && locMode === 'coord') coordApply('', ''); }
+  function onRgeo(m) {
+    if (m.id !== coord.seq || !coord.pend) return;   // 之后又改过经纬度 / 切了方式：这次的结果作废
+    if (m.name) coordApply(m.name, '');
+    else coordApply('', m.error ? '反查地名失败（' + m.error + '），卡片上先显示经纬度，可以在上面「名称」里自己起名'
+      : '这个位置反查不到地名，卡片上显示经纬度，可以在上面「名称」里自己起名');
+  }
+  // 纬度框里粘贴了“30.5928, 114.3055”这种（地图上复制的）：拆开分别填进纬度、经度。经度框里粘贴也一样
+  for (const id of ['lat', 'lon'])
+    $(id).addEventListener('input', () => {
+      const m = PAIR.exec($(id).value);
+      if (m) { $('lat').value = m[1]; $('lon').value = m[2]; }
+      coordEdited();
+    });
+  for (const id of ['lat', 'lon'])
+    $(id).addEventListener('keydown', e => {   // 回车：不等 0.7 秒，马上反查
+      if (e.key !== 'Enter' || !coord.tm) return;
+      e.preventDefault();
+      clearTimeout(coord.tm); coord.tm = 0;
+      post({ t: 'rgeo', id: coord.seq, lat: coord.pend.lat, lon: coord.pend.lon });
+    });
   // 输入法组字期间（拼音还没选词）不发：否则 "bei"、"beijing" 这些中间值会被当成名称保存，桌面和设置文件里先变成拼音
   let composing = false;
   $('name').addEventListener('compositionstart', () => { composing = true; });
@@ -968,7 +1039,12 @@
       $('results').innerHTML = ''; $('q').value = ''; searching = ''; armed = keepArmed; keepArmed = false; adding = false;
       clearTimeout(delArm); delArm = 0; $('del').textContent = '删除卡片';
       refreshing = ''; clearTimeout(refTm); refTm = 0; refreshNote('', false, 0);   // 换了卡片：上一张的刷新结果不显示了
-      cityMode = card.Lat != null && card.Lon != null;
+      coordCancel();
+      let by = null;
+      try { by = localStorage.getItem(LOC_KEY(card.Id)); } catch (e) {}
+      // 有经纬度：上次在哪一页就停在哪一页；没记过的话，只有经纬度、没有地名（反查不到 / 手改文件）的算输入经纬度
+      locMode = card.Lat == null || card.Lon == null ? 'auto' : by === 'coord' || (by !== 'city' && !card.City) ? 'coord' : 'city';
+      if (locMode === 'coord') coordFill();
       renderAll();
       // 新的 fit 还没到：别按旧 fit 的卡片列表重画页签（被删的卡片会闪回来），只把高亮挪过去，列表等新 fit 到了再画
       if (!fresh()) { for (const t of document.querySelectorAll('#tabs .tab')) t.classList.toggle('on', t.dataset.id === card.Id); tabsChanged(); }
@@ -991,6 +1067,7 @@
       if (card && refreshing && m.id === refreshing) refreshEnd(m.err);   // 点了「刷新」的那一轮画完了 / 出错了
     }
     else if (m.t === 'search') onSearch(m);
+    else if (m.t === 'rgeo') onRgeo(m);
     else if (m.t === 'flush') flushThen({ t: 'close' });   // 点了标题栏 × 等：把还没发出去的编辑交上去再关
     // 卡片和布局结果都到了、页面画好第一帧再告诉宿主：窗口这时才现身（PageWindow 打开时先隐身），不先露一个空窗口
     if (!painted && card && fit) { painted = true; requestAnimationFrame(() => requestAnimationFrame(() => post({ t: 'painted' }))); }
