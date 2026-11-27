@@ -17,7 +17,7 @@ IMG_PREFIX = 'backdrop-'
 MAX_IN = 48 << 20          # stdin 最多 48 MB（图片 base64 之后）
 MAX_CFG = 64 << 10
 # 写文件时的字段顺序（其余按字母排在后面）
-ORDER = ['city', 'lat', 'lon', 'locBy', 'backdrop', 'lastBackdrop', 'minimal', 'playSeconds', 'show', 'hide', 'panel', 'cardPos', 'cardX', 'cardY',
+ORDER = ['city', 'lat', 'lon', 'locBy', 'backdrop', 'lastBackdrop', 'minimal', 'playSeconds', 'show', 'hide', 'panel', 'lockPanel', 'cardPos', 'cardX', 'cardY',
          'skyOpacity', 'cloudAlpha', 'festive', 'fps', 'cloudFps', 'refresh']
 
 

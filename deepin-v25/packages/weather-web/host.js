@@ -16,6 +16,7 @@
 //   fps         页面帧率（5–60，默认 24）
 //   cloudFps    云的帧率（1–24，默认 6）。和 fps 各管各的；下雨雪时整页按 fps 出帧，云最多也就这么快
 //   panel       显示天气卡片（默认 true）
+//   lockPanel   锁屏上也显示天气卡片（默认 true）；false = 锁屏上只有天气画面，回到桌面卡片再淡入
 //   show        卡片上显示哪些内容（城市和当前天气总是显示），同 Windows 版 CardSpec.Show 的键，逗号分隔的字符串或数组：
 //               date 公历日期、week 星期、lunar 农历、hilo 今日最高 / 最低、src 定位来源、aqi 空气、feel 体感、hum 湿度、wind 风、
 //               hours 今天逐小时、days 未来几天、sun 日出日落、upd 更新时间。不填 = 默认（除日期行外都显示），"" = 只显示城市和当前天气
@@ -265,7 +266,8 @@
   // 锁屏：treeland 的锁屏界面（Greeter.qml）把壁纸以屏幕中心放大 1.2 倍再裁掉四周（每边各少 1/12），靠边的卡片会被裁掉。
   // 这里让卡片层反过来以屏幕中心缩小到 1/1.2，两者抵消：卡片在锁屏上的位置、大小和桌面上一模一样，天气画面照样放大。
   // 只动卡片层（#cards，里面的 .card 是 position: fixed）：先让它铺满视口，加了 transform 之后卡片改以它为参照，位置不变；
-  // 过渡用 easeOutExpo，和 treeland 的缩放动画（1 秒 OutExpo）大致同步
+  // 过渡用 easeOutExpo，和 treeland 的缩放动画（1 秒 OutExpo）大致同步。
+  // 配置了锁屏不显示卡片（lockPanel: false）时，锁屏上整个卡片层淡出，回到桌面再淡入
   function applyLockZoom() {
     const el = document.getElementById('cards');
     if (!el) return;
@@ -273,11 +275,12 @@
       el.style.position = 'fixed';
       el.style.inset = '0';
       el.style.transformOrigin = '50% 50%';
-      el.style.transition = 'transform .6s cubic-bezier(.16, 1, .3, 1)';
+      el.style.transition = 'transform .6s cubic-bezier(.16, 1, .3, 1), opacity .4s';
     }
     const z = locked ? num(cfg.lockZoom, 1.2, 1, 3) : 1;
     el.dataset.wwpLock = String(z);
     el.style.transform = z === 1 ? '' : 'scale(' + (1 / z).toFixed(5) + ')';
+    el.style.opacity = locked && cfg.lockPanel === false ? '0' : '';
   }
 
   let resizeTm = 0;

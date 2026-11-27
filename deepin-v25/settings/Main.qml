@@ -107,6 +107,7 @@ D.ApplicationWindow {
     property int playSeconds: 30
     property bool festive: true
     property bool panel: true
+    property bool lockPanel: true      // 锁屏上也显示卡片
     property string cardPos: "tr"
     property int cardX: 32
     property int cardY: 32
@@ -185,6 +186,7 @@ D.ApplicationWindow {
         playSeconds = Math.round(num(c.playSeconds, 30, 5, 3600))
         festive = c.festive !== false
         panel = c.panel !== false
+        lockPanel = c.lockPanel !== false
         cardPos = /^[tb][lcr]$/.test(c.cardPos) ? c.cardPos : "tr"
         cardX = Math.round(num(c.cardX, 32, -4000, 4000))
         cardY = Math.round(num(c.cardY, 32, 0, 4000))
@@ -230,6 +232,7 @@ D.ApplicationWindow {
         c.cloudAlpha = Math.round(cloudAlpha * 100) / 100
         c.festive = festive
         c.panel = panel
+        c.lockPanel = lockPanel
         c.cardPos = cardPos
         c.cardX = cardX
         c.cardY = cardY
@@ -1425,7 +1428,7 @@ D.ApplicationWindow {
                                 }
                             }
                         }
-                        Hint { text: "点预览图里的六块区域或上面的按钮换位置。锁屏上卡片的位置和大小与桌面一样。" }
+                        Hint { text: "点预览图里的六块区域或上面的按钮换位置。" + (win.lockPanel ? "锁屏上卡片的位置和大小与桌面一样。" : "") }
                     }
                 }
 
@@ -1537,6 +1540,14 @@ D.ApplicationWindow {
                         desc: "桌面和锁屏上都不画天气卡片，上面的位置和卡片内容不起作用"
                         checked: !win.panel
                         onToggled: on => win.panel = !on
+                    }
+                    CheckRow {
+                        enabled: win.panel
+                        opacity: win.panel ? 1 : 0.45
+                        text: "锁屏上只显示天气，不显示卡片"
+                        desc: "锁屏时卡片淡出，回到桌面再显示"
+                        checked: !win.lockPanel
+                        onToggled: on => win.lockPanel = !on
                     }
                 }
             }
