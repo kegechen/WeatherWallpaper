@@ -27,6 +27,10 @@ CFG=/etc/wwp/weather.json
 HELPER=/usr/local/libexec/wwp-config
 # 卸载前把正在用的天气壁纸换回默认（deb 的 prerm 也调它）
 UNSET=/usr/local/libexec/wwp-unset
+# 壁纸停住（treeland 不再拉起 factory）时弹通知的用户服务，每个图形会话都启动
+WATCH=/usr/local/libexec/wwp-watch
+WATCH_UNIT=/usr/lib/systemd/user/wwp-watch.service
+WATCH_LINK=/usr/lib/systemd/user/graphical-session.target.wants/wwp-watch.service
 POLICY=/usr/share/polkit-1/actions/io.github.wwp.weather.policy
 # .desktop 和图标装 /usr/share：polkit 只认 /usr/share/polkit-1；启动器（dde-application-manager）对 /usr/local/share 的索引不可靠，标准路径最稳
 DESKTOP=/usr/share/applications/wwp-settings.desktop
@@ -117,6 +121,10 @@ do_install() {
   install -m 755 "$BUILD/settings/wwp-settings" "$BIN/wwp-settings"
   install -D -m 755 "$HERE/settings/wwp-config" "$HELPER"
   install -D -m 755 "$HERE/tools/wwp-unset.sh" "$UNSET"
+  install -D -m 755 "$HERE/tools/wwp-watch.sh" "$WATCH"
+  install -D -m 644 "$HERE/tools/wwp-watch.service" "$WATCH_UNIT"
+  install -d -m 755 "$(dirname "$WATCH_LINK")"
+  ln -sfn ../wwp-watch.service "$WATCH_LINK"
   install -D -m 644 "$HERE/settings/io.github.wwp.weather.policy" "$POLICY"
   install -D -m 644 "$HERE/settings/wwp-settings.desktop" "$DESKTOP"
   install -D -m 644 "$HERE/settings/wwp-settings.png" "$ICON"
@@ -164,6 +172,9 @@ EOF
     echo "默认配置：$CFG"
   fi
   do_register
+  # 已登录的用户现在就（重新）启动提醒服务
+  "$WATCH" --each-user daemon-reload
+  "$WATCH" --each-user restart wwp-watch.service
   echo "已安装 $BIN/treeland-wallpaper-factory、$BIN/wwp-set、设置窗口 $BIN/wwp-settings（启动器里的“天气壁纸设置”）。"
   echo "让 treeland 换用新 factory 的办法见本脚本开头。"
 }
@@ -172,7 +183,9 @@ do_uninstall() {
   need_root uninstall
   # 先趁 wwp-set 还在，把已登录用户正在用的天气壁纸换回默认，否则桌面和控制中心的“当前壁纸”预览会空着
   if [ -x "$BIN/wwp-set" ]; then WWP_SET=$BIN/wwp-set sh "$HERE/tools/wwp-unset.sh" || true; fi
+  sh "$HERE/tools/wwp-watch.sh" --each-user stop wwp-watch.service
   rm -f "$BIN/treeland-wallpaper-factory" "$BIN/wwp-set" "$BIN/wwp-settings" "$HELPER" "$UNSET" "$POLICY" "$DESKTOP" "$ICON"
+  rm -f "$WATCH" "$WATCH_LINK" "$WATCH_UNIT"
   rm -rf "$PKG_DST"
   if [ "$(dpkg-divert --truename "$META")" = "$META_ORIG" ]; then
     rm -f "$META"

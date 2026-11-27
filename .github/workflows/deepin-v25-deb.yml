@@ -119,9 +119,12 @@ jobs:
           META=/usr/share/wallpapers/deepin-livewallpapers/metadata.json
           grep -q '"wwp-weather-web"' "$META"
           test -f /usr/local/share/wallpapers/wwp/weather-web/weather-web.wwp
+          # 壁纸停住时提醒的用户服务：默认随图形会话启动
+          test -e /usr/lib/systemd/user/graphical-session.target.wants/wwp-watch.service
           apt-get remove -y wwp-weather-wallpaper
           if [ -e "$META" ] && grep -q '"wwp-' "$META"; then echo "卸载后列表里还有天气壁纸"; exit 1; fi
           test ! -e /usr/local/share/wallpapers/wwp
+          test ! -e /usr/lib/systemd/user/wwp-watch.service
 
       - uses: actions/upload-artifact@v4
         with:

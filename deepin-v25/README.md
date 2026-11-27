@@ -27,6 +27,7 @@
 | `tools/wwp-set.c` | 命令行查看、切换壁纸（和控制中心走同一个协议） |
 | `tools/wwp-reload.sh` | 开发用：换上新编的 factory，再把壁纸切走又切回 |
 | `tools/wwp-unset.sh` | 卸载前把已登录用户正在用的天气壁纸换回系统默认壁纸（装成 `/usr/local/libexec/wwp-unset`） |
+| `tools/wwp-watch.sh` + `.service` | 用户服务：treeland 不再拉起壁纸进程时弹通知（装成 `/usr/local/libexec/wwp-watch`），见下文“壁纸停住时的提醒” |
 | `packages/<名字>/` | 壁纸包：`manifest.json` + QML 场景 |
 | `packages/weather-web/` | 网页版：`main.qml`（`WebEngineView`）+ `host.js`（宿主）+ `web.src`（指向仓库顶层的 `web/`） |
 | `settings/` | 设置窗口 `wwp-settings`（Qt Quick，Chameleon/DTK 风格）+ 提权助手 `wwp-config` + polkit 策略 + .desktop + 图标 |
@@ -64,6 +65,8 @@ sudo dpkg -i build/wwp-weather-wallpaper_*.deb
 /usr/local/bin/wwp-settings                    设置窗口
 /usr/local/libexec/wwp-config                  提权助手（root 运行，写配置、存自选壁纸）
 /usr/local/libexec/wwp-unset                   卸载前把正在用的天气壁纸换回默认
+/usr/local/libexec/wwp-watch                   壁纸停住时弹通知（用户服务跑它）
+/usr/lib/systemd/user/wwp-watch.service        上面那个用户服务；graphical-session.target.wants/ 里有它的链接
 /usr/local/share/wallpapers/wwp/<名字>/
     manifest.json  main.qml  web/              壁纸包本身
     thumbnail.png                              控制中心列表里的缩略图
@@ -190,6 +193,19 @@ treeland 0.11 的锁屏界面（`Greeter.qml`）把壁纸以屏幕中心放大�
 替换旧文件。系统里自带的壁纸（`/usr/share/wallpapers/deepin/`）直接引用路径。窗口关了没保存会问一次。
 显示的不是天气壁纸时页脚有“设为桌面和锁屏壁纸”按钮（调 `wwp-set`），“还原”放弃未保存的修改。
 
+## 壁纸停住时的提醒
+
+treeland 0.11 的壁纸进程（factory）异常退出（崩溃、被结束）后会马上重新拉起，但**一次 treeland 运行里累计**超过
+10 次就不再拉起（日志 `Wallpaper process restart limit reached after 11 abnormal exits`），计数只在 treeland 重启时清零，
+中间跑得再稳也不减。到上限之后桌面和锁屏停在最后一帧（云不动、卡片时间不走，锁屏的卡片也没人缩回来），换壁纸也不生效。
+
+用户服务 `wwp-watch.service`（每个图形会话一份）每 30 秒看一次：treeland 在、它下面却没有 factory 子进程，连续两次就弹一条
+“天气壁纸停住了”的通知，说明原因和恢复办法；通知上的“重启 treeland”按钮走 systemd 的 polkit 授权（要输管理员密码），
+会关掉所有窗口回到锁屏。只在这次 treeland 运行里见过 factory，或者 treeland 日志里查得到“到上限 / 拉不起来”时才提示，
+每次 treeland 运行最多一次。`WWP_WATCH_TEST=1 /usr/local/libexec/wwp-watch` 弹一条测试通知（按钮不重启）；
+不想要：`systemctl --user mask wwp-watch.service`。随会话启动靠的是 `/usr/lib/systemd/user/graphical-session.target.wants/`
+里的链接，`systemctl --user is-enabled` 只认 /etc 和家目录下的链接，所以显示 `disabled`，实际照样启动。
+
 ## deb 安装包
 
 ```sh
@@ -203,13 +219,15 @@ sudo dpkg -r wwp-weather-wallpaper   # 卸载，见下
   `/usr/local/share/wallpapers/wwp/` 下不是本包带的旧壁纸包（install.sh 装过的 `weather` 占位场景、`weather-overlay` 等）
   会被删掉（删之前已登录用户正在用它的，先换成本包的 `weather-web`），控制中心里只剩一个“天气壁纸”。`deepin-wallpapers` 升级时（它的新列表落到被 divert 的 `metadata.json.deepin`）
   由 dpkg 触发器（`interest-noawait /usr/share/wallpapers/deepin-livewallpapers`）自动重新合并。
+  已登录用户的 `wwp-watch` 服务当场（重新）启动，其他用户下次登录时启动。
 - **卸载**（`dpkg -r`）：`prerm` 先调 `wwp-unset`，已登录用户的桌面 / 锁屏正在用天气壁纸的，换回
-  `/usr/share/backgrounds/default_background.jpg`（不换的话桌面和控制中心的“当前壁纸”预览会空着）；
+  `/usr/share/backgrounds/default_background.jpg`（不换的话桌面和控制中心的“当前壁纸”预览会空着），再停掉他们的 `wwp-watch`；
   `postrm` 还原动态壁纸列表，删掉整个 `/usr/local/share/wallpapers/wwp`（包括不归 dpkg 管的残留），控制中心里不再有天气壁纸。
   `/etc/wwp/weather.json`（conffile）和 `/var/lib/wwp` 的自选壁纸保留，`dpkg -P` 才删。没登录的用户 treeland 还记着旧路径，
   下次登录后在控制中心重选一张即可。
 - **依赖**：动态库用 `dpkg-shlibdeps` 按二进制直接链接的库算（带版本）；运行时加载的 QML 模块（`qml6-module-*`）、
-  Chromium 渲染进程 `QtWebEngineProcess`（`libqt6webenginecore6-bin`，WebEngine 的库包不依赖它）、`python3`、`pkexec` 手写；Chameleon 风格是 Recommends。架构随打包机（`dpkg --print-architecture`）。
+  Chromium 渲染进程 `QtWebEngineProcess`（`libqt6webenginecore6-bin`，WebEngine 的库包不依赖它）、`python3`、`pkexec`、
+  `wwp-watch` 用的 `libnotify-bin`（`notify-send`）和 `procps`（`pgrep`）手写；Chameleon 风格是 Recommends。架构随打包机（`dpkg --print-architecture`）。
   `treeland` 限定 0.11.x（`>= 0.11~, << 0.12~`）：factory 是从 0.11 改出来的，和它的私有壁纸协议绑定，
   treeland 出新版本时 apt 会先挡住它的升级（或要求先卸掉本包），要拿新版本重新合一遍 factory、发新 deb。
 - **版本号**：`deb/version`；环境变量 `DEB_VERSION` 可覆盖（CI 用）；`DEB_MAINTAINER` 默认 GitHub noreply 地址，

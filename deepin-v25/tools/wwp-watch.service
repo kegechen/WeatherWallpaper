@@ -1,0 +1,17 @@
+# 天气壁纸：treeland 不再拉起壁纸进程时弹通知（脚本见 tools/wwp-watch.sh）。
+# 装在 /usr/lib/systemd/user/，graphical-session.target.wants/ 里的链接让每个图形会话都启动它；
+# 不想要：systemctl --user mask wwp-watch.service
+[Unit]
+Description=天气壁纸：壁纸停住时提醒
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/libexec/wwp-watch
+Restart=on-failure
+RestartSec=30
+# 每 30 秒一次 pgrep，给最低优先级
+Nice=19
+
+[Install]
+WantedBy=graphical-session.target

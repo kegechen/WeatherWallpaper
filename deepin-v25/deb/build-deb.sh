@@ -13,6 +13,7 @@
 #     只登记本包带的壁纸包；别的方式装进来的旧壁纸包（install.sh 装过的 weather 占位场景等）会被删掉
 #   * 启动器里出现“天气壁纸设置”（位置、底层壁纸、卡片、模式）
 #   * treeland 还在用旧 factory 时：sudo systemctl restart treeland，或结束 treeland-wallpaper-factory 进程再换一次壁纸
+#   * 用户服务 wwp-watch：treeland 不再拉起壁纸进程（异常退出到上限）时弹通知
 # 卸载 sudo dpkg -r wwp-weather-wallpaper：已登录用户正在用的天气壁纸换回系统默认壁纸，动态壁纸列表还原，
 # /usr/local/share/wallpapers/wwp 整个删掉；/etc/wwp/weather.json 和 /var/lib/wwp 的自选壁纸保留，purge 才删。
 set -eu
@@ -50,6 +51,11 @@ install -D -m 755 "$BUILD/wwp-set"                     "$STAGE/usr/local/bin/wwp
 install -D -m 755 "$BUILD/settings/wwp-settings"       "$STAGE/usr/local/bin/wwp-settings"
 install -D -m 755 "$ROOT/settings/wwp-config"          "$STAGE/usr/local/libexec/wwp-config"
 install -D -m 755 "$ROOT/tools/wwp-unset.sh"           "$STAGE/usr/local/libexec/wwp-unset"
+install -D -m 755 "$ROOT/tools/wwp-watch.sh"           "$STAGE/usr/local/libexec/wwp-watch"
+# 壁纸停住时提醒的用户服务：链接放进 graphical-session.target.wants，每个图形会话都启动（dpkg 管这个链接，卸载时一起删）
+install -D -m 644 "$ROOT/tools/wwp-watch.service"      "$STAGE/usr/lib/systemd/user/wwp-watch.service"
+install -d -m 755 "$STAGE/usr/lib/systemd/user/graphical-session.target.wants"
+ln -s ../wwp-watch.service "$STAGE/usr/lib/systemd/user/graphical-session.target.wants/wwp-watch.service"
 install -D -m 644 "$ROOT/settings/io.github.wwp.weather.policy" "$STAGE/usr/share/polkit-1/actions/io.github.wwp.weather.policy"
 install -D -m 644 "$ROOT/settings/wwp-settings.desktop"         "$STAGE/usr/share/applications/wwp-settings.desktop"
 install -D -m 644 "$ROOT/settings/wwp-settings.png"             "$STAGE/usr/share/icons/hicolor/256x256/apps/wwp-settings.png"
@@ -83,8 +89,8 @@ QML_DEPS="qml6-module-qtquick, qml6-module-qtquick-window, qml6-module-qtquick-c
 QML_DEPS="$QML_DEPS, libqt6webenginecore6-bin"
 # treeland：factory 由它拉起。这个 factory 是从 treeland 0.11 的 wallpaper-factory 改出来的、和它的私有壁纸协议绑在一起，
 #   限定 0.11.x：treeland 出 0.12 时 apt 会先挡住升级（或要求先卸掉本包），而不是升级完壁纸全黑
-# python3：提权助手 wwp-config；pkexec：设置窗口保存时提权
-DEPS="treeland (>= 0.11~), treeland (<< 0.12~), python3, pkexec, $QML_DEPS, $SHLIB_DEPS"
+# python3：提权助手 wwp-config；pkexec：设置窗口保存时提权；libnotify-bin（notify-send）、procps（pgrep）：wwp-watch
+DEPS="treeland (>= 0.11~), treeland (<< 0.12~), python3, pkexec, libnotify-bin, procps, $QML_DEPS, $SHLIB_DEPS"
 
 # 不取本机 git 的 user.email：deb 会被传到公开的 Release，别把开发者的邮箱带进去
 MAINT=${DEB_MAINTAINER:-"kegechen <kegechen@users.noreply.github.com>"}
@@ -164,6 +170,9 @@ os.chmod(tmp, 0o644)
 os.replace(tmp, out)
 PY
 if [ "\$1" = configure ]; then
+  # 壁纸停住时的提醒服务：已登录的用户现在就（重新）启动，不用等下次登录
+  /usr/local/libexec/wwp-watch --each-user daemon-reload
+  /usr/local/libexec/wwp-watch --each-user restart wwp-watch.service
   echo "装好了：控制中心 → 个性化 → 壁纸 → 动态壁纸 里选“天气壁纸”；启动器里的“天气壁纸设置”可调位置、底层壁纸和卡片。"
   echo "treeland 还在用旧 factory 的话：sudo systemctl restart treeland，或结束 treeland-wallpaper-factory 进程后再选一次壁纸。"
 fi
@@ -176,6 +185,10 @@ set -e
 # 真卸载（不是升级）时，趁 wwp-set 还在，把已登录用户正在用的天气壁纸换回系统默认壁纸
 if [ "$1" = remove ] && [ -x /usr/local/libexec/wwp-unset ]; then
   /usr/local/libexec/wwp-unset || true
+fi
+# 已登录用户的提醒服务停掉（升级不停，新版 postinst 会重启它）
+if [ "$1" = remove ] && [ -x /usr/local/libexec/wwp-watch ]; then
+  /usr/local/libexec/wwp-watch --each-user stop wwp-watch.service
 fi
 exit 0
 EOF
