@@ -14,6 +14,7 @@
 //   city        城市名。只填它会去地名库查经纬度；和 lat/lon 一起填则只用作显示名
 //   lat, lon    经纬度
 //   fps         页面帧率（5–60，默认 24）
+//   cloudFps    云的帧率（1–24，默认 6）。和 fps 各管各的；下雨雪时整页按 fps 出帧，云最多也就这么快
 //   panel       显示天气卡片（默认 true）
 //   show        卡片上显示哪些内容（城市和当前天气总是显示），同 Windows 版 CardSpec.Show 的键，逗号分隔的字符串或数组：
 //               date 公历日期、week 星期、lunar 农历、hilo 今日最高 / 最低、src 定位来源、aqi 空气、feel 体感、hum 湿度、wind 风、
@@ -248,9 +249,9 @@
       t: 'layout', primary: true, ground, overlay: false,
       panel: !SNAPSHOT && cfg.panel !== false, noWeather: false,
       fps: num(cfg.fps, 24, 5, 60) | 0, lowmem: !!cfg.lowmem, minimal: minimal(),
-      // 云每秒只画 6 帧（Windows 版 12）：Qt WebEngine 在 treeland 上每出一帧的固定开销大（L540 上约 0.7% 单核 / 帧每秒，
-      // 和画了什么几乎无关），treeland 还要跟着重合成整屏；云飘得慢、边缘软，6 帧和 12 帧并排对比看不出差别
-      cloudFps: 6,
+      // 云默认每秒只画 6 帧（Windows 版 12）：Qt WebEngine 在 treeland 上每出一帧的固定开销大（L540 上约 0.7% 单核 / 帧每秒，
+      // 和画了什么几乎无关），treeland 还要跟着重合成整屏；云飘得慢、边缘软，6 帧和 12 帧并排对比看不出差别。设置窗口可调
+      cloudFps: num(cfg.cloudFps, 6, 1, 24) | 0,
       overlayWall: overlayWall(), skyOpacity: num(cfg.skyOpacity, 0.45, 0.05, 1), cloudAlpha: num(cfg.cloudAlpha, 0.72, 0.1, 1),
       festive: cfg.festive !== false, scene: KEY, screen: 'treeland', cards: [card],
       effects: [],   // 自定义效果脚本暂不支持（列表一变页面会整页重载，这里保持不变）

@@ -60,6 +60,8 @@ D.ApplicationWindow {
         { v: "minimal", t: "极简模式", d: "平时只显示壁纸和卡片，几乎不占 CPU；拿到第一份天气、转雨、下雪时整屏播一段动画" }
     ]
     readonly property int defFps: 24
+    readonly property int defCloudFps: 6
+    readonly property int maxCloudFps: 24
     readonly property real defSky: 0.45
     readonly property real defCloud: 0.72
 
@@ -103,6 +105,7 @@ D.ApplicationWindow {
     property var show: []
     property int refreshMin: 15
     property int fps: defFps
+    property int cloudFps: defCloudFps
 
     property string status: ""
     property bool statusError: false
@@ -177,6 +180,7 @@ D.ApplicationWindow {
         show = showKeys.map(s => s.k).filter(k => want.indexOf(k) >= 0 && hide.indexOf(k) < 0)
         refreshMin = Math.round(num(c.refresh, 15, 5, 180))
         fps = Math.round(num(c.fps, defFps, 5, 60))
+        cloudFps = Math.round(num(c.cloudFps, defCloudFps, 1, maxCloudFps))
         cityResults = []
         searchMsg = ""
         savedSig = JSON.stringify(buildCfg())
@@ -222,6 +226,7 @@ D.ApplicationWindow {
         delete c.cardTop
         c.refresh = refreshMin
         c.fps = fps
+        c.cloudFps = cloudFps
         return c
     }
 
@@ -1403,6 +1408,16 @@ D.ApplicationWindow {
                         from: 5; to: 60
                         fps: win.fps
                         onPicked: v => win.fps = v
+                    }
+                }
+                Divider {}
+                SettingRow {
+                    title: "云的帧率"
+                    desc: "云飘得慢，默认 " + win.defCloudFps + " fps 就够；调高更细腻，也更费 CPU"
+                    FpsSlider {
+                        from: 1; to: win.maxCloudFps
+                        fps: win.cloudFps
+                        onPicked: v => win.cloudFps = v
                     }
                 }
             }
