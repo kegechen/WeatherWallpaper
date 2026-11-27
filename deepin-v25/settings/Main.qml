@@ -8,7 +8,8 @@ import org.deepin.dtk.style 1.0 as DS
 
 // 天气壁纸设置：读 /etc/wwp/weather.json 填进界面，"应用"时整份写回（配置里界面没有的字段原样保留）。
 // 壁纸页面（host.js）每 2 秒看一次配置文件，写进去几秒内就生效，不用切换壁纸。字段含义见 deepin-v25/README.md。
-// 界面：每组设置一张卡片；"位置""画面"用分段按钮切换，下面只显示选中那一项自己的设置。
+// 界面和 Windows 版的卡片设置窗口（web/card.html）一个布局：两栏，左边基本信息、卡片内容、其他，
+// 右边位置（预览图 + 六个位置按钮 + 偏移）、天气画面；每组设置一张卡片，分段按钮下面只显示选中那一项自己的设置。
 // 窗口、按钮、输入框、开关都走 Qt Quick Controls 的标准控件，deepin 上 Chameleon 风格把它们映射成
 // DTK QML 实现（主题、字体、圆角、活动色跟着系统走）；只有 DTK 没提供的分段容器用 D.ButtonBox，
 // 图片圆角用 Rounded（Qt5Compat 的 OpacityMask，和控制中心的壁纸缩略图一样）。
@@ -16,12 +17,12 @@ D.ApplicationWindow {
     id: win
 
     title: "天气壁纸设置"
-    width: 820
-    height: 760
+    width: 980
+    height: 800
     minimumWidth: 680
     minimumHeight: 520
-    // 内容最宽 780、居中，再宽只是两边留白：不给最大化，横向也只留一点余量；高度随便拉，多看几行
-    maximumWidth: 960
+    // 窄于 860 时两栏改成上下排；内容最宽 1100、居中，再宽只是两边留白：不给最大化，横向也只留一点余量
+    maximumWidth: 1200
     visible: true
     // DTK 窗口样式：圆角、阴影、DTK 标题栏（和控制中心等系统应用一致）。
     // 标题栏右上角的最小化 / 关闭按钮要看窗口 flags 里有没有对应的 Hint，不写就只剩一个菜单按钮。
@@ -40,13 +41,20 @@ D.ApplicationWindow {
     // ---- 和 host.js 一致的常量
     readonly property int cardW: 336
     readonly property string defaultShow: "hilo,src,aqi,feel,hum,wind,hours,days,sun,upd"
-    readonly property var showKeys: [
-        { k: "date", t: "公历日期" }, { k: "week", t: "星期" }, { k: "lunar", t: "农历" },
-        { k: "hilo", t: "今日最高 / 最低" }, { k: "src", t: "定位来源" }, { k: "aqi", t: "空气质量" },
-        { k: "feel", t: "体感温度" }, { k: "hum", t: "湿度" }, { k: "wind", t: "风" },
-        { k: "hours", t: "今天逐小时" }, { k: "days", t: "未来几天" }, { k: "sun", t: "日出日落" },
-        { k: "upd", t: "更新时间" }
+    // 卡片内容的键，顺序同 host.js / Windows 版 CardSpec.ShowKeys（配置里按这个顺序写）
+    readonly property var showKeys: ["date", "week", "lunar", "hilo", "src", "aqi", "feel", "hum", "wind", "hours", "days", "sun", "upd"]
+    // 勾选按组排，组名和文字同 Windows 版卡片设置
+    readonly property var showGroups: [
+        { t: "日期", items: [{ k: "date", t: "公历" }, { k: "week", t: "星期" }, { k: "lunar", t: "农历" }] },
+        { t: "天气", items: [{ k: "hilo", t: "今天最高最低温" }, { k: "src", t: "定位方式" }] },
+        { t: "指标", items: [{ k: "aqi", t: "空气" }, { k: "feel", t: "体感" }, { k: "hum", t: "湿度" }, { k: "wind", t: "风力" }] },
+        { t: "预报", items: [{ k: "hours", t: "今天逐小时" }, { k: "days", t: "未来几天" }] },
+        { t: "底部", items: [{ k: "sun", t: "日出日落" }, { k: "upd", t: "更新时间" }] }
     ]
+    // 大 / 中 / 小只管这几项，日期、指标等其余勾选保持不变（同 Windows 版 SIZES）
+    readonly property var sizes: [{ v: "l", t: "大卡片" }, { v: "m", t: "中卡片" }, { v: "s", t: "小卡片" }]
+    readonly property var sizeKeys: ["hours", "days", "sun", "upd"]
+    readonly property var sizeSets: ({ l: ["hours", "days", "sun", "upd"], m: ["hours", "sun", "upd"], s: [] })
     readonly property var positions: [
         { p: "tl", t: "左上" }, { p: "tc", t: "顶部居中" }, { p: "tr", t: "右上" },
         { p: "bl", t: "左下" }, { p: "bc", t: "底部居中" }, { p: "br", t: "右下" }
@@ -123,7 +131,12 @@ D.ApplicationWindow {
     readonly property bool dirty: savedSig !== "" && JSON.stringify(buildCfg()) !== savedSig
     readonly property string problem: checkProblem()
     readonly property var modeInfo: modes.find(m => m.v === mode) || modes[0]
-    readonly property string posName: (positions.find(p => p.p === cardPos) || positions[2]).t
+    // 现在的卡片内容是大 / 中 / 小哪一档，"" = 都不是（自定义）
+    readonly property string cardSize: sizes.map(z => z.v).find(z => sizeKeys.every(k => (show.indexOf(k) >= 0) === (sizeSets[z].indexOf(k) >= 0))) || ""
+    // 表单左边一列标签的宽度：两个字（城市、日期……）和四个字（刷新间隔……）各一种
+    readonly property int labelW: Math.ceil(probe2.implicitWidth) + 4
+    readonly property int labelW2: Math.ceil(probe4.implicitWidth) + 4
+    readonly property int formIndent: labelW + 12
     // 预览里显示的底层壁纸：叠加没选时没有图；极简没选时是系统默认壁纸
     readonly property url backdropUrl: mode === "weather" || (mode === "overlay" && backdrop === "") ? ""
                                        : backend.fileUrl(backdrop !== "" ? backdrop : backend.defaultBackdrop)
@@ -177,7 +190,7 @@ D.ApplicationWindow {
         cardY = Math.round(num(c.cardY, 32, 0, 4000))
         var want = keyList(Array.isArray(c.show) || typeof c.show === "string" ? c.show : defaultShow)
         var hide = keyList(c.hide)
-        show = showKeys.map(s => s.k).filter(k => want.indexOf(k) >= 0 && hide.indexOf(k) < 0)
+        show = showKeys.filter(k => want.indexOf(k) >= 0 && hide.indexOf(k) < 0)
         refreshMin = Math.round(num(c.refresh, 15, 5, 180))
         fps = Math.round(num(c.fps, defFps, 5, 60))
         cloudFps = Math.round(num(c.cloudFps, defCloudFps, 1, maxCloudFps))
@@ -287,7 +300,12 @@ D.ApplicationWindow {
         var s = show.filter(x => x !== k)
         if (on)
             s.push(k)
-        show = showKeys.map(x => x.k).filter(x => s.indexOf(x) >= 0)
+        show = showKeys.filter(x => s.indexOf(x) >= 0)
+    }
+    // 大 / 中 / 小：只换逐小时、未来几天、底部一行，其余勾选不动
+    function setSize(z) {
+        var s = show.filter(k => sizeKeys.indexOf(k) < 0).concat(sizeSets[z])
+        show = showKeys.filter(k => s.indexOf(k) >= 0)
     }
 
     // 卡片高度和位置：同 host.js 的 cardHeight / sendLayout（Windows 版 CardLayout.HeightOf）
@@ -485,6 +503,10 @@ D.ApplicationWindow {
         Qt.callLater(() => win.ready = true)
     }
 
+    // 量表单标签的宽度用，不显示
+    Label { id: probe2; visible: false; text: "城市" }
+    Label { id: probe4; visible: false; text: "刷新间隔" }
+
     FileDialog {
         id: fileDialog
         title: "选择底层壁纸"
@@ -652,29 +674,43 @@ D.ApplicationWindow {
 
     // -------------------------------------------------------------------------------------------------------------- 小组件
 
-    // 一组设置的标题
-    component SectionTitle: Label {
-        font.family: D.DTK.fontManager.t6.family
-        font.pixelSize: D.DTK.fontManager.t6.pixelSize
-        font.weight: Font.DemiBold
-        Layout.topMargin: 14
-        Layout.leftMargin: 4
-    }
-    // 圆角卡片，里面的东西竖着排
-    component Card: Rectangle {
-        id: card
+    // 一组设置：圆角卡片，标题写在卡片里（同 Windows 卡片设置窗口的 section + h2），标题右边可以放一个小字（trailing）
+    component Section: Rectangle {
+        id: sec
+        property string title
+        property alias trailing: tail.data
         default property alias body: inner.data
-        readonly property int pad: 18
+        readonly property int pad: 16
         Layout.fillWidth: true
-        implicitHeight: inner.implicitHeight + pad * 2
+        implicitHeight: col.implicitHeight + pad * 2
         radius: DS.Style.control.radius
         color: win.cardColor
         ColumnLayout {
-            id: inner
-            x: card.pad
-            y: card.pad
-            width: card.width - card.pad * 2
-            spacing: 14
+            id: col
+            x: sec.pad
+            y: sec.pad
+            width: sec.width - sec.pad * 2
+            spacing: 12
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                Label {
+                    Layout.fillWidth: true
+                    text: sec.title
+                    font.family: D.DTK.fontManager.t6.family
+                    font.pixelSize: D.DTK.fontManager.t6.pixelSize
+                    font.weight: Font.DemiBold
+                }
+                RowLayout {
+                    id: tail
+                    spacing: 8
+                }
+            }
+            ColumnLayout {
+                id: inner
+                Layout.fillWidth: true
+                spacing: 12
+            }
         }
     }
     component Divider: Rectangle {
@@ -688,34 +724,12 @@ D.ApplicationWindow {
         opacity: 0.6
         font: D.DTK.fontManager.t9
     }
-    // 一行设置：左边标题和说明，右边控件
-    component SettingRow: RowLayout {
-        id: row
-        property string title
-        property string desc
-        default property alias trailing: tail.data
-        Layout.fillWidth: true
-        spacing: 16
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 2
-            Label {
-                Layout.fillWidth: true
-                text: row.title
-            }
-            Label {
-                Layout.fillWidth: true
-                visible: row.desc !== ""
-                text: row.desc
-                wrapMode: Text.Wrap
-                opacity: 0.6
-                font: D.DTK.fontManager.t9
-            }
-        }
-        RowLayout {
-            id: tail
-            spacing: 8
-        }
+    // 表单左边一列的标签（同 Windows 版 .form 的 label：淡一点、定宽，控件对齐成一列）
+    component FormLabel: Label {
+        property int w: win.labelW
+        Layout.preferredWidth: w
+        Layout.minimumWidth: w
+        opacity: 0.7
     }
     // 帧率滑块：整数，右边显示当前值
     component FpsSlider: RowLayout {
@@ -724,10 +738,14 @@ D.ApplicationWindow {
         property alias to: sl.to
         property int fps
         signal picked(int v)
+        Layout.fillWidth: true
         spacing: 8
         Slider {
             id: sl
-            Layout.preferredWidth: 260
+            Layout.fillWidth: true
+            // DTK 的滑块把手柄贴着上边画，整块的高度却按手柄的 implicitHeight（比画出来的高）算，和同一行的文字对不齐：
+            // 高度就定成手柄画出来的高度
+            implicitHeight: handle ? handle.height : 24
             stepSize: 1
             snapMode: Slider.SnapAlways
             highlightedPassedGroove: true
@@ -740,14 +758,36 @@ D.ApplicationWindow {
             horizontalAlignment: Text.AlignRight
         }
     }
+    // 勾选框 + 下面一行说明（同 Windows 版的 label.chk）
+    component CheckRow: ColumnLayout {
+        id: cr
+        property alias text: cb.text
+        property alias checked: cb.checked
+        property string desc
+        signal toggled(bool on)
+        Layout.fillWidth: true
+        spacing: 0
+        CheckBox {
+            id: cb
+            Layout.fillWidth: true
+            onToggled: cr.toggled(checked)
+        }
+        Hint {
+            visible: cr.desc !== ""
+            Layout.leftMargin: cb.leftPadding + (cb.indicator ? cb.indicator.width : 20) + cb.spacing
+            text: cr.desc
+        }
+    }
     // 分段按钮：DTK 的 ButtonBox —— 几个可勾选的 ToolButton 连成一排，由 DTK 画选中背板（带滑动动画）。
     // ButtonBox 的 default property 是 buttons，按钮必须直接写成它的子项（不能运行时再创建），
-    // 所以这里固定摆 3 个，options 不够 3 项时多的隐藏（目前用到的分段都是 3 项）
+    // 所以这里固定摆 3 个，options 不够 3 项时多的隐藏（目前用到的分段都是 3 项）。
+    // current 不是任何一项时（卡片内容不是大 / 中 / 小里的哪一档）一个都不亮
     component Segmented: D.ButtonBox {
         id: seg
         property var options: []       // [{ v: 值, t: 文字 }]，最多 3 项
         property var current
         signal picked(var v)
+        Layout.fillWidth: true
         SegButton { box: seg; idx: 0 }
         SegButton { box: seg; idx: 1 }
         SegButton { box: seg; idx: 2 }
@@ -761,31 +801,59 @@ D.ApplicationWindow {
         text: opt ? opt.t : ""
         checkable: true
         checked: opt !== undefined && opt.v === box.current
-        Layout.minimumWidth: 96
+        Layout.fillWidth: true
+        Layout.minimumWidth: 80
+        Layout.preferredWidth: 100     // 几个按钮一样宽，平分整行
         onClicked: box.picked(opt.v)
     }
-    // 可点的标签（卡片显示内容）：选中时是活动色描边、淡活动色底，前面一个勾
-    component Chip: AbstractButton {
-        id: chip
-        property bool sel: false
-        hoverEnabled: true
-        implicitHeight: 32
-        implicitWidth: chipFont.advanceWidth("✓ " + text) + 30   // 按带勾的宽度算：勾选时宽度不变，整排不会跳
-        FontMetrics {
-            id: chipFont
-            font: chip.font
+    // 六个位置按钮上的小图标：一块屏，卡片在哪个角（同 Windows 版 .grid i）
+    component PosIcon: Rectangle {
+        id: pi
+        property string pos
+        property color tint
+        implicitWidth: 22
+        implicitHeight: 15
+        radius: 2
+        color: "transparent"
+        border.width: 1
+        border.color: win.fade(tint, 0.55)
+        Rectangle {
+            width: 7
+            height: 5
+            radius: 1
+            color: pi.tint
+            x: pi.pos[1] === "l" ? 2 : pi.pos[1] === "r" ? pi.width - width - 2 : (pi.width - width) / 2
+            y: pi.pos[0] === "t" ? 2 : pi.height - height - 2
         }
-        contentItem: Label {
-            text: (chip.sel ? "✓ " : "") + chip.text
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-            color: chip.sel ? win.accent : win.ink
-        }
-        background: Rectangle {
-            radius: height / 2
-            color: chip.sel ? win.fade(win.accent, win.dark ? 0.24 : 0.11) : chip.hovered ? win.fade(win.ink, 0.05) : "transparent"
-            border.width: 1
-            border.color: chip.sel ? win.fade(win.accent, 0.65) : win.fade(win.ink, 0.2)
+    }
+    component PosButton: Button {
+        id: pb
+        property string pos
+        property string label
+        readonly property bool sel: win.cardPos === pos
+        Layout.fillWidth: true
+        Layout.preferredWidth: 100     // 三列一样宽
+        highlighted: sel
+        onClicked: win.setCardPos(pos)
+        contentItem: Item {
+            implicitWidth: pbRow.implicitWidth
+            implicitHeight: pbRow.implicitHeight
+            Row {
+                id: pbRow
+                anchors.centerIn: parent
+                spacing: 7
+                PosIcon {
+                    anchors.verticalCenter: parent.verticalCenter
+                    pos: pb.pos
+                    tint: pbText.color
+                }
+                Label {
+                    id: pbText
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: pb.label
+                    color: pb.sel ? win.palette.highlightedText : win.ink
+                }
+            }
         }
     }
     // 选中标记：活动色圆点里一个勾
@@ -841,129 +909,199 @@ D.ApplicationWindow {
 
     // -------------------------------------------------------------------------------------------------------------- 内容
 
+    // 和 Windows 版的卡片设置窗口（web/card.html）一个布局：两栏，左边基本信息、卡片内容（再加“其他”），
+    // 右边位置（预览图 + 六个位置按钮 + 偏移）、天气画面；窗口窄了上下排。
+    // 这一版只有一张卡片、每块屏一样，所以没有页签和显示器；改完点“应用”才保存（要提权），不是改了马上存
     ScrollView {
         id: sv
         anchors.fill: parent
         contentWidth: availableWidth
-        // contentHeight 必须显式给：不写的话靠 childrenRect 推断，ColumnLayout 常常推成 0，
+        // contentHeight 必须显式给：不写的话靠 childrenRect 推断，Layout 常常推成 0，
         // 内容比窗口高的部分就永远滚不到（看着就是“窗口太长、下面的设置不见了”）
-        contentHeight: content.implicitHeight + 36
+        contentHeight: content.implicitHeight + 28
         clip: true
 
-        ColumnLayout {
+        GridLayout {
             id: content
-            width: Math.min(sv.availableWidth - 48, 780)
+            readonly property bool wide: sv.availableWidth >= 860
+            // 右栏定宽（预览图按它算）；预览图的尺寸由这里直接算，不能按栏的实际宽度再算高度：布局会来回算个没完
+            readonly property real rightW: wide ? 420 : width
+            readonly property real thumbW: Math.min(rightW - 32, 440)
+            width: Math.min(sv.availableWidth - 40, 1100)
             x: (sv.availableWidth - width) / 2
-            y: 6
-            spacing: 8
+            y: 12
+            columns: wide ? 2 : 1
+            columnSpacing: 12
+            rowSpacing: 12
 
-            // ---- 位置
-            SectionTitle { text: "位置" }
-            Card {
-                Segmented {
-                    options: win.locModes
-                    current: win.locMode
-                    onPicked: v => win.setLocMode(v)
-                }
+            // ---- 左栏
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
+                spacing: 12
 
-                // 自动定位：只显示定位到哪里
-                ColumnLayout {
-                    visible: win.locMode === "auto"
-                    Layout.fillWidth: true
-                    spacing: 4
-                    RowLayout {
-                        spacing: 8
-                        Rectangle {
-                            implicitWidth: 8
-                            implicitHeight: 8
-                            radius: 4
-                            color: win.ipState === "ok" ? "#2bb673" : win.ipState === "fail" ? win.errorColor : win.fade(win.ink, 0.3)
-                        }
-                        Label {
-                            text: win.ipState === "ok" || win.ipState === "fail" ? win.ipPlace : "正在按 IP 定位…"
-                            font.weight: win.ipState === "ok" ? Font.DemiBold : Font.Normal
-                        }
-                        Label {
-                            visible: win.ipState === "ok"
-                            text: win.ipCoord
-                            opacity: 0.55
-                        }
-                    }
-                    Hint {
-                        text: win.ipState === "fail" ? "壁纸会自己过一会儿重试；一直失败的话改用“搜索城市”或“输入经纬度”"
-                                                     : "按 IP 定位，走代理、VPN 时可能不准，不准就改用“搜索城市”或“输入经纬度”"
-                    }
-                }
-
-                // 搜索城市：搜索框 + 结果列表 + 当前选中的城市（经纬度跟着结果走，这里不能改）
-                ColumnLayout {
-                    visible: win.locMode === "search"
-                    Layout.fillWidth: true
-                    spacing: 10
+                Section {
+                    title: "基本信息"
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: 12
+                        FormLabel { text: "城市" }
+                        Segmented {
+                            options: win.locModes
+                            current: win.locMode
+                            onPicked: v => win.setLocMode(v)
+                        }
+                    }
+
+                    // 搜索城市：搜索框 + 结果列表（经纬度跟着选中的结果走，这里不能改）
+                    ColumnLayout {
+                        visible: win.locMode === "search"
+                        Layout.fillWidth: true
+                        Layout.leftMargin: win.formIndent
                         spacing: 8
-                        TextField {
-                            id: cityField
+                        RowLayout {
                             Layout.fillWidth: true
-                            placeholderText: "城市、区县或景区，如 武汉、婺源、神农架"
-                            onAccepted: win.searchCity()
+                            spacing: 8
+                            TextField {
+                                id: cityField
+                                Layout.fillWidth: true
+                                placeholderText: "城市、区县或景区，如 武汉、婺源、神农架"
+                                onAccepted: win.searchCity()
+                            }
+                            Button {
+                                text: win.searching ? "搜索中…" : "搜索"
+                                enabled: !win.searching && cityField.text.trim() !== ""
+                                onClicked: win.searchCity()
+                            }
                         }
-                        Button {
-                            text: win.searching ? "搜索中…" : "搜索"
-                            enabled: !win.searching && cityField.text.trim() !== ""
-                            onClicked: win.searchCity()
+                        Hint {
+                            visible: text !== ""
+                            text: win.searchMsg
                         }
-                    }
-                    Hint {
-                        visible: text !== ""
-                        text: win.searchMsg
-                    }
-                    Rectangle {
-                        visible: win.cityResults.length > 0
-                        Layout.fillWidth: true
-                        implicitHeight: results.implicitHeight + 8
-                        radius: 10
-                        color: "transparent"
-                        border.color: win.lineColor
-                        ColumnLayout {
-                            id: results
-                            x: 4
-                            y: 4
-                            width: parent.width - 8
-                            spacing: 0
-                            Repeater {
-                                model: win.cityResults
-                                delegate: ItemDelegate {
-                                    id: res
-                                    required property var modelData
-                                    Layout.fillWidth: true
-                                    contentItem: RowLayout {
-                                        spacing: 10
-                                        Label {
-                                            text: res.modelData.name
-                                            font.weight: Font.DemiBold
+                        Rectangle {
+                            visible: win.cityResults.length > 0
+                            Layout.fillWidth: true
+                            implicitHeight: results.implicitHeight + 8
+                            radius: 10
+                            color: "transparent"
+                            border.color: win.lineColor
+                            ColumnLayout {
+                                id: results
+                                x: 4
+                                y: 4
+                                width: parent.width - 8
+                                spacing: 0
+                                Repeater {
+                                    model: win.cityResults
+                                    delegate: ItemDelegate {
+                                        id: res
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        contentItem: RowLayout {
+                                            spacing: 10
+                                            Label {
+                                                text: res.modelData.name
+                                                font.weight: Font.DemiBold
+                                            }
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: res.modelData.detail
+                                                elide: Text.ElideRight
+                                                opacity: 0.6
+                                            }
+                                            Label {
+                                                text: res.modelData.lat.toFixed(2) + ", " + res.modelData.lon.toFixed(2)
+                                                opacity: 0.45
+                                                font: D.DTK.fontManager.t9
+                                            }
                                         }
-                                        Label {
-                                            Layout.fillWidth: true
-                                            text: res.modelData.detail
-                                            elide: Text.ElideRight
-                                            opacity: 0.6
-                                        }
-                                        Label {
-                                            text: res.modelData.lat.toFixed(2) + ", " + res.modelData.lon.toFixed(2)
-                                            opacity: 0.45
-                                            font: D.DTK.fontManager.t9
-                                        }
+                                        onClicked: win.pickCity(res.modelData)
                                     }
-                                    onClicked: win.pickCity(res.modelData)
                                 }
                             }
                         }
                     }
+
+                    // 输入经纬度：纬度、经度一行（同 Windows 版），下面是名称（按经纬度自动反查，可以改）
                     RowLayout {
-                        visible: win.cityName.trim() !== "" || win.hasCoords()
+                        visible: win.locMode === "coord"
                         Layout.fillWidth: true
+                        Layout.leftMargin: win.formIndent
+                        spacing: 8
+                        Label { text: "纬度"; opacity: 0.7 }
+                        TextField {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 100
+                            placeholderText: "如 30.5928，南纬为负"
+                            text: win.latText
+                            onTextEdited: {
+                                if (!win.pasteCoords(text))
+                                    win.latText = text
+                                win.coordEdited()
+                            }
+                        }
+                        Label { text: "经度"; opacity: 0.7; Layout.leftMargin: 4 }
+                        TextField {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 100
+                            placeholderText: "如 114.3055，西经为负"
+                            text: win.lonText
+                            onTextEdited: {
+                                win.lonText = text
+                                win.coordEdited()
+                            }
+                        }
+                    }
+                    RowLayout {
+                        visible: win.locMode === "coord"
+                        Layout.fillWidth: true
+                        spacing: 12
+                        FormLabel { text: "名称" }
+                        TextField {
+                            Layout.fillWidth: true
+                            placeholderText: "卡片上显示的名字，留空显示经纬度"
+                            text: win.cityName
+                            onTextEdited: win.cityName = text
+                        }
+                    }
+
+                    // 现在定位到哪里（同 Windows 版城市下面那一行）
+                    ColumnLayout {
+                        visible: win.locMode === "auto"
+                        Layout.fillWidth: true
+                        Layout.leftMargin: win.formIndent
+                        spacing: 4
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle {
+                                implicitWidth: 8
+                                implicitHeight: 8
+                                radius: 4
+                                color: win.ipState === "ok" ? "#2bb673" : win.ipState === "fail" ? win.errorColor : win.fade(win.ink, 0.3)
+                            }
+                            Label {
+                                Layout.fillWidth: win.ipState !== "ok"
+                                elide: Text.ElideRight
+                                text: win.ipState === "ok" || win.ipState === "fail" ? win.ipPlace : "正在按 IP 定位…"
+                                font.weight: win.ipState === "ok" ? Font.DemiBold : Font.Normal
+                            }
+                            Label {
+                                visible: win.ipState === "ok"
+                                Layout.fillWidth: true
+                                text: win.ipCoord
+                                opacity: 0.55
+                            }
+                        }
+                        Hint {
+                            text: win.ipState === "fail" ? "壁纸会自己过一会儿重试；一直失败的话改用“搜索城市”或“输入经纬度”"
+                                                         : "按 IP 定位，换了地方会跟着变；走代理、VPN 时可能不准，不准就改用“搜索城市”或“输入经纬度”"
+                        }
+                    }
+                    RowLayout {
+                        visible: win.locMode === "search" && (win.cityName.trim() !== "" || win.hasCoords())
+                        Layout.fillWidth: true
+                        Layout.leftMargin: win.formIndent
                         spacing: 8
                         Badge {
                             implicitWidth: 18
@@ -981,55 +1119,15 @@ D.ApplicationWindow {
                                                   : "没定经纬度：壁纸会查地名库里第一个同名的地方，最好搜一下点选"
                         }
                     }
-                }
-
-                // 输入经纬度：经纬度 + 显示名（按经纬度自动反查，可以改）
-                ColumnLayout {
-                    visible: win.locMode === "coord"
-                    Layout.fillWidth: true
-                    spacing: 10
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 4
-                        columnSpacing: 10
-                        rowSpacing: 10
-                        Label { text: "纬度" }
-                        TextField {
-                            Layout.fillWidth: true
-                            placeholderText: "如 30.5928，南纬为负"
-                            text: win.latText
-                            onTextEdited: {
-                                if (!win.pasteCoords(text))
-                                    win.latText = text
-                                win.coordEdited()
-                            }
-                        }
-                        Label { text: "经度"; Layout.leftMargin: 8 }
-                        TextField {
-                            Layout.fillWidth: true
-                            placeholderText: "如 114.3055，西经为负"
-                            text: win.lonText
-                            onTextEdited: {
-                                win.lonText = text
-                                win.coordEdited()
-                            }
-                        }
-                        Label { text: "显示名" }
-                        TextField {
-                            Layout.columnSpan: 3
-                            Layout.fillWidth: true
-                            placeholderText: "卡片上显示的名字，留空显示经纬度"
-                            text: win.cityName
-                            onTextEdited: win.cityName = text
-                        }
-                    }
                     RowLayout {
+                        visible: win.locMode === "coord"
                         Layout.fillWidth: true
+                        Layout.leftMargin: win.formIndent
                         spacing: 8
                         Hint {
                             text: win.revBusy ? "正在按经纬度反查地名…"
                                   : win.revMsg !== "" ? win.revMsg
-                                  : "改了经纬度，显示名会自动换成反查到的地名（自己改过的不动）。可以把地图上复制的“30.5928, 114.3055”直接粘贴进纬度框"
+                                  : "改了经纬度，名称会自动换成反查到的地名（自己改过的不动）。可以把地图上复制的“30.5928, 114.3055”直接粘贴进纬度框"
                         }
                         Button {
                             visible: !win.revBusy && win.revName !== "" && win.revName !== win.cityName
@@ -1042,225 +1140,181 @@ D.ApplicationWindow {
                         }
                     }
                 }
-            }
 
-            // ---- 画面
-            SectionTitle { text: "画面" }
-            Card {
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-                    Segmented {
-                        options: win.modes
-                        current: win.mode
-                        onPicked: v => win.setMode(v)
+                // 卡片内容：上面大 / 中 / 小三个快捷档（只管逐小时、未来几天、底部一行），下面按组逐项勾选；
+                // 勾选正好是某一档时那档亮起，标题右边是卡片大小（同 Windows 版）
+                Section {
+                    title: "卡片内容"
+                    trailing: Label {
+                        text: (win.cardSize === "" ? "自定义 · " : "") + win.cardW + " × " + win.cardHeight()
+                        opacity: 0.6
+                        font: D.DTK.fontManager.t9
                     }
-                    Hint { text: win.modeInfo.d }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        enabled: win.panel
+                        opacity: win.panel ? 1 : 0.45
+                        spacing: 10
+                        Segmented {
+                            options: win.sizes
+                            current: win.cardSize
+                            onPicked: v => win.setSize(v)
+                        }
+                        Hint { text: "城市和当前天气总是显示；其余可单独开关，卡片高度随之变化" }
+                        Repeater {
+                            model: win.showGroups
+                            delegate: RowLayout {
+                                id: grp
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 12
+                                FormLabel {
+                                    text: grp.modelData.t
+                                    Layout.alignment: Qt.AlignTop
+                                    Layout.topMargin: 4
+                                }
+                                Flow {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Repeater {
+                                        model: grp.modelData.items
+                                        delegate: CheckBox {
+                                            required property var modelData
+                                            text: modelData.t
+                                            checked: win.show.indexOf(modelData.k) >= 0
+                                            onToggled: win.setShow(modelData.k, checked)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
-                // 底层壁纸（叠加、极简）：左边预览，右边换图；叠加时再加天空、云的不透明度，预览跟着变
-                Divider { visible: win.mode !== "weather" }
-                RowLayout {
-                    visible: win.mode !== "weather"
-                    Layout.fillWidth: true
-                    spacing: 20
-                    Rounded {
-                        radius: 10
-                        Layout.alignment: Qt.AlignTop
-                        Layout.preferredWidth: 240
-                        Layout.preferredHeight: Math.round(240 * win.screenH / win.screenW)
-                        Rectangle {
-                            anchors.fill: parent
-                            color: "#5b6470"   // 读不到图片时的底色，同 host.js
+                // 其他：Windows 版在托盘菜单里的几项
+                Section {
+                    title: "其他"
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        FormLabel { text: "刷新间隔"; w: win.labelW2 }
+                        SpinBox {
+                            Layout.preferredWidth: 140   // DTK 的 SpinBox 不限宽会撑满整行
+                            from: 5; to: 180; stepSize: 5
+                            editable: true
+                            value: win.refreshMin
+                            onValueModified: win.refreshMin = value
                         }
-                        Image {
-                            anchors.fill: parent
-                            source: win.backdropUrl
-                            sourceSize.width: 480
-                            fillMode: Image.PreserveAspectCrop
-                            asynchronous: true
+                        Label { text: "分钟"; Layout.fillWidth: true }
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            FormLabel { text: "播放动画"; w: win.labelW2 }
+                            SpinBox {
+                                Layout.preferredWidth: 140
+                                from: 5; to: 3600; stepSize: 5
+                                editable: true
+                                value: win.playSeconds
+                                onValueModified: win.playSeconds = value
+                            }
+                            Label { text: "秒"; Layout.fillWidth: true }
                         }
-                        SkyGradient {
-                            visible: win.mode === "overlay"
-                            opacity: win.skyOpacity
-                        }
-                        Rectangle {   // 太阳：叠加时日月照常不透明
-                            visible: win.mode === "overlay"
-                            x: parent.width * 0.16
-                            y: parent.height * 0.18
-                            width: parent.width * 0.1
-                            height: width
-                            radius: width / 2
-                            color: "#ffd66b"
-                        }
-                        Cloud {
-                            visible: win.mode === "overlay"
-                            x: parent.width * 0.5
-                            y: parent.height * 0.3
-                            opacity: win.cloudAlpha
-                        }
-                        Label {
-                            visible: win.mode === "overlay" && win.backdrop === ""
-                            anchors.centerIn: parent
-                            text: "还没选壁纸"
-                            color: "white"
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: wallDialog.show()
+                        Hint {
+                            Layout.leftMargin: win.labelW2 + 12
+                            text: (win.mode === "minimal" ? "极简模式每段天气动画、" : "") + "雨后转晴时的彩虹都播这么久"
                         }
                     }
                     ColumnLayout {
                         Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignTop
-                        spacing: 10
+                        spacing: 2
                         RowLayout {
                             Layout.fillWidth: true
-                            spacing: 10
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 2
-                                Label { text: win.mode === "overlay" ? "底层壁纸" : "平时显示的壁纸" }
-                                Label {
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideMiddle
-                                    opacity: 0.6
-                                    font: D.DTK.fontManager.t9
-                                    text: win.backdrop !== "" ? win.fileName(win.backdrop) : win.mode === "minimal" ? "系统默认壁纸" : "还没选"
-                                }
-                            }
-                            Button {
-                                text: win.backdrop === "" && win.mode === "overlay" ? "选择壁纸…" : "更换…"
-                                highlighted: win.backdrop === "" && win.mode === "overlay"
-                                onClicked: wallDialog.show()
+                            spacing: 12
+                            FormLabel { text: "雨雪帧率"; w: win.labelW2 }
+                            FpsSlider {
+                                from: 5; to: 60
+                                fps: win.fps
+                                onPicked: v => win.fps = v
                             }
                         }
-                        Button {
-                            visible: win.mode === "minimal" && win.backdrop !== ""
-                            flat: true
-                            text: "改用系统默认壁纸"
-                            onClicked: {
-                                win.backdrop = ""
-                                win.pendingImage = ""
-                            }
+                        Hint {
+                            Layout.leftMargin: win.labelW2 + 12
+                            text: "下雨、下雪、打雷时按它画，越高越流畅、越费 CPU。默认 " + win.defFps + " fps"
                         }
-                        GridLayout {
-                            visible: win.mode === "overlay"
-                            Layout.fillWidth: true
-                            columns: 3
-                            columnSpacing: 10
-                            rowSpacing: 2
-                            Label { text: "天空" }
-                            Slider {
-                                Layout.fillWidth: true
-                                from: 0.05; to: 1; stepSize: 0.05
-                                highlightedPassedGroove: true
-                                value: win.skyOpacity
-                                onMoved: win.skyOpacity = value
-                            }
-                            Label {
-                                text: win.pct(win.skyOpacity) + "%"
-                                Layout.preferredWidth: 40
-                                horizontalAlignment: Text.AlignRight
-                            }
-                            Label { text: "云" }
-                            Slider {
-                                Layout.fillWidth: true
-                                from: 0.1; to: 1; stepSize: 0.05
-                                highlightedPassedGroove: true
-                                value: win.cloudAlpha
-                                onMoved: win.cloudAlpha = value
-                            }
-                            Label {
-                                text: win.pct(win.cloudAlpha) + "%"
-                                Layout.preferredWidth: 40
-                                horizontalAlignment: Text.AlignRight
-                            }
-                        }
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
                         RowLayout {
-                            visible: win.mode === "overlay"
                             Layout.fillWidth: true
-                            Hint { text: "不透明度越小，壁纸越清楚。实际的天空颜色随时间和天气变" }
-                            Button {
-                                flat: true
-                                text: "恢复默认"
-                                enabled: win.pct(win.skyOpacity) !== win.pct(win.defSky) || win.pct(win.cloudAlpha) !== win.pct(win.defCloud)
-                                onClicked: {
-                                    win.skyOpacity = win.defSky
-                                    win.cloudAlpha = win.defCloud
-                                }
+                            spacing: 12
+                            FormLabel { text: "云的帧率"; w: win.labelW2 }
+                            FpsSlider {
+                                from: 1; to: win.maxCloudFps
+                                fps: win.cloudFps
+                                onPicked: v => win.cloudFps = v
                             }
                         }
-                    }
-                }
-
-                Divider {}
-                SettingRow {
-                    title: "每次播放动画"
-                    desc: (win.mode === "minimal" ? "极简模式每段天气动画、" : "") + "雨后转晴时的彩虹都播这么久"
-                    SpinBox {
-                        Layout.preferredWidth: 140   // DTK 的 SpinBox 不限宽会撑满整行
-                        from: 5; to: 3600; stepSize: 5
-                        editable: true
-                        value: win.playSeconds
-                        onValueModified: win.playSeconds = value
-                    }
-                    Label { text: "秒" }
-                }
-                Divider {}
-                SettingRow {
-                    title: "节日装饰与彩蛋"
-                    desc: "春节、中秋、圣诞等节日的装饰，和一些小彩蛋"
-                    Switch {
-                        checked: win.festive
-                        onToggled: win.festive = checked
+                        Hint {
+                            Layout.leftMargin: win.labelW2 + 12
+                            text: "云飘得慢，默认 " + win.defCloudFps + " fps 就够；调高更细腻，也更费 CPU"
+                        }
                     }
                 }
             }
 
-            // ---- 天气卡片
-            SectionTitle { text: "天气卡片" }
-            Card {
-                SettingRow {
-                    title: "显示天气卡片"
-                    desc: "桌面和锁屏上的天气卡片"
-                    Switch {
-                        checked: win.panel
-                        onToggled: win.panel = checked
-                    }
-                }
-                Divider { visible: win.panel }
-                RowLayout {
-                    id: cardRow
-                    visible: win.panel
-                    Layout.fillWidth: true
-                    spacing: 24
-                    // 屏幕示意图：按屏幕比例画出卡片的位置和大小；点六个区域之一把卡片挪过去，悬停时先画出虚影。
-                    // 尺寸由整行宽度直接算（不能用 fillWidth 再按 width 算高度：布局会来回算个没完）
+            // ---- 右栏
+            ColumnLayout {
+                Layout.fillWidth: !content.wide
+                Layout.preferredWidth: content.wide ? content.rightW : -1
+                Layout.alignment: Qt.AlignTop
+                spacing: 12
+
+                // 位置：上面预览图（按屏幕比例画出卡片的位置和大小，点六个区域之一把卡片挪过去，悬停时先画出虚影），
+                // 下面六个位置按钮和偏移（同 Windows 版）
+                Section {
+                    title: "位置"
                     Rounded {
                         id: screenBox
-                        radius: 10
-                        readonly property real pw: Math.max(200, Math.min(400, cardRow.width - 250 - cardRow.spacing))
+                        radius: 8
                         readonly property real k: width / win.screenW
                         readonly property rect card: win.cardRect(win.screenW, win.screenH, win.cardPos)
                         property string hoverPos: ""
                         readonly property rect ghost: hoverPos !== "" ? win.cardRect(win.screenW, win.screenH, hoverPos) : Qt.rect(0, 0, 0, 0)
-                        Layout.alignment: Qt.AlignTop
-                        Layout.preferredWidth: pw
-                        Layout.preferredHeight: Math.round(pw * win.screenH / win.screenW)
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: content.thumbW
+                        Layout.preferredHeight: Math.round(content.thumbW * win.screenH / win.screenW)
                         SkyGradient {}
                         Image {
                             anchors.fill: parent
                             visible: win.mode !== "weather"
-                            source: win.mode === "weather" ? "" : backend.fileUrl(win.backdrop !== "" ? win.backdrop : backend.defaultBackdrop)
-                            sourceSize.width: 800
+                            source: win.backdropUrl
+                            sourceSize.width: 880
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                         }
                         SkyGradient {   // 叠加时半透明的天空
                             visible: win.mode === "overlay"
                             opacity: win.skyOpacity
+                        }
+                        Rectangle {   // 太阳：叠加时日月照常不透明；极简模式平时不画天气
+                            visible: win.mode !== "minimal"
+                            x: parent.width * 0.12
+                            y: parent.height * 0.14
+                            width: parent.width * 0.07
+                            height: width
+                            radius: width / 2
+                            color: "#ffd66b"
+                        }
+                        Cloud {
+                            visible: win.mode !== "minimal"
+                            x: parent.width * 0.26
+                            y: parent.height * 0.22
+                            opacity: win.mode === "overlay" ? win.cloudAlpha : 0.95
                         }
                         Rectangle {   // 任务栏
                             anchors.left: parent.left
@@ -1270,7 +1324,7 @@ D.ApplicationWindow {
                             color: "#ccf2f5fa"
                         }
                         Rectangle {   // 悬停位置的虚影
-                            visible: screenBox.hoverPos !== "" && screenBox.hoverPos !== win.cardPos
+                            visible: win.panel && screenBox.hoverPos !== "" && screenBox.hoverPos !== win.cardPos
                             x: screenBox.ghost.x * screenBox.k
                             y: screenBox.ghost.y * screenBox.k
                             width: screenBox.ghost.width * screenBox.k
@@ -1280,7 +1334,7 @@ D.ApplicationWindow {
                             border.width: 1.5
                             border.color: "#b3ffffff"
                         }
-                        Rectangle {   // 卡片
+                        Rectangle {   // 卡片（只显示天气画面时淡一点）
                             x: screenBox.card.x * screenBox.k
                             y: screenBox.card.y * screenBox.k
                             width: screenBox.card.width * screenBox.k
@@ -1288,6 +1342,7 @@ D.ApplicationWindow {
                             radius: 14 * screenBox.k
                             color: "#66ffffff"
                             border.color: "#e6ffffff"
+                            opacity: win.panel ? 1 : 0.35
                             Behavior on x { enabled: win.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                             Behavior on y { enabled: win.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                             Behavior on height { enabled: win.ready; NumberAnimation { duration: 150 } }
@@ -1300,6 +1355,7 @@ D.ApplicationWindow {
                                 y: modelData.p[0] === "t" ? 0 : screenBox.height / 2
                                 width: screenBox.width / 3
                                 height: screenBox.height / 2
+                                enabled: win.panel
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onContainsMouseChanged: {
@@ -1313,117 +1369,181 @@ D.ApplicationWindow {
                         }
                     }
                     ColumnLayout {
-                        Layout.alignment: Qt.AlignTop
-                        Layout.preferredWidth: 250
+                        Layout.fillWidth: true
+                        enabled: win.panel
+                        opacity: win.panel ? 1 : 0.45
                         spacing: 12
-                        ColumnLayout {
-                            spacing: 2
-                            Label {
-                                text: "位置"
-                                opacity: 0.6
-                                font: D.DTK.fontManager.t9
-                            }
-                            Label {
-                                text: win.posName
-                                font.family: D.DTK.fontManager.t4.family
-                                font.pixelSize: D.DTK.fontManager.t4.pixelSize
-                                font.weight: Font.DemiBold
-                            }
-                        }
                         GridLayout {
+                            Layout.fillWidth: true
                             columns: 3
-                            columnSpacing: 8
-                            rowSpacing: 8
-                            Label { text: win.cardPos[1] === "c" ? "水平偏移" : "离左右边" }
-                            SpinBox {
-                                Layout.preferredWidth: 140   // DTK 的 SpinBox 不限宽会撑满整行
-                                from: win.cardPos[1] === "c" ? -2000 : 0; to: 2000; stepSize: 4
-                                editable: true
-                                value: win.cardX
-                                onValueModified: win.cardX = value
+                            columnSpacing: 6
+                            rowSpacing: 6
+                            Repeater {
+                                model: win.positions
+                                delegate: PosButton {
+                                    required property var modelData
+                                    pos: modelData.p
+                                    label: modelData.t
+                                }
                             }
-                            Label { text: "像素" }
-                            Label { text: win.cardPos[0] === "b" ? "离任务栏" : "离上边" }
-                            SpinBox {
-                                Layout.preferredWidth: 140   // DTK 的 SpinBox 不限宽会撑满整行
-                                from: 0; to: 2000; stepSize: 4
-                                editable: true
-                                value: win.cardY
-                                onValueModified: win.cardY = value
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 100
+                                spacing: 4
+                                Label {
+                                    text: (win.cardPos[1] === "l" ? "离左边" : win.cardPos[1] === "r" ? "离右边" : "离中线（正数往右）") + " · 像素"
+                                    opacity: 0.7
+                                    font: D.DTK.fontManager.t9
+                                }
+                                SpinBox {
+                                    Layout.fillWidth: true
+                                    from: win.cardPos[1] === "c" ? -2000 : 0; to: 2000; stepSize: 4
+                                    editable: true
+                                    value: win.cardX
+                                    onValueModified: win.cardX = value
+                                }
                             }
-                            Label { text: "像素" }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 100
+                                spacing: 4
+                                Label {
+                                    text: (win.cardPos[0] === "b" ? "离下边（任务栏上方）" : "离上边") + " · 像素"
+                                    opacity: 0.7
+                                    font: D.DTK.fontManager.t9
+                                }
+                                SpinBox {
+                                    Layout.fillWidth: true
+                                    from: 0; to: 2000; stepSize: 4
+                                    editable: true
+                                    value: win.cardY
+                                    onValueModified: win.cardY = value
+                                }
+                            }
                         }
-                        Hint {
-                            text: "点左边示意图换位置（分左中右、上下六块）。" + (win.cardPos[1] === "c" ? "居中时水平偏移为正往右、为负往左。" : "")
-                                  + "锁屏上卡片的位置和大小与桌面一样"
-                        }
+                        Hint { text: "点预览图里的六块区域或上面的按钮换位置。锁屏上卡片的位置和大小与桌面一样。" }
                     }
                 }
-                Divider { visible: win.panel }
-                ColumnLayout {
-                    visible: win.panel
-                    Layout.fillWidth: true
-                    spacing: 10
+
+                // 天气画面：模式、底层壁纸、叠加时的不透明度（预览在上面的位置图里）、节日装饰，以及要不要卡片
+                Section {
+                    title: "天气画面"
                     ColumnLayout {
-                        spacing: 2
-                        Label { text: "显示内容" }
-                        Hint { text: "城市和当前天气总是显示，卡片高度跟着变" }
-                    }
-                    Flow {
                         Layout.fillWidth: true
                         spacing: 8
-                        Repeater {
-                            model: win.showKeys
-                            delegate: Chip {
-                                required property var modelData
-                                text: modelData.t
-                                sel: win.show.indexOf(modelData.k) >= 0
-                                onClicked: win.setShow(modelData.k, !sel)
+                        Segmented {
+                            options: win.modes
+                            current: win.mode
+                            onPicked: v => win.setMode(v)
+                        }
+                        Hint { text: win.modeInfo.d }
+                    }
+
+                    // 底层壁纸（叠加、极简）：文件名 + 换图；叠加时再加天空、云的不透明度
+                    RowLayout {
+                        visible: win.mode !== "weather"
+                        Layout.fillWidth: true
+                        spacing: 10
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Label { text: win.mode === "overlay" ? "底层壁纸" : "平时显示的壁纸" }
+                            Label {
+                                Layout.fillWidth: true
+                                elide: Text.ElideMiddle
+                                opacity: 0.6
+                                font: D.DTK.fontManager.t9
+                                text: win.backdrop !== "" ? win.fileName(win.backdrop) : win.mode === "minimal" ? "系统默认壁纸" : "还没选"
                             }
                         }
+                        Button {
+                            visible: win.mode === "minimal" && win.backdrop !== ""
+                            flat: true
+                            text: "用系统默认"
+                            onClicked: {
+                                win.backdrop = ""
+                                win.pendingImage = ""
+                            }
+                        }
+                        Button {
+                            text: win.backdrop === "" && win.mode === "overlay" ? "选择壁纸…" : "更换…"
+                            highlighted: win.backdrop === "" && win.mode === "overlay"
+                            onClicked: wallDialog.show()
+                        }
+                    }
+                    GridLayout {
+                        visible: win.mode === "overlay"
+                        Layout.fillWidth: true
+                        columns: 3
+                        columnSpacing: 10
+                        rowSpacing: 14
+                        Label { text: "天空" }
+                        Slider {
+                            Layout.fillWidth: true
+                            implicitHeight: handle ? handle.height : 24   // 同 FpsSlider：和左右的文字对齐
+                            from: 0.05; to: 1; stepSize: 0.05
+                            highlightedPassedGroove: true
+                            value: win.skyOpacity
+                            onMoved: win.skyOpacity = value
+                        }
+                        Label {
+                            text: win.pct(win.skyOpacity) + "%"
+                            Layout.preferredWidth: 40
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Label { text: "云" }
+                        Slider {
+                            Layout.fillWidth: true
+                            implicitHeight: handle ? handle.height : 24
+                            from: 0.1; to: 1; stepSize: 0.05
+                            highlightedPassedGroove: true
+                            value: win.cloudAlpha
+                            onMoved: win.cloudAlpha = value
+                        }
+                        Label {
+                            text: win.pct(win.cloudAlpha) + "%"
+                            Layout.preferredWidth: 40
+                            horizontalAlignment: Text.AlignRight
+                        }
+                    }
+                    RowLayout {
+                        visible: win.mode === "overlay"
+                        Layout.fillWidth: true
+                        Hint { text: "不透明度越小，壁纸越清楚。实际的天空颜色随时间和天气变" }
+                        Button {
+                            flat: true
+                            text: "恢复默认"
+                            enabled: win.pct(win.skyOpacity) !== win.pct(win.defSky) || win.pct(win.cloudAlpha) !== win.pct(win.defCloud)
+                            onClicked: {
+                                win.skyOpacity = win.defSky
+                                win.cloudAlpha = win.defCloud
+                            }
+                        }
+                    }
+
+                    Divider {}
+                    CheckRow {
+                        text: "节日装饰与彩蛋"
+                        desc: "春节、中秋、圣诞等节日的装饰，和一些小彩蛋"
+                        checked: win.festive
+                        onToggled: on => win.festive = on
+                    }
+                    CheckRow {
+                        text: "只显示天气画面，不显示卡片"
+                        desc: "桌面和锁屏上都不画天气卡片，上面的位置和卡片内容不起作用"
+                        checked: !win.panel
+                        onToggled: on => win.panel = !on
                     }
                 }
             }
 
-            // ---- 其他
-            SectionTitle { text: "其他" }
-            Card {
-                SettingRow {
-                    title: "天气刷新间隔"
-                    desc: "多久取一次天气"
-                    SpinBox {
-                        Layout.preferredWidth: 140   // DTK 的 SpinBox 不限宽会撑满整行
-                        from: 5; to: 180; stepSize: 5
-                        editable: true
-                        value: win.refreshMin
-                        onValueModified: win.refreshMin = value
-                    }
-                    Label { text: "分钟" }
-                }
-                Divider {}
-                SettingRow {
-                    title: "雨雪的帧率"
-                    desc: "下雨、下雪、打雷时按它画，越高越流畅、越费 CPU。默认 " + win.defFps + " fps"
-                    FpsSlider {
-                        from: 5; to: 60
-                        fps: win.fps
-                        onPicked: v => win.fps = v
-                    }
-                }
-                Divider {}
-                SettingRow {
-                    title: "云的帧率"
-                    desc: "云飘得慢，默认 " + win.defCloudFps + " fps 就够；调高更细腻，也更费 CPU"
-                    FpsSlider {
-                        from: 1; to: win.maxCloudFps
-                        fps: win.cloudFps
-                        onPicked: v => win.cloudFps = v
-                    }
-                }
-            }
             Hint {
+                Layout.columnSpan: content.columns
                 Layout.leftMargin: 4
-                Layout.topMargin: 4
                 text: "配置文件是 " + backend.configPath + "，也可以直接手改（字段见 README），保存后几秒内生效"
             }
         }
