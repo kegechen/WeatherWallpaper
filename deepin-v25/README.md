@@ -140,6 +140,7 @@ factory 以 `dde` 用户运行，读不到用户家目录，所以放在 /etc）
 | `cardX`、`cardY` | 32 | 卡片离参照边的距离（CSS 像素）；`tc`/`bc` 时 `cardX` 是相对屏幕中线的偏移，可为负 |
 | `show` | 见下 | 卡片上显示哪些内容，逗号分隔的字符串或数组，键见下表。不填 = 默认的 `hilo,src,aqi,feel,hum,wind,hours,days,sun,upd`（除日期行外都显示）；`""` = 只显示城市和当前天气 |
 | `hide` | — | 从 `show`（没填就是默认）里去掉这几项，写法同 `show`。只想关掉一两项时用它省事，如 `"hide": "hours"` |
+| `locBy` | — | 设置窗口的记忆字段：指定位置时是“搜索城市”（`search`）还是“输入经纬度”（`coord`），下次打开停在同一页。host.js 不读它 |
 | `lastBackdrop` | — | 设置窗口的记忆字段：切回“天气动画”时 `backdrop` 必须清空（它就是叠加的开关），上次选的壁纸路径记在这里，再切回“壁纸叠加”不用重选。host.js 不读它 |
 | `cardRight`、`cardTop` | — | 旧版字段，已换成 `cardPos` / `cardX` / `cardY`，写配置时会自动删掉 |
 | `lockZoom` | 1.2 | 锁屏界面把壁纸放大的倍数，锁屏时卡片层按它反向缩小；设成 1 则不处理 |
@@ -185,11 +186,22 @@ treeland 0.11 的锁屏界面（`Greeter.qml`）把壁纸以屏幕中心放大�
 
 ## 设置窗口（天气壁纸设置）
 
-启动器里搜“天气壁纸”（`/usr/share/applications/wwp-settings.desktop`）。窗口是 Qt Quick，deepin 上自动用
-系统的 Chameleon 风格（和 DTK 控件一个样子），没有就退回 Fusion。内容可滚动；保存走 `pkexec` 提权助手
+启动器里搜“天气壁纸”（`/usr/share/applications/wwp-settings.desktop`）。窗口是 Qt Quick + DTK QML
+（`org.deepin.dtk`）：`D.ApplicationWindow` + DTK 标题栏（主题菜单、最小化 / 关闭；不给最大化，内容最宽 780，拉大只是多留白），控件走系统的 Chameleon 风格，
+卡片分组、颜色、圆角取控制中心的样式，跟随系统深浅色和活动色；选壁纸、关窗确认是 DTK 对话框。
+要装 `libdtk6declarative` 和 Chameleon 风格（deb 已依赖），没有 DTK 的系统起不来。内容可滚动；保存走 `pkexec` 提权助手
 `wwp-config`（root、`python3 -I`），polkit 策略 `io.github.wwp.weather.configure` 允许**本机活动会话免密码**，
-别的会话要管理员密码。窗口能改配置表里的所有字段（城市 / 经纬度搜索、三种画面模式、44 张系统壁纸网格或从
-文件选择、天空云的不透明度、卡片位置和内容、刷新和帧率），“应用”后几秒内生效（配置热加载）。
+别的会话要管理员密码。“应用”后几秒内生效（配置热加载）。
+
+界面按所选功能只显示该功能的设置：
+
+- **位置**：分段按钮“自动定位 / 搜索城市 / 输入经纬度”。自动定位没有别的输入；搜索城市是搜索框 + 结果列表，
+  选中后显示当前城市和经纬度；输入经纬度可以直接粘贴“30.59, 114.31”这类坐标，填好后自动反查地名，
+  显示名默认跟着地名走，手动改过就不再覆盖。
+- **画面**：分段按钮“天气动画 / 壁纸叠加 / 极简模式”，下面一行说明。天气动画不显示底层壁纸；
+  壁纸叠加和极简模式显示紧凑的底层壁纸（缩略图 +“更换…”，对话框里是 44 张系统壁纸网格或从文件选择）；
+  只有叠加时才有天空、云的不透明度，用滑块调，旁边是实时预览。三种模式都有播放秒数和节日装饰。
+- **天气卡片**：开关、屏幕示意图上点选贴边位置、边距和卡片内容；刷新间隔、雨雪的帧率（`fps`）在“其他”里，帧率用滑块调。
 
 安全设计：助手只收配置 + 图片**字节**（JPEG，最大边 4096），不收路径——从文件选的图片先在窗口侧转成 JPEG、
 透明处垫色，发给助手存成 `/var/lib/wwp/backdrop-<ns>.jpg`（root 所有、其他用户只读，`dde` 读得到），
@@ -230,7 +242,7 @@ sudo dpkg -r wwp-weather-wallpaper   # 卸载，见下
   下次登录后在控制中心重选一张即可。
 - **依赖**：动态库用 `dpkg-shlibdeps` 按二进制直接链接的库算（带版本）；运行时加载的 QML 模块（`qml6-module-*`）、
   Chromium 渲染进程 `QtWebEngineProcess`（`libqt6webenginecore6-bin`，WebEngine 的库包不依赖它）、`python3`、`pkexec`、
-  `wwp-watch` 用的 `libnotify-bin`（`notify-send`）和 `procps`（`pgrep`）手写；Chameleon 风格是 Recommends。架构随打包机（`dpkg --print-architecture`）。
+  `wwp-watch` 用的 `libnotify-bin`（`notify-send`）和 `procps`（`pgrep`）手写；设置窗口用的 DTK QML（`libdtk6declarative`）、Chameleon 风格、Qt5Compat 图形效果也在其中。架构随打包机（`dpkg --print-architecture`）。
   `treeland` 限定 0.11.x（`>= 0.11~, << 0.12~`）：factory 是从 0.11 改出来的，和它的私有壁纸协议绑定，
   treeland 出新版本时 apt 会先挡住它的升级（或要求先卸掉本包），要拿新版本重新合一遍 factory、发新 deb。
 - **版本号**：`deb/version`；环境变量 `DEB_VERSION` 可覆盖（CI 用）；`DEB_MAINTAINER` 默认 GitHub noreply 地址，
