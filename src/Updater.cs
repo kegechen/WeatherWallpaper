@@ -165,6 +165,19 @@ namespace WeatherWallpaper
             catch (Exception ex) { Log.Write("update: clean " + UpdateDir + ": " + ex.Message); }
         }
 
+        /// <summary>
+        /// 下好的更新已经装上了（版本不比当前新）就删掉：MSI 装完拉起新版本时还可能占着安装包，所以启动一会儿后再调。
+        /// 还没装上的留着，托盘里点「重启更新」或下次启动接着用；别的程序目录（另一份便携版）下的不动。
+        /// </summary>
+        public static void CleanStale()
+        {
+            if (IsDevBuild || !File.Exists(PendingFile)) return;
+            var s = LoadStaged();
+            if (s == null || s.Version > Current) return;
+            ClearStaged();
+            Log.Write("update: " + s.Tag + " installed, staged package removed");
+        }
+
         static bool InDir(string p, string dir)
         {
             if (string.IsNullOrEmpty(p)) return false;
@@ -255,9 +268,11 @@ try { Wait-Process -Id $OldPid -Timeout 30 -ErrorAction Stop } catch {}
 Start-Sleep -Milliseconds 500
 if ($Kind -eq 'msi') {
   $msiLog = Join-Path (Split-Path $Log) 'update-msi.log'
-  $p = [Diagnostics.Process]::Start('msiexec.exe', ('/i """"' + $Src + '"""" /qn /norestart /le """"' + $msiLog + '""""'))
+  $a = '/i ' + [char]34 + $Src + [char]34 + ' /qn /norestart /le ' + [char]34 + $msiLog + [char]34
+  $p = [Diagnostics.Process]::Start('msiexec.exe', $a)
   $p.WaitForExit()
   L ('msiexec exit ' + $p.ExitCode)
+  if ($p.ExitCode -ne 0) { L 'msiexec failed, keeping staged MSI' }
   for ($i = 0; $i -lt 20 -and -not (Running); $i++) { Start-Sleep -Milliseconds 500 }
 } else {
   $ok = $true
@@ -274,10 +289,6 @@ if ($Kind -eq 'msi') {
   L ('copied to ' + $Dst + ', ok=' + $ok)
 }
 if (-not (Running)) { Start-Process -FilePath (Join-Path $Dst 'WeatherWallpaper.exe') -WorkingDirectory $Dst }
-if ($Kind -eq 'zip') {
-  $pending = Join-Path (Split-Path $Log) 'update\pending.json'
-  if (Test-Path $pending) { Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue }
-}
 ";
 
         /// <summary>下载到 path（先写 .part，下完核对大小和文件头再改名）。</summary>

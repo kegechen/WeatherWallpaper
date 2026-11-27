@@ -2200,7 +2200,7 @@ namespace WeatherWallpaper
         // ---------------------------------------------------------------- 检查更新
         UpdateInfo newer;
         ToolStripMenuItem updateItem;
-        bool checking, installing, staging;
+        bool checking, installing, staging, installWhenStaged;   // installWhenStaged：后台下载中用户点了更新，下完直接重启更新
         string updError, installError, installText;   // 上次检查失败的原因 / 上次自动更新失败的原因 / 正在下载安装的进度（「关于」里显示）
         DateTime lastCheck;             // 上次检查成功的时间（MinValue = 还没查过）
         StagedUpdate staged;            // 已下好、等着重装的新版本（auto 模式下由后台下载）
@@ -2210,18 +2210,22 @@ namespace WeatherWallpaper
         {
             // 启动 1 分钟后查一次；之后每小时看一眼，离上次查到满 12 小时才再查——按钟表时间算，电脑睡眠、休眠过也不会一拖好几天；
             // 查失败了（没联网）下个小时再试
-            // 启动时先把上次没装成的更新提上来（比如上次下载完用户关掉了电自），再开始定时检查
-            var pending = Updater.LoadStaged();
-            if (pending != null)
+            // 启动时先把上次下好还没装上的更新提上来（比如启动时自动装过一次没装成），点一下就重启更新
+            var pending = Updater.IsDevBuild ? null : Updater.LoadStaged();
+            if (pending != null && pending.Version > Updater.Current)   // 版本不比当前新的是已经装上的，第一次定时检查时清掉
             {
                 staged = pending;
                 newer = new UpdateInfo { Version = pending.Version, Tag = pending.Tag, MsiUrl = Updater.ReleasePage, ZipUrl = Updater.ReleasePage };
                 updateItem.Text = "已下好 " + pending.Tag + " · 点击重启更新";
             }
+            bool firstTick = true;
             updateTimer.Interval = 60 * 1000;
             updateTimer.Tick += (s, e) =>
             {
                 updateTimer.Interval = 3600 * 1000;
+                // 刚装完被拉起来那会儿安装程序可能还占着安装包，所以等到第一次定时检查再删
+                if (firstTick && staged == null && !staging) Updater.CleanStale();
+                firstTick = false;
                 if (staged == null && settings.AutoUpdate && !Updater.IsDevBuild && (DateTime.Now - lastCheck).Duration() >= TimeSpan.FromHours(12)) CheckUpdate(false);
             };
             updateTimer.Start();
@@ -2305,10 +2309,13 @@ namespace WeatherWallpaper
                 UpdateItemText("已下载 " + newer.Tag + " · 点击重启更新");
                 PostAbout();
                 flyout?.Post(UpdateJson());
+                if (installWhenStaged) { installWhenStaged = false; staging = false; var _ = InstallUpdate(staged, true); }
                 return true;
             }
             catch (Exception ex)
             {
+                installWhenStaged = false;
+                installText = null;
                 installError = "下载更新失败：" + ex.Message;
                 Log.Write("update stage: " + ex);
                 UpdateItemText("更新到 " + newer.Tag + " · 点击重试");
@@ -2328,15 +2335,16 @@ namespace WeatherWallpaper
         {
             sceneText = text;
             // 下载 / 安装的进度优先显示，场景文字排在后面（scene 消息每几十秒就来，不能让它把进度抹掉）
-            var tip = "天气壁纸" + (installText != "" ? "\n" + installText : "") + (sceneText != "" ? "\n" + sceneText : "");
+            var tip = "天气壁纸" + (!string.IsNullOrEmpty(installText) ? "\n" + installText : "") + (!string.IsNullOrEmpty(sceneText) ? "\n" + sceneText : "");
             tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
         }
 
         /// <summary>点卡片 / 托盘菜单 /「关于」的按钮：已经下好就直接装；还在下载就先等到下完，再接着装。没有确认框。</summary>
         async Task StartInstall(UpdateInfo info, bool click)
         {
-            if (installing || staging) return;
+            if (installing) return;
             if (Updater.IsDevBuild) { OpenUrl(Updater.ReleasePage); return; }
+            if (staging) { installWhenStaged = true; return; }   // 后台正在下：下完由 StageUpdate 接着重启更新
             if (staged == null || staged.Version != info.Version)
             {
                 if (!await StageUpdate()) return;    // StageUpdate 把失败写进「关于」了
@@ -2470,7 +2478,7 @@ namespace WeatherWallpaper
                 case "close": aboutWin.CloseNow(); break;
                 case "check": CheckUpdate(false); break;
                 case "install":   // 卡片 /「关于」里的按钮：用户点了就直接重启更新，不再弹确认框
-                    if (newer == null || installing || staging) break;
+                    if (newer == null || installing) break;   // 正在下载时点的：StartInstall 记下来，下完接着重启更新
                     if (Updater.IsDevBuild) OpenUrl(Updater.ReleasePage);   // 源码构建的版本不覆盖，去下载页
                     else { var _ = StartInstall(newer, true); }
                     break;
