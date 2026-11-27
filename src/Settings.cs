@@ -122,6 +122,8 @@ namespace WeatherWallpaper
 
         public List<CardSpec> Cards { get; set; }      // 桌面卡片；第一张是默认卡片
         public int Fps { get; set; } = 30;
+        // 云的帧率（1–24）：和 SkyOpacity 一样声明成 object，手写成字符串 / 小数也不会让整个文件读失败，加载后由 NormalizeCloudFps 规整成 int
+        public object CloudFps { get; set; } = DefaultCloudFps;
         public bool TaskbarFx { get; set; } = true;
         public bool ShowPanel { get; set; } = true;    // 所有卡片的总开关
         public bool WindowFx { get; set; } = true;     // 窗口顶边"屋檐"雨滴 / 积雪
@@ -157,6 +159,8 @@ namespace WeatherWallpaper
         // 壁纸叠加时天空那层的不透明度：0.45 ≈ 天气看得清、壁纸也透得出来；1 = 和普通模式一样完全遮住
         public const double DefaultSkyOpacity = 0.45, MinSkyOpacity = 0.05, MaxSkyOpacity = 1;
         public const double DefaultCloudAlpha = 0.72, MinCloudAlpha = 0.1, MaxCloudAlpha = 1;
+        // 云飘得慢，每出一帧的固定开销（合成、上屏）却不小：6 帧和 12 帧肉眼看不出差别，CPU 少一截
+        public const int DefaultCloudFps = 6, MinCloudFps = 1, MaxCloudFps = 24;
 
         public CardSpec DefaultCard() => Cards[0];
 
@@ -262,6 +266,12 @@ namespace WeatherWallpaper
         /// <summary>云的不透明度（已校验，总在 0.1–1 之间）。</summary>
         public double CloudAlphaValue() => OpacityValue(CloudAlpha, DefaultCloudAlpha, MinCloudAlpha, MaxCloudAlpha);
 
+        /// <summary>云的帧率（已校验，总在 1–24 之间）。</summary>
+        public int CloudFpsValue() => CloudFps is int n ? n : DefaultCloudFps;
+
+        /// <summary>规整云的帧率：接受数字和数字字符串，四舍五入成整数，超出范围夹回 1–24，不是数用默认值。</summary>
+        public void NormalizeCloudFps() => CloudFps = (int)Math.Round(OpacityValue(CloudFps, DefaultCloudFps, MinCloudFps, MaxCloudFps));
+
         /// <summary>把 object 里的数读成范围内的 double；接受数字和数字字符串（命令行调参 / 手写文件），不是数、NaN 都用默认值。</summary>
         static double OpacityValue(object o, double def, double min, double max)
         {
@@ -302,7 +312,7 @@ namespace WeatherWallpaper
         }
 
         static readonly System.Text.RegularExpressions.Regex BoundedNums =
-            new System.Text.RegularExpressions.Regex(@"(""(?:PlaySeconds|SkyOpacity|CloudAlpha)""\s*:\s*)(-?[0-9][0-9.eE+-]*)");
+            new System.Text.RegularExpressions.Regex(@"(""(?:PlaySeconds|SkyOpacity|CloudAlpha|CloudFps)""\s*:\s*)(-?[0-9][0-9.eE+-]*)");
 
         public static Settings Load()
         {
@@ -321,7 +331,7 @@ namespace WeatherWallpaper
             return s;
         }
 
-        // 有范围约束的数字字段（PlaySeconds / SkyOpacity / CloudAlpha）里超出 double 范围的数字（如 1e400）连 JSON 解析都过不去，会让整个文件读取失败：先换成 null，按默认值处理
+        // 有范围约束的数字字段（PlaySeconds / SkyOpacity / CloudAlpha / CloudFps）里超出 double 范围的数字（如 1e400）连 JSON 解析都过不去，会让整个文件读取失败：先换成 null，按默认值处理
         static string FixNumbers(string text) => BoundedNums.Replace(text, m => double.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out _) ? m.Value : m.Groups[1].Value + "null");
 
@@ -363,6 +373,7 @@ namespace WeatherWallpaper
                     }
                     s.NormalizePlaySeconds();
                     s.NormalizeOpacities();
+                    s.NormalizeCloudFps();
                     if (s.OverlayWall && s.Minimal) s.Minimal = false;   // 手改文件把互斥的两项都写成 true：按「打开壁纸叠加会关掉极简模式」处理（所有加载路径都从这走，托盘 / 命令行入口各自也照应）
                     s.NormalizeCards();
                     if (legacy) s.MigrateMonitors();
@@ -387,7 +398,9 @@ namespace WeatherWallpaper
                 "aqi 空气、feel 体感、hum 湿度、wind 风、hours 今天逐小时、days 未来几天、sun 日出日落、upd 更新时间（\"\" = 只显示城市和当前天气）；" +
                 "Script 自定义卡片的脚本名（cards 文件夹里的 .js 文件，不带扩展名；null = 天气卡片，默认卡片总是天气卡片），自定义卡片不取天气、不决定天气画面，City / Scene / Hidden / Show 对它无效；" +
                 "Height 自定义卡片的高度，" + CustomCards.MinHeight + "–" + CustomCards.MaxHeight + " 像素（天气卡片为 null）",
-            ["Fps"] = "帧率：30 或 60",
+            ["Fps"] = "帧率：30 或 60（雨雪、闪电按它画）",
+            ["CloudFps"] = "云的帧率：" + MinCloudFps + "–" + MaxCloudFps + " 的整数，默认 " + DefaultCloudFps + "。云飘得慢，" + DefaultCloudFps + " 帧就看着连贯；调高更细腻，也更费 CPU。" +
+                "不会超过当前帧率（用电池、系统繁忙、桌面大部分被挡住时帧率会降，云跟着降）",
             ["TaskbarFx"] = "任务栏雨雪效果：true 开 / false 关",
             ["ShowPanel"] = "桌面天气卡片总开关：true 显示 / false 全部隐藏（隐藏后可左键点托盘图标查看）",
             ["WindowFx"] = "窗口顶边雨滴 / 积雪（屋檐）：true / false",

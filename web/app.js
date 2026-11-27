@@ -2004,8 +2004,9 @@
   // ------------------------------------------------------------------ 主循环
   // 按需调度，不再无条件每个垂直同步都跑：
   //  - 有雨雪 / 闪电：requestAnimationFrame，按 L.fps 绘制前景（和以前一样）
-  //  - 没有降水：setTimeout，只在下一次真要画的时候醒来——有云 12 FPS（不超过 L.fps，Windows 版降帧时云跟着降）；
-  //    宿主在 layout 里给了 cloudFps 就按它，和 L.fps 各管各的（treeland 版默认 6，设置窗口里 1–24 可调）；天空变化期 15 FPS；
+  //  - 没有降水：setTimeout，只在下一次真要画的时候醒来——有云按宿主给的 cloudFps（layout / perf 里带）：
+  //    Windows 版按设置（默认 6，1–24），不超过当前帧率上限、降帧时跟着降；treeland 版默认 6、和 L.fps 各管各的；
+  //    没给（单独打开页面调试）时 min(L.fps, 12)；天空变化期 15 FPS；
   //    有星星 / 日芒的夜晚 / 晴天 3 FPS；其余时候每秒只查一次"指纹"有没有变
   let last = performance.now(), lastSky = -1e9, lastCloud = -1e9, raf = 0, tm = 0, fxDirty = false;
   const cloudFps = () => +L.cloudFps > 0 ? clamp(+L.cloudFps, 1, 60) : Math.min(L.fps, 12);
@@ -2229,7 +2230,7 @@
         case 'fx': fxKind = m.kind || null; tgt = targetScene(); break;
         case 'backdrop': backdrop = m; applyBackdrop(); break;
         case 'pause': paused = true; UserCards.setPaused(true); break;
-        case 'perf': L.fps = clamp(m.fps | 0, 5, 60); break;
+        case 'perf': L.fps = clamp(m.fps | 0, 5, 60); if (m.cloudFps > 0) L.cloudFps = m.cloudFps; break;   // Windows 版降帧时云的帧率跟着降
         case 'unlock': flagWant = true; festAt = -1e9; break;   // 解锁屏幕：国庆节当天这块屏还没升过旗就升一次；锁屏期间可能过了零点，节日马上重算
       }
       applyMinimal();

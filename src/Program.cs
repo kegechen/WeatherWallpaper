@@ -504,7 +504,7 @@ namespace WeatherWallpaper
             return "{\"t\":\"layout\",\"primary\":" + B(main) + ",\"ground\":" + ground.ToString("F4", Inv)
                 + ",\"overlay\":" + B(hasTb && settings.TaskbarFx && w.Primary && w.HasWeather) + ",\"panel\":" + B(settings.ShowPanel)
                 + ",\"noWeather\":" + B(!w.HasWeather)   // 只有自定义卡片的屏：不画天气，只垫系统壁纸（每次都带上：页面是 Object.assign 合并的）
-                + ",\"fps\":" + w.Fps + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
+                + ",\"fps\":" + w.Fps + ",\"cloudFps\":" + CloudFps(w.Fps) + ",\"lowmem\":" + B(settings.LowMemory) + ",\"minimal\":" + B(settings.Minimal)
                 + ",\"overlayWall\":" + B(settings.OverlayWall) + ",\"skyOpacity\":" + settings.SkyOpacityValue().ToString("F3", Inv)
                 + ",\"cloudAlpha\":" + settings.CloudAlphaValue().ToString("F3", Inv) + ",\"festive\":" + B(settings.Festive)
                 + ",\"scene\":" + WeatherService.JsonStr(w.SceneKey) + ",\"screen\":" + WeatherService.JsonStr(w.DeviceName) + ",\"cards\":[" + cards + "]"
@@ -513,6 +513,8 @@ namespace WeatherWallpaper
                 + ",\"keys\":[" + string.Join(",", cities.Keys.Select(WeatherService.JsonStr)) + "]}";   // 还在用的城市：页面据此丢掉不再用的天气数据
         }
         static string B(bool b) => b ? "true" : "false";
+        /// <summary>云的帧率：按设置，但不超过这块屏当前的帧率上限（用电池 / 系统繁忙 / 桌面大部分被挡住时跟着降）。</summary>
+        int CloudFps(int fps) => Math.Min(settings.CloudFpsValue(), fps);
         /// <summary>列表里的卡片脚本（文件名不分大小写），不在列表里（找不到、隐藏的、排在 50 个之后的）是 null。版本号、能不能运行、新增时的默认名称和高度都按它。</summary>
         CustomCards.Script FindScript(string name) => cardScripts.FirstOrDefault(s => string.Equals(s.File, name, StringComparison.OrdinalIgnoreCase));
         // 不在列表里是 0：页面来要脚本时回不运行的原因（csrc）；列出来了版本号一变，页面就重新加载
@@ -739,7 +741,7 @@ namespace WeatherWallpaper
             foreach (var w in walls)
             {
                 var scr = Screen.AllScreens.FirstOrDefault(s => s.Bounds == w.Bounds);
-                if (scr == null) { w.SetPerf(true, w.Fps); w.Shown = false; continue; }
+                if (scr == null) { w.SetPerf(true, w.Fps, CloudFps(w.Fps)); w.Shown = false; continue; }
                 // ↑ 这块屏已经不在了（拔掉 / 卡片删光后等销毁的旧窗口）：当作不可见，别拿主屏的遮挡情况喂它；
                 //   只暂停，帧率保持原值（填 0 会被 layout 带出去，窗口留下来时页面一直按最低帧率画）
                 foreach (var x in rects)
@@ -761,7 +763,7 @@ namespace WeatherWallpaper
                 bool pause = locked || vis < 0.03;
                 int fps = cap;
                 if (!pause && vis < 0.35) fps = Math.Min(fps, 15);
-                w.SetPerf(pause, fps);
+                w.SetPerf(pause, fps, CloudFps(fps));
                 w.Shown = !pause;
                 if (w.Primary) overlay.SetCovered(vis < 0.03);
                 if (!pause && w.HasWeather) { running++; minFps = Math.Min(minFps, fps); }   // 不画天气的屏（只有自定义卡片）不算帧率
@@ -816,7 +818,7 @@ namespace WeatherWallpaper
             else if (!walls.Any(w => w.HasWeather)) perfText = "没有天气画面（只放了自定义卡片）";
             else if (running == 0) perfText = "已暂停（桌面被遮挡）";
             else if (settings.Minimal && !AnyFx() && preview == "live" && !previewDay) perfText = "极简模式：静止，天气有变化时播放动画";
-            else perfText = $"{minFps} FPS" + (reasons.Count > 0 ? "（" + string.Join("，", reasons) + "）" : minFps < settings.Fps ? "（桌面大部分被遮挡）" : "");
+            else perfText = $"{minFps} FPS，云 {CloudFps(minFps)} FPS" + (reasons.Count > 0 ? "（" + string.Join("，", reasons) + "）" : minFps < settings.Fps ? "（桌面大部分被遮挡）" : "");
         }
 
         /// <summary>
@@ -1363,12 +1365,33 @@ namespace WeatherWallpaper
             festive.Click += (s, e) => { settings.Festive = festive.Checked; settings.Save(); UpdateLayout(); };
             var fps60 = new ToolStripMenuItem("高帧率（60 FPS）") { CheckOnClick = true };
             fps60.Click += (s, e) => { settings.Fps = fps60.Checked ? 60 : 30; settings.Save(); overlay.SetFps(settings.Fps); ConfigureOverlay(); };
+            // 云的帧率：几档常用值；settings.json 里手写了别的值（1–24 都行）时多出一项打勾显示它
+            var cloud = new ToolStripMenuItem("云的帧率");
+            var cloudOther = new ToolStripMenuItem { Enabled = false };
+            foreach (var v in new[] { 3, Settings.DefaultCloudFps, 12, 24 })
+            {
+                var it = new ToolStripMenuItem(v + " FPS" + (v == Settings.DefaultCloudFps ? "（默认）" : "")) { Tag = v };
+                it.Click += (s, e) => { settings.CloudFps = (int)it.Tag; settings.Save(); UpdateLayout(); };
+                cloud.DropDownItems.Add(it);
+            }
+            cloud.DropDownItems.Add(cloudOther);
+            cloud.DropDownItems.Add(new ToolStripSeparator());
+            cloud.DropDownItems.Add(new ToolStripMenuItem("云飘得慢，帧数低也连贯；调高更细腻，也更费 CPU") { Enabled = false });
+            cloud.DropDownOpening += (s, e) =>
+            {
+                int cur = settings.CloudFpsValue();
+                var presets = cloud.DropDownItems.OfType<ToolStripMenuItem>().Where(o => o.Tag is int).ToList();
+                foreach (var it in presets) it.Checked = (int)it.Tag == cur;
+                cloudOther.Visible = !presets.Any(o => o.Checked);   // settings.json 里手写的值（1–24 都行）
+                cloudOther.Text = cur + " FPS（设置文件里的值）";
+                cloudOther.Checked = true;
+            };
             // 省内存模式不再作为常规选项：想省资源用极简模式（静止时 CPU / GPU 为 0，内存也更低）；settings.json 里的 LowMemory 仍然有效。
             // 只在已经开着时显示这一项，让以前开过的人能直接在菜单里关掉
             var lowMem = new ToolStripMenuItem("省内存模式") { CheckOnClick = true };
             lowMem.Click += (s, e) => { settings.LowMemory = lowMem.Checked; settings.Save(); ConfigureOverlay(); ApplyFlyoutMode(); };
             var status = new ToolStripMenuItem("状态") { Enabled = false };   // 当前帧率 / 暂停原因，和这些开关放一起看
-            look.DropDownItems.Add(fx); look.DropDownItems.Add(wfx); look.DropDownItems.Add(festive); look.DropDownItems.Add(fps60); look.DropDownItems.Add(lowMem);
+            look.DropDownItems.Add(fx); look.DropDownItems.Add(wfx); look.DropDownItems.Add(festive); look.DropDownItems.Add(fps60); look.DropDownItems.Add(cloud); look.DropDownItems.Add(lowMem);
             look.DropDownItems.Add(new ToolStripSeparator());
             look.DropDownItems.Add(status);
             look.DropDownOpening += (s, e) =>

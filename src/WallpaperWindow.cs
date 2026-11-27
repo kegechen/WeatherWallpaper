@@ -164,11 +164,12 @@ namespace WeatherWallpaper
         }
 
         public int Fps { get; private set; } = 30;
+        int cloudFps;   // 上次发给页面的云帧率（0 = 还没发过）
 
-        /// <summary>暂停 / 帧率上限，只在变化时通知页面。</summary>
-        public void SetPerf(bool p, int fps)
+        /// <summary>暂停 / 帧率上限 / 云的帧率，只在变化时通知页面。</summary>
+        public void SetPerf(bool p, int fps, int cloud)
         {
-            if (fps != Fps) { Fps = fps; Post("{\"t\":\"perf\",\"fps\":" + fps + "}"); }
+            if (fps != Fps || cloud != cloudFps) { Fps = fps; cloudFps = cloud; Post("{\"t\":\"perf\",\"fps\":" + fps + ",\"cloudFps\":" + cloud + "}"); }
             if (p == paused) return;
             paused = p;
             Post(p ? "{\"t\":\"pause\"}" : "{\"t\":\"resume\"}");
