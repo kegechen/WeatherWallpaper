@@ -91,7 +91,7 @@
   // scene：全屏天气画面跟着哪个城市（城市键）；defKey：默认卡片的城市键（自定义卡片的 api.weather 用它）
   // overlayWall：壁纸叠加——天空半透明、系统壁纸常驻垫底；skyOpacity：天空那层的不透明度（0.05–1）；
   // cloudAlpha：云的不透明度（极简模式不叠壁纸时恒为 1）；noWeather：这块屏只放了自定义卡片，不画天气，只垫系统壁纸
-  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, noWeather: false, scene: '', defKey: '', cards: [] };
+  const L = { primary: location.search.includes('primary'), ground: 0, overlay: false, panel: false, fps: 30, cloudFps: 12, lowmem: false, minimal: false, overlayWall: false, skyOpacity: 0.45, cloudAlpha: 0.72, festive: true, noWeather: false, scene: '', defKey: '', cards: [] };
 
   let W = 0, H = 0, DPR = 1;
   // weathers：各城市的天气（城市键 → 宿主发来的 weather 消息）；weather：画面城市的那一份（天空、太阳、雨雪都按它）
@@ -2004,10 +2004,10 @@
   // ------------------------------------------------------------------ 主循环
   // 按需调度，不再无条件每个垂直同步都跑：
   //  - 有雨雪 / 闪电：requestAnimationFrame，按 L.fps 绘制前景（和以前一样）
-  //  - 没有降水：setTimeout，只在下一次真要画的时候醒来——有云 12 FPS；天空变化期 15 FPS；
+  //  - 没有降水：setTimeout，只在下一次真要画的时候醒来——有云 12 FPS（宿主可在 layout 里用 cloudFps 调低，treeland 版是 6）；天空变化期 15 FPS；
   //    有星星 / 日芒的夜晚 / 晴天 3 FPS；其余时候每秒只查一次"指纹"有没有变
   let last = performance.now(), lastSky = -1e9, lastCloud = -1e9, raf = 0, tm = 0, fxDirty = false;
-  const cloudFps = () => Math.min(L.fps, 12);
+  const cloudFps = () => Math.min(L.fps, clamp(+L.cloudFps || 12, 1, 12));
   const bgFps = () => demo && demo.speed > 1 ? L.fps : Math.min(L.fps, 15);
   const FADE_KEYS = ['cloud', 'fog', 'dark', 'rain', 'thunder', 'bow'];   // 影响天空 / 云画面的场景量
   function transitioning() {

@@ -248,6 +248,9 @@
       t: 'layout', primary: true, ground, overlay: false,
       panel: !SNAPSHOT && cfg.panel !== false, noWeather: false,
       fps: num(cfg.fps, 24, 5, 60) | 0, lowmem: !!cfg.lowmem, minimal: minimal(),
+      // 云每秒只画 6 帧（Windows 版 12）：Qt WebEngine 在 treeland 上每出一帧的固定开销大（L540 上约 0.7% 单核 / 帧每秒，
+      // 和画了什么几乎无关），treeland 还要跟着重合成整屏；云飘得慢、边缘软，6 帧和 12 帧并排对比看不出差别
+      cloudFps: 6,
       overlayWall: overlayWall(), skyOpacity: num(cfg.skyOpacity, 0.45, 0.05, 1), cloudAlpha: num(cfg.cloudAlpha, 0.72, 0.1, 1),
       festive: cfg.festive !== false, scene: KEY, screen: 'treeland', cards: [card],
       effects: [],   // 自定义效果脚本暂不支持（列表一变页面会整页重载，这里保持不变）
