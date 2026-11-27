@@ -2314,6 +2314,7 @@ namespace WeatherWallpaper
             {
                 var progress = new Progress<string>(t => { installText = t; UpdateItemText(t); PostAbout(); });
                 var s = await Updater.Stage(want, progress);
+                staging = false;   // 下面要把状态发给弹出面板和「关于」：得先放开，不然它们一直显示「正在下载 / 重启更新」
                 installText = null;
                 if (want?.Tag != newer?.Tag)   // 下载期间换了版本 / 撤版了：这个不要了（ClearStaged 清不掉就等启动时的 CleanStale）
                 {
