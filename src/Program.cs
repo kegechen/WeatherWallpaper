@@ -1671,6 +1671,10 @@ namespace WeatherWallpaper
             foreach (var id in order.Distinct())
             {
                 c.Screen = id;
+                // 在这块屏剩下的空位里找位置、把偏移定在那里（Settle），不挤动已有的卡片；Fit 再按桌面上的排法核对一遍
+                var s = CardLayout.Resolve(id);
+                c.OffsetX = c.OffsetY = CardSpec.DefaultOffset;   // 上一块屏试过时可能改过
+                if (s == null || !CardLayout.Settle(AreaOf(s).Work, AllCards().Where(k => SameScreen(k.Screen, s) && !k.Hidden && !k.Off).ToList(), c)) continue;
                 if (!Fit(c).Ok) continue;
                 if (!probe) c.Monitor = CardLayout.MonitorOf(id);   // 只给选中的屏取（要枚举显示设备）
                 return c;
@@ -1829,7 +1833,7 @@ namespace WeatherWallpaper
         }
 
         /// <summary>
-        /// 这张卡片在它选的屏上放不放得下：和这块屏上的其他卡片一起按顺序排一遍（与桌面上的布局同一套算法）。
+        /// 这张卡片在它选的屏上放不放得下：和这块屏上的其他卡片一起排一遍（与桌面上的布局同一套算法，见 CardLayout）。
         /// 放不下、或者会把这块屏上别的卡片挤掉 → 不保存。只显示天气画面的、隐藏的卡片不占位置，总放得下。
         /// </summary>
         FitResult Fit(CardSpec c)

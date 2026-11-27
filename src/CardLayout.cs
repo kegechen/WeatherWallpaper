@@ -34,12 +34,16 @@ namespace WeatherWallpaper
     }
 
     /// <summary>
-    /// 卡片布局：在一块屏的可用区域（工作区，页面 CSS 像素）里按顺序摆卡片，互不重叠。
+    /// 卡片布局：在一块屏的可用区域（工作区，页面 CSS 像素）里摆卡片，互不重叠。
     ///  1. 按位置 + 偏移算出期望位置（超出可用区域就收进来）；
-    ///  2. 和已经摆好的卡片重叠（留 Gap 间距）→ 沿离开锚点边的方向推：顶部位置往下、底部位置往上；
-    ///  3. 推出可用区域 → 往屏幕内侧挪一列（右侧往左、左侧往右、居中左右交替）再试；
-    ///  4. 所有列都放不下 → 这张卡片放不下（返回 null）。
-    /// 效果：同一位置的卡片自动排成一列，一列满了往内侧开第二列，整块屏满了就放不下。
+    ///  2. 按期望位置的先后摆：顶部位置的从上往下，再摆底部位置的从下往上（期望位置一样的按列表顺序）；
+    ///  3. 和已经摆好的卡片重叠（留 Gap 间距）→ 沿离开锚点边的方向推：顶部位置往下、底部位置往上；
+    ///  4. 推出可用区域 → 先放着，等所有放得下的卡片都在自己那一列摆好，再往屏幕内侧挪一列（右侧往左、左侧往右、居中左右交替）
+    ///     找空位：先从期望的高度找，没有再从那一列的头上找（顶部位置从上往下、底部位置从下往上）；
+    ///  5. 所有列都放不下 → 这张卡片放不下（返回 null）。
+    /// 效果：同一位置的卡片自动排成一列；一张卡片变高（autoHeight 的自定义卡片内容变长、多显示了几项）时自己不动，
+    /// 把它下面的卡片往下挤，一列装不下了是最下面的卡片挪去内侧那一列，别的列上本来的卡片也不动；整块屏满了就放不下。
+    /// 新增卡片不按这个排（它不该挤动已有的卡片）：Settle 在剩下的空位里给它找位置，把偏移定在那里。
     /// </summary>
     static class CardLayout
     {
@@ -134,38 +138,90 @@ namespace WeatherWallpaper
             return res;
         }
 
-        /// <summary>这块屏上还能再放几张卡片（按 like 的位置和偏移往里塞，没给就按默认右上角；最多 MaxCards）。</summary>
+        /// <summary>
+        /// 这块屏上还能再放几张卡片（按 like 的位置和偏移往里塞，没给就按默认右上角；最多 MaxCards）。
+        /// 和新增卡片（Settle）一样只往空位里塞，不挤动已有的卡片。
+        /// </summary>
         public static int Free(RectangleF work, IList<CardSpec> cards, CardSpec like = null)
         {
-            var list = cards.ToList();
+            var probe = like != null ? like.Clone() : new CardSpec();
+            probe.Id = "probe"; probe.Hidden = false; probe.Off = false;
+            var area = Room(work, cards.Concat(new[] { probe }));
+            var placed = Taken(area, cards);
             int n = 0;
-            while (n < Settings.MaxCards)
+            for (; n < Settings.MaxCards; n++)
             {
-                var probe = like != null ? like.Clone() : new CardSpec();
-                probe.Id = "probe"; probe.Hidden = false; probe.Off = false;
-                list.Add(probe);
-                var r = Place(work, list);
-                if (!r[r.Length - 1].HasValue) break;
-                n++;
+                var r = PlaceOne(area, probe, placed, true);
+                if (!r.HasValue) break;
+                placed.Add(r.Value);
             }
             return n;
         }
 
-        public static RectangleF?[] Place(RectangleF area, IList<CardSpec> cards)
+        /// <summary>
+        /// 给新卡片 c 找位置：others（同一块屏上已有的卡片）照常摆好，c 从它的期望位置开始在剩下的空位里找（沿列推、满了换列），
+        /// 找到了把 c 的偏移改成那里（位置不变，还是按原来的锚点算偏移）——之后按期望位置先后摆，它正好落在这个空位上、不挤动别的卡片。
+        /// 放不下返回 false，c 不变。
+        /// </summary>
+        public static bool Settle(RectangleF work, IList<CardSpec> others, CardSpec c)
         {
-            // 屏幕太矮（小屏开了高缩放）、可用区域比卡片还矮：按最高那张天气卡片的高度算，卡片贴着上边、下面一截被任务栏挡住（和旧版一样），不至于一张都放不下。
-            // 自定义卡片不算：它的高度是自己设的（最高 720，常见的屏都比这矮），放不下就提示调小；算进来的话区域被它拉高，同屏贴底的卡片都会压到任务栏下面。
-            // 这样区域也和自定义卡片多高无关：高的放得下、矮的一定放得下（CardFitJson 靠这个少试几次）
+            var area = Room(work, others.Concat(new[] { c }));
+            var r = PlaceOne(area, c, Taken(area, others), true);
+            if (!r.HasValue) return false;
+            bool bottom; char hz;
+            AnchorOf(c, out bottom, out hz);
+            var v = r.Value;
+            // 取整差不到半像素，Scan 的容差 Tol 盖得住，不会因此和挨着的卡片算重叠
+            c.OffsetX = (int)Math.Round(hz == 'l' ? v.X - area.Left : hz == 'r' ? area.Right - v.Right : v.X - (area.Left + (area.Width - W) / 2));
+            c.OffsetY = (int)Math.Round(bottom ? area.Bottom - v.Bottom : v.Y - area.Top);
+            return true;
+        }
+
+        /// <summary>这些卡片照常摆好后占掉的位置。</summary>
+        static List<RectangleF> Taken(RectangleF area, IList<CardSpec> cards) => Place(area, cards).Where(r => r.HasValue).Select(r => r.Value).ToList();
+
+        /// <summary>
+        /// 屏幕太矮（小屏开了高缩放）、可用区域比卡片还矮：按最高那张天气卡片的高度算，卡片贴着上边、下面一截被任务栏挡住（和旧版一样），不至于一张都放不下。
+        /// 自定义卡片不算：它的高度是自己设的（最高 720，常见的屏都比这矮），放不下就提示调小；算进来的话区域被它拉高，同屏贴底的卡片都会压到任务栏下面。
+        /// 这样区域也和自定义卡片多高无关：高的放得下、矮的一定放得下（CardFitJson 靠这个少试几次）。
+        /// 同理：竖屏 / 窄屏开了高缩放比卡片还窄，贴着左边放，右边一截露不出来。
+        /// </summary>
+        static RectangleF Room(RectangleF area, IEnumerable<CardSpec> cards)
+        {
             float tallest = cards.Where(c => !c.IsCustom()).Select(HeightOf).DefaultIfEmpty(0).Max();
             if (area.Height < tallest) area.Height = tallest;
-            if (area.Width < W) area.Width = W;   // 同理：竖屏 / 窄屏开了高缩放比卡片还窄，贴着左边放，右边一截露不出来
-            var placed = new List<RectangleF>();
+            if (area.Width < W) area.Width = W;
+            return area;
+        }
+
+        /// <summary>摆好这块屏上的卡片（见类注释），结果和 cards 一一对应；null = 放不下。</summary>
+        public static RectangleF?[] Place(RectangleF area, IList<CardSpec> cards)
+        {
+            area = Room(area, cards);
             var res = new RectangleF?[cards.Count];
-            for (int i = 0; i < cards.Count; i++)
+            var placed = new List<RectangleF>();
+            // 按期望位置的先后：顶部位置的按上边从上往下，底部位置的排在后面、按下边从下往上。OrderBy 是稳定排序，期望位置一样的保持列表顺序
+            // （同一位置、同样偏移的卡片还是按列表顺序摞成一列，和以前一样）
+            var order = Enumerable.Range(0, cards.Count).Select(i =>
             {
-                var r = PlaceOne(area, cards[i], placed);
-                res[i] = r;
-                if (r.HasValue) placed.Add(r.Value);
+                bool bottom; char hz;
+                AnchorOf(cards[i], out bottom, out hz);
+                var d = Desired(area, cards[i]);
+                return new { i, bottom, key = bottom ? -d.Bottom : d.Y };
+            }).OrderBy(o => o.bottom).ThenBy(o => o.key).Select(o => o.i).ToList();
+            // 先都在自己那一列摆（推出可用区域的先放着），再给放不下的换列：挪走的总是被挤到最下面（底部位置是最上面）的那张，
+            // 换过去也不挤动那一列本来的卡片
+            var later = new List<int>();
+            foreach (int i in order)
+            {
+                var r = PlaceOne(area, cards[i], placed, false);
+                if (r.HasValue) { res[i] = r; placed.Add(r.Value); }
+                else later.Add(i);
+            }
+            foreach (int i in later)
+            {
+                var r = PlaceOne(area, cards[i], placed, true);
+                if (r.HasValue) { res[i] = r; placed.Add(r.Value); }
             }
             return res;
         }
@@ -191,7 +247,8 @@ namespace WeatherWallpaper
             return new RectangleF(x, y, W, H);
         }
 
-        static RectangleF? PlaceOne(RectangleF area, CardSpec c, List<RectangleF> placed)
+        /// <summary>在已经摆好的 placed 之外给 c 找位置：先在它自己那一列沿离开锚点边的方向推；far = 这一列放不下时往内侧换列（见类注释第 4 步）。</summary>
+        static RectangleF? PlaceOne(RectangleF area, CardSpec c, List<RectangleF> placed, bool far)
         {
             float H = HeightOf(c);
             if (area.Width < W - 0.5f || area.Height < H - 0.5f) return null;
@@ -199,10 +256,15 @@ namespace WeatherWallpaper
             AnchorOf(c, out bottom, out hz);
             var d0 = Desired(area, c);
             float x = d0.X, y = d0.Y;
+            var r = Scan(area, x, y, H, bottom, placed);
+            if (r != null || !far) return r;
 
+            // 换到的那一列：期望的高度往后没有空位（那一列本来的卡片占着），再从这一列的头上找——顶部位置从上往下、底部位置从下往上，
+            // 边距按这张的偏移、最多默认边距（偏移很大的卡片挪过去也贴着头上排，不留一大截空）
+            float m = Math.Min(c.OffsetY, CardSpec.DefaultOffset);
+            float y2 = bottom ? Math.Max(area.Top, area.Bottom - m - H) : Math.Max(area.Top, Math.Min(area.Top + m, area.Bottom - H));
             float step = W + Gap;
             var dirs = hz == 'r' ? new[] { -1 } : hz == 'l' ? new[] { 1 } : new[] { 1, -1 };
-            var r = Scan(area, x, y, H, bottom, placed);
             for (int k = 1; r == null && k < 64; k++)
             {
                 bool any = false;
@@ -212,6 +274,7 @@ namespace WeatherWallpaper
                     if (cx < area.Left - 0.5f || cx + W > area.Right + 0.5f) continue;
                     any = true;
                     r = Scan(area, cx, y, H, bottom, placed);
+                    if (r == null && Math.Abs(y2 - y) > 0.5f) r = Scan(area, cx, y2, H, bottom, placed);
                     if (r != null) break;
                 }
                 if (!any) break;
