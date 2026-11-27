@@ -74,7 +74,9 @@ TreelandWallpaperNotifierClientV1::~TreelandWallpaperNotifierClientV1()
     }
     m_windows.clear();
 
-    destroy();
+    // WWP：原版的 factory 从不正常退出，这里没走到过；SIGHUP 原地重启会析构它，没绑上协议对象（没连上 treeland）时不能 destroy
+    if (object())
+        destroy();
 }
 
 void TreelandWallpaperNotifierClientV1::instantiate()

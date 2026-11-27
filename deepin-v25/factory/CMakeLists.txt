@@ -1,5 +1,5 @@
 # 基于 treeland 0.11.0 的 wallpaper-factory（linuxdeepin/treeland，标签 0.11.0，目录 wallpaper-factory/）改出来的独立工程。
-# 和原版的差别只有 WWP 支持：wwpcontroller.*、WwpScene.qml、main.cpp 的 --snapshot，以及
+# 和原版的差别只有 WWP 支持：wwpcontroller.*、WwpScene.qml、main.cpp 的 --snapshot 和 SIGHUP 原地重启，以及
 # treelandwallpapernotifierclient.cpp 里标了 “WWP” 的几处。图片/视频壁纸的逻辑原样保留。
 # treeland 升级后要拿新标签的 wallpaper-factory 重新合一遍，协议可能变。
 cmake_minimum_required(VERSION 3.18)

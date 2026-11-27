@@ -23,9 +23,9 @@
 
 | 路径 | 说明 |
 |---|---|
-| `factory/` | 改过的 factory（`wwpcontroller.*`、`WwpScene.qml`、`main.cpp` 的 `--snapshot` 是新增，其余同原版） |
+| `factory/` | 改过的 factory（`wwpcontroller.*`、`WwpScene.qml`、`main.cpp` 的 `--snapshot` 和 SIGHUP 原地重启是新增，其余同原版） |
 | `tools/wwp-set.c` | 命令行查看、切换壁纸（和控制中心走同一个协议） |
-| `tools/wwp-reload.sh` | 开发用：换上新编的 factory，再把壁纸切走又切回 |
+| `tools/wwp-reload.sh` | 开发用：换上新编的 factory（SIGHUP 原地重启，不占 treeland 的重启额度），再把壁纸切走又切回 |
 | `tools/wwp-unset.sh` | 卸载前把已登录用户正在用的天气壁纸换回系统默认壁纸（装成 `/usr/local/libexec/wwp-unset`） |
 | `tools/wwp-watch.sh` + `.service` | 用户服务：treeland 不再拉起壁纸进程时弹通知（装成 `/usr/local/libexec/wwp-watch`），见下文“壁纸停住时的提醒” |
 | `packages/<名字>/` | 壁纸包：`manifest.json` + QML 场景 |
@@ -55,7 +55,10 @@ sudo dpkg -i build/wwp-weather-wallpaper_*.deb
 默认场景——打包机上的配置不会漏进发行包的预览图里。
 
 装好后要让 treeland 换用新 factory：`sudo systemctl restart treeland`（会回到锁屏），
-或者结束旧 factory 进程后再切换一次壁纸（`tools/wwp-reload.sh` 做的就是这个）。
+或者给旧 factory 发 SIGHUP 后再切换一次壁纸（`tools/wwp-reload.sh` 做的就是这个）。本工程的 factory 收到 SIGHUP
+会原地重启（正常收尾后 exec 同一路径上的新程序，进程号不变），treeland 看不到退出，不占它的重启额度（见下文
+“壁纸停住时的提醒”）；正在跑的若是 deepin 原版或更早不认 SIGHUP 的版本，SIGHUP 直接结束它，treeland 按 PATH
+拉起新的，这一次照常计数。
 
 安装后的布局（脚本和 deb 相同；deb 的文件清单见 `dpkg -c`）：
 
@@ -258,8 +261,9 @@ journalctl -b -t treeland-wallpaper-factory   # 加载记录和 treeland 事件�
 
 注意：
 
-- treeland 把 factory 的每次退出都算作崩溃，累计 10 次后不再拉起，要 `sudo systemctl restart treeland` 才清零。
-  反复替换 factory 时留意次数。
+- treeland 把 factory 的每次退出都算作崩溃，累计 10 次后不再拉起，要 `sudo systemctl restart treeland` 才清零
+  （见上文“壁纸停住时的提醒”，到上限时 `wwp-watch` 会弹通知）。换 factory 用 `wwp-reload.sh`（SIGHUP 原地重启，不计数），
+  别直接 kill；`journalctl -b _PID=$(pgrep -o -x treeland) -g 'restart count'` 看这次 treeland 运行里已经用了几次。
 - treeland 在 factory 重启后不会把正在显示的壁纸挂到新进程上，要切到别的壁纸再切回来。
 - treeland 升级后要拿新版本的 `wallpaper-factory/` 重新合一遍（协议可能变），再重新编译安装。
 - 卸载（install.sh uninstall 或 dpkg -r）会把已登录用户正在用的天气壁纸换回默认；没登录的用户下次登录后在控制中心重选。
