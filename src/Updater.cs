@@ -207,6 +207,7 @@ namespace WeatherWallpaper
                 await Download(new[] { info.ZipUrl, info.ZipFallback }, zip, ZipMagic, info, progress).ConfigureAwait(false);
                 progress?.Report("正在解压 " + info.Tag + " …");
                 var stage = Path.Combine(UpdateDir, "portable-" + info.Version);
+                try { if (Directory.Exists(stage)) Directory.Delete(stage, true); } catch { }   // 上次解压的残留：留着 ExtractToDirectory 会失败
                 System.IO.Compression.ZipFile.ExtractToDirectory(zip, stage);
                 // 兼容 zip 里多套一层目录的情况
                 var root = stage;
@@ -258,11 +259,13 @@ namespace WeatherWallpaper
         const string ApplyScript = @"param([string]$Kind, [string]$Src, [string]$Dst, [int]$OldPid, [string]$Log)
 function L($s) { try { Add-Content -LiteralPath $Log -Value ((Get-Date -Format 'MM-dd HH:mm:ss ') + 'apply-update: ' + $s) -Encoding UTF8 } catch {} }
 function Running {
-  $p = Get-Process -Name WeatherWallpaper -ErrorAction SilentlyContinue
-  if (-not $p) { return $false }
-  # the launcher / quit helper share the exe name but are not the running app
-  $ids = @($OldPid)
-  return [bool]($p | Where-Object { $ids -notcontains $_.Id })
+  # only processes running the updated copy count: another portable copy in a
+  # different directory must not keep us from relaunching this one
+  $exe = Join-Path $Dst 'WeatherWallpaper.exe'
+  foreach ($p in Get-Process -Name WeatherWallpaper -ErrorAction SilentlyContinue) {
+    try { if ($p.Path -eq $exe) { return $true } } catch {}
+  }
+  return $false
 }
 try { Wait-Process -Id $OldPid -Timeout 30 -ErrorAction Stop } catch {}
 Start-Sleep -Milliseconds 500

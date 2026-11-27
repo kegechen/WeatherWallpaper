@@ -2226,7 +2226,8 @@ namespace WeatherWallpaper
                 // 刚装完被拉起来那会儿安装程序可能还占着安装包，所以等到第一次定时检查再删
                 if (firstTick && staged == null && !staging) Updater.CleanStale();
                 firstTick = false;
-                if (staged == null && settings.AutoUpdate && !Updater.IsDevBuild && (DateTime.Now - lastCheck).Duration() >= TimeSpan.FromHours(12)) CheckUpdate(false);
+                // 下好了的也照常查：可能出了更新的版本（SetNewer 换版本时会把下好的清掉重下），不查就永远发现不了
+                if (settings.AutoUpdate && !Updater.IsDevBuild && (DateTime.Now - lastCheck).Duration() >= TimeSpan.FromHours(12)) CheckUpdate(false);
             };
             updateTimer.Start();
         }
@@ -2238,6 +2239,7 @@ namespace WeatherWallpaper
             t = "update",
             tag = NewerOffered ? newer.Tag : null,
             cur = Updater.CurrentText,
+            dev = Updater.IsDevBuild,
             auto = settings.AutoUpdate && !Updater.IsDevBuild && !UpdatingProcess,
             installing = installing || staging,
             staged = staged != null,
@@ -2272,8 +2274,12 @@ namespace WeatherWallpaper
                 // 不弹通知，只在右键菜单（加粗）、左键弹出面板和「关于」里提示；开着自动更新就在后台把它下好，
                 // 点卡片 /「关于」的按钮立刻生效，不点就等下次正常启动时自动装上
                 SetNewer(info);
-                if (settings.AutoUpdate) { var _ = StageUpdate(); }
-                if (manual) MessageBox.Show("发现新版本 " + info.Tag + "。\n\n后台正在下载，点弹出面板或「关于」里的按钮可以立刻更新；也可以等下次启动时自动更新。",
+                if (settings.AutoUpdate) { var _ = StageUpdate(true); }
+                if (manual) MessageBox.Show("发现新版本 " + info.Tag + "。" + (staged != null && staged.Version == info.Version
+                        ? "\n\n已经下载好，点弹出面板或「关于」里的「重启更新」立刻生效；不点的话下次启动时自动更新。"
+                        : settings.AutoUpdate
+                            ? "\n\n后台正在下载，点弹出面板或「关于」里的按钮可以立刻更新；也可以等下次启动时自动更新。"
+                            : "\n\n点弹出面板或「关于」里的按钮即可下载并立刻更新。"),
                     "天气壁纸", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
@@ -2295,21 +2301,44 @@ namespace WeatherWallpaper
             PostAbout();
         }
 
-        /// <summary>后台下好新版本。不弹进度窗，只把状态写进「关于」和托盘菜单；关掉自动更新就撤掉已下载的更新。</summary>
-        async Task<bool> StageUpdate()
+        /// <summary>后台下好新版本。不弹进度窗，只把状态写进「关于」和托盘菜单；background = 开着自动更新的后台下载，
+        /// 下载期间用户关掉了自动更新就把它删掉，不留着下次启动时装（点了更新的除外，那是明确要求）。</summary>
+        async Task<bool> StageUpdate(bool background = false)
         {
             if (newer == null || staging || installing || staged != null || Updater.IsDevBuild) return false;
             staging = true;
             installError = null;
+            var want = newer;   // 下载期间并发的检查可能换版本 / 撤版：下完先对上号再收下
+            bool dropped = false;
             try
             {
                 var progress = new Progress<string>(t => { installText = t; UpdateItemText(t); PostAbout(); });
-                staged = await Updater.Stage(newer, progress);
+                var s = await Updater.Stage(want, progress);
                 installText = null;
+                if (want?.Tag != newer?.Tag)   // 下载期间换了版本 / 撤版了：这个不要了（ClearStaged 清不掉就等启动时的 CleanStale）
+                {
+                    staged = null;
+                    Updater.ClearStaged();
+                    PostAbout();
+                    flyout?.Post(UpdateJson());
+                    dropped = true;
+                    return false;
+                }
+                staged = s;
+                if (installWhenStaged) { installWhenStaged = false; staging = false; var _ = InstallUpdate(staged, true); return true; }
+                if (background && !settings.AutoUpdate)   // 下载期间关了自动更新：删掉，不留着下次启动时装
+                {
+                    staged = null;
+                    Updater.ClearStaged();
+                    UpdateItemText("发现新版本 " + newer.Tag + "，点击更新（当前 " + Updater.CurrentText + "）");
+                    flyout?.Post(UpdateJson());
+                    PostAbout();
+                    Log.Write("update: auto-update turned off while downloading, staged package removed");
+                    return true;
+                }
                 UpdateItemText("已下载 " + newer.Tag + " · 点击重启更新");
                 PostAbout();
                 flyout?.Post(UpdateJson());
-                if (installWhenStaged) { installWhenStaged = false; staging = false; var _ = InstallUpdate(staged, true); }
                 return true;
             }
             catch (Exception ex)
@@ -2318,11 +2347,16 @@ namespace WeatherWallpaper
                 installText = null;
                 installError = "下载更新失败：" + ex.Message;
                 Log.Write("update stage: " + ex);
-                UpdateItemText("更新到 " + newer.Tag + " · 点击重试");
+                UpdateItemText("更新到 " + (newer?.Tag ?? want?.Tag) + " · 点击重试");
                 PostAbout();
+                flyout?.Post(UpdateJson());
                 return false;
             }
-            finally { staging = false; }
+            finally
+            {
+                staging = false;
+                if (dropped && newer != null && settings.AutoUpdate) { var _ = StageUpdate(background); }   // 接着下换上来的新版本
+            }
         }
 
         void UpdateItemText(string t)
@@ -2349,7 +2383,9 @@ namespace WeatherWallpaper
             {
                 if (!await StageUpdate()) return;    // StageUpdate 把失败写进「关于」了
             }
-            var _ = InstallUpdate(staged, click);
+            var s = staged;
+            if (s == null || s.Version != info.Version) return;   // 下载期间版本被换掉、下好的被丢弃了：等下次检查
+            var _ = InstallUpdate(s, click);
         }
 
         Task InstallUpdate(StagedUpdate s, bool click)
@@ -2372,6 +2408,7 @@ namespace WeatherWallpaper
                 installText = null;
                 UpdateSceneTip(sceneText);
                 PostAbout();   // 下载进度留在托盘提示上会让人以为还在更新
+                flyout?.Post(UpdateJson());
                 updateItem.Text = "更新到 " + s.Tag + " · 点击重试";
                 Log.Write("update install: " + ex);
                 if (click && MessageBox.Show("自动更新失败：" + ex.Message + "\n\n是否打开下载页手动安装？", "天气壁纸 · 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)

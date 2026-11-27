@@ -53,7 +53,10 @@
       const u = document.createElement('div');
       u.className = 'update';
       const status = update.installing ? (update.staged ? '正在重启更新…' : '正在后台下载，点这里等下完就更新…')
-        : !update.auto ? '下次启动时自动生效' : update.staged ? '已下载 · 点击立刻重启更新 ›' : '正在后台下载 · 点击立刻更新 ›';
+        : update.staged ? '已下载 · 点击立刻重启更新 ›'
+        : update.dev ? '打开下载页看新版本 ›'
+        : !update.auto ? '点击下载并立刻更新 ›'
+        : '正在后台下载 · 点击立刻更新 ›';
       u.innerHTML = '<b>发现新版本 ' + update.tag + '</b><span>' + status + '</span>';
       u.onclick = () => post('cmd:update');
       panel.appendChild(u);
