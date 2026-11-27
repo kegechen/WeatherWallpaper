@@ -16,7 +16,10 @@
 //   fps         页面帧率（5–60，默认 24）
 //   cloudFps    云的帧率（1–24，默认 6）。和 fps 各管各的；下雨雪时整页按 fps 出帧，云最多也就这么快
 //   panel       显示天气卡片（默认 true）
-//   lockPanel   锁屏上也显示天气卡片（默认 true）；false = 锁屏上只有天气画面，回到桌面卡片再淡入
+//   lockPanel   锁屏上也显示天气卡片（默认 true）；false = 锁屏上不显示天气卡片，回到桌面再淡入
+//   quote       每日一句（Windows 版的示例卡片 cards/quote.js）：off 不显示（默认）/ lock 只在锁屏上 / both 桌面和锁屏
+//   quotePos, quoteX, quoteY  每日一句的位置，写法同 cardPos / cardX / cardY（默认 bc 底部居中、0、32）。
+//               和天气卡片叠在一起时挪到它后面（间隔 12）。自己的句子放 /etc/wwp/每日一句.txt（一行一句，出处写在“ — ”后面）
 //   show        卡片上显示哪些内容（城市和当前天气总是显示），同 Windows 版 CardSpec.Show 的键，逗号分隔的字符串或数组：
 //               date 公历日期、week 星期、lunar 农历、hilo 今日最高 / 最低、src 定位来源、aqi 空气、feel 体感、hum 湿度、wind 风、
 //               hours 今天逐小时、days 未来几天、sun 日出日落、upd 更新时间。不填 = 默认（除日期行外都显示），"" = 只显示城市和当前天气
@@ -128,6 +131,7 @@
   function fromPage(m) {
     if (m === 'ready' || (m && m.t === 'ready')) { onReady(); return; }
     if (typeof m === 'string') { if (m.startsWith('log:')) log('页面：' + m.slice(4)); return; }
+    if (m && /^c(src|file|get|fit|state|refreshed)$/.test(m.t)) { onCardMsg(m); return; }   // 每日一句的脚本找宿主
     if (m && m.t === 'viewport') {
       log('视口 ' + m.w + 'x' + m.h + ' dpr ' + m.dpr + '（screen ' + screen.width + 'x' + screen.height + '）');
       sendLayout(); updateBackdrop();
@@ -212,7 +216,7 @@
     await cfgReady;
     ready = true;
     sendLayout(true);
-    if (locked) applyLockZoom();
+    applyLockZoom();   // 桌面上也要：只在锁屏上显示的每日一句先藏起来
     sendPreview(true);
     fxSent = fx.kind;   // 页面重载（渲染进程崩溃）时正在播的接着播
     send({ t: 'fx', kind: fx.kind });
@@ -246,15 +250,19 @@
       id: KEY, key: KEY, h, show,
       x: Math.round(Math.max(0, Math.min(x, W - CARD_W))), y: Math.round(Math.max(0, Math.min(y, H - h))),
     };
+    // panel 只管天气卡片，每日一句另算：两样都关了页面才不画卡片
+    const wxOn = !SNAPSHOT && cfg.panel !== false, qm = quoteMode(), cards = wxOn ? [card] : [];
+    // 每日一句只在锁屏上、锁屏上又不显示天气卡片时，两张不会同时出现，不用互相让
+    if (qm !== 'off') cards.push(quoteCard(W, H, ground, wxOn && !(qm === 'lock' && cfg.lockPanel === false) ? card : null));
     const m = {
       t: 'layout', primary: true, ground, overlay: false,
-      panel: !SNAPSHOT && cfg.panel !== false, noWeather: false,
+      panel: cards.length > 0, noWeather: false,
       fps: num(cfg.fps, 24, 5, 60) | 0, lowmem: !!cfg.lowmem, minimal: minimal(),
       // 云默认每秒只画 6 帧（Windows 版 12）：Qt WebEngine 在 treeland 上每出一帧的固定开销大（L540 上约 0.7% 单核 / 帧每秒，
       // 和画了什么几乎无关），treeland 还要跟着重合成整屏；云飘得慢、边缘软，6 帧和 12 帧并排对比看不出差别。设置窗口可调
       cloudFps: num(cfg.cloudFps, 6, 1, 24) | 0,
       overlayWall: overlayWall(), skyOpacity: num(cfg.skyOpacity, 0.45, 0.05, 1), cloudAlpha: num(cfg.cloudAlpha, 0.72, 0.1, 1),
-      festive: cfg.festive !== false, scene: KEY, screen: 'treeland', cards: [card],
+      festive: cfg.festive !== false, scene: KEY, screen: 'treeland', cards,
       effects: [],   // 自定义效果脚本暂不支持（列表一变页面会整页重载，这里保持不变）
       defKey: KEY, keys: [KEY],
     };
@@ -267,7 +275,11 @@
   // 这里让卡片层反过来以屏幕中心缩小到 1/1.2，两者抵消：卡片在锁屏上的位置、大小和桌面上一模一样，天气画面照样放大。
   // 只动卡片层（#cards，里面的 .card 是 position: fixed）：先让它铺满视口，加了 transform 之后卡片改以它为参照，位置不变；
   // 过渡用 easeOutExpo，和 treeland 的缩放动画（1 秒 OutExpo）大致同步。
-  // 配置了锁屏不显示卡片（lockPanel: false）时，锁屏上整个卡片层淡出，回到桌面再淡入
+  // 只在一边显示的卡片（锁屏上不显示天气卡片 lockPanel: false；每日一句只在锁屏上 quote: 'lock'）在另一边淡出：
+  // 卡片元素留着（每日一句的脚本不停，不然每次锁屏都换一句），用 <html> 上的 class 加样式表藏起来，页面新建的卡片元素也照样生效。
+  // 天气卡片是 .card，自定义卡片（每日一句）是 .card.custom；淡入淡出用 .card 自己的 1 秒过渡
+  const HIDE_CSS = 'html.wwp-locked.wwp-nolockcard #cards > .card:not(.custom),' +
+    'html.wwp-quotelock:not(.wwp-locked) #cards > .card.custom { opacity: 0 !important; }';
   function applyLockZoom() {
     const el = document.getElementById('cards');
     if (!el) return;
@@ -275,12 +287,18 @@
       el.style.position = 'fixed';
       el.style.inset = '0';
       el.style.transformOrigin = '50% 50%';
-      el.style.transition = 'transform .6s cubic-bezier(.16, 1, .3, 1), opacity .4s';
+      el.style.transition = 'transform .6s cubic-bezier(.16, 1, .3, 1)';
+      const s = document.createElement('style');
+      s.textContent = HIDE_CSS;
+      (document.head || document.documentElement).appendChild(s);
     }
     const z = locked ? num(cfg.lockZoom, 1.2, 1, 3) : 1;
     el.dataset.wwpLock = String(z);
     el.style.transform = z === 1 ? '' : 'scale(' + (1 / z).toFixed(5) + ')';
-    el.style.opacity = locked && cfg.lockPanel === false ? '0' : '';
+    const de = document.documentElement.classList;
+    de.toggle('wwp-locked', locked);
+    de.toggle('wwp-nolockcard', cfg.lockPanel === false);
+    de.toggle('wwp-quotelock', quoteMode() === 'lock');
   }
 
   let resizeTm = 0;
@@ -539,5 +557,108 @@
       }
       if (ready && fx.kind !== fxSent) { fxSent = fx.kind; send({ t: 'fx', kind: fx.kind }); }
     }, 1000);
+  }
+
+  // ---- 每日一句：Windows 版的示例卡片 cards/quote.js 原样拿来用。脚本由页面的 web/cards.js 跑（Worker、沙箱、看门狗、
+  // 高度随内容），宿主那一半（Windows 版的 CustomCards.cs）在这里：给脚本源码（csrc）、读文件（cfile，api.readText）、
+  // 联网（cget，api.fetchJson，一言 hitokoto.cn），记下量出来的高度（cfit）重新排版
+  const QUOTE = 'quote', QUOTE_H_KEY = 'wwp.quoteH', GAP = 12;   // GAP 同 Windows 版 CardLayout.Gap
+  const CARD_FILES = '/etc/wwp/';   // api.readText('每日一句.txt') 读这里（Windows 版是 cards 文件夹）：factory 以 dde 用户运行，读不到家目录
+  const quoteMode = () => !SNAPSHOT && (cfg.quote === 'lock' || cfg.quote === 'both') ? cfg.quote : 'off';
+  // 卡片高度跟着句子长短变（autoHeight）：页面量好报上来，记下来下次启动先用它，不用等量完再跳一下
+  let quoteH = num(store.get(QUOTE_H_KEY), 96, 64, 720) | 0;
+
+  /** 每日一句的位置：同天气卡片（pos 贴哪条边、ox / oy 离边多远）；和天气卡片（avoid）叠在一起时顺着贴的那条边挪到它后面，
+   *  那边放不下就放到它另一边，两边都放不下就叠着。设置窗口 Main.qml 的 quoteRect 是同一套算法（预览图用） */
+  function quoteCard(W, H, ground, avoid) {
+    const pos = /^[tb][lcr]$/.test(cfg.quotePos) ? cfg.quotePos : 'bc';
+    const ox = num(cfg.quoteX, pos[1] === 'c' ? 0 : 32, pos[1] === 'c' ? -1e4 : 0, 1e4), oy = num(cfg.quoteY, 32, 0, 1e4);
+    const h = quoteH, bottom = H * (1 - ground), fit = v => Math.max(0, Math.min(v, H - h));
+    const x = Math.max(0, Math.min(pos[1] === 'l' ? ox : pos[1] === 'r' ? W - CARD_W - ox : (W - CARD_W) / 2 + ox, W - CARD_W));
+    let y = fit(pos[0] === 'b' ? bottom - oy - h : oy);
+    if (avoid && x < avoid.x + CARD_W && avoid.x < x + CARD_W && y < avoid.y + avoid.h && avoid.y < y + h) {
+      const below = avoid.y + avoid.h + GAP, above = avoid.y - GAP - h;
+      const canBelow = below + h <= bottom, canAbove = above >= 0;
+      y = fit(pos[0] === 't' ? (canBelow || !canAbove ? below : above) : (canAbove || !canBelow ? above : below));
+    }
+    // v：脚本的版本，变了页面会重新加载脚本。脚本随壁纸包装好就不变（升级包时 factory 会重新载入页面）
+    return { id: QUOTE, script: 'quote', v: 1, h, x: Math.round(x), y: Math.round(y) };
+  }
+
+  const reply = m => send(m);
+  let quoteErr = null;   // 上次报的错误（'' = 正常），同样的只记一次日志
+  function onCardMsg(m) {
+    switch (m.t) {
+      case 'csrc': cardSource(String(m.f || '')); break;
+      case 'cfile': cardFile(m); break;
+      case 'cget': cardGet(m); break;
+      case 'cfit': {   // h = 0：脚本改成了固定高度（这里的脚本不会），不理
+        const h = Math.round(Number(m.h) || 0);
+        if (m.id !== QUOTE || h <= 0) break;
+        const v = Math.max(64, Math.min(720, h));
+        if (v === quoteH) break;
+        quoteH = v;
+        store.set(QUOTE_H_KEY, v);
+        sendLayout();
+        break;
+      }
+      case 'cstate':
+        if (m.gone || m.id !== QUOTE) break;
+        if ((m.err || '') !== (quoteErr || '') && (m.err || quoteErr)) log(m.err ? '每日一句出错：' + m.err : '每日一句好了');
+        quoteErr = m.err || '';
+        break;
+    }
+  }
+  // 脚本只认壁纸包里 web/cards/ 下的（就是 Windows 版带的那几个示例）
+  function cardSource(f) {
+    if (!/^[\w-]+$/.test(f)) { reply({ t: 'csrc', f, err: '脚本名不对：' + f }); return; }
+    const x = new XMLHttpRequest();
+    x.onload = () => reply(x.responseText ? { t: 'csrc', f, v: 1, src: x.responseText } : { t: 'csrc', f, err: '找不到 ' + f + '.js' });
+    x.onerror = () => reply({ t: 'csrc', f, err: '找不到 ' + f + '.js' });
+    try { x.open('GET', new URL('cards/' + f + '.js', location.href).href); x.send(); } catch (e) { reply({ t: 'csrc', f, err: e.message }); }
+  }
+  const toDataUrl = b => new Promise(ok => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => ok(''); r.readAsDataURL(b); });
+  // 读 /etc/wwp/ 下的文件：只许文件夹里面的相对路径（不许 /、..），文字按 UTF-8；kind = image 给 data: 网址
+  function cardFile(m) {
+    const p = String(m.path || '').replace(/\\/g, '/'), fail = err => reply({ t: 'cfile', rid: m.rid, ok: false, err });
+    if (!p || p.startsWith('/') || p.split('/').some(s => s === '' || s === '.' || s === '..')) { fail('文件名不对：' + p); return; }
+    const x = new XMLHttpRequest();
+    if (m.kind === 'image') x.responseType = 'blob';
+    x.onload = async () => {
+      if (m.kind !== 'image') { reply({ t: 'cfile', rid: m.rid, ok: true, text: x.responseText }); return; }
+      const data = x.response && x.response.size ? await toDataUrl(x.response) : '';
+      if (data) reply({ t: 'cfile', rid: m.rid, ok: true, data }); else fail('读不出图片：' + CARD_FILES + p);
+    };
+    x.onerror = () => fail('没有 ' + CARD_FILES + p);
+    try { x.open('GET', 'file://' + CARD_FILES + p.split('/').map(encodeURIComponent).join('/')); x.send(); } catch (e) { fail(e.message); }
+  }
+  // 联网：同一个请求 60 秒内直接给上次的结果（同 Windows 版；脚本那边出错 61 秒后才重试），点了“换一句”的那一轮（fresh）真去取
+  const getCache = new Map();
+  async function cardGet(m) {
+    const key = JSON.stringify([m.kind, m.url, String(m.method || 'GET').toUpperCase(), m.body, m.headers]), now = Date.now();
+    for (const [k, c] of getCache) if (now - c.at > 60000) getCache.delete(k);
+    let c = getCache.get(key);
+    if (!c || m.fresh) getCache.set(key, c = { at: now, p: cardFetch(m) });
+    reply(Object.assign({ t: 'cget', rid: m.rid }, await c.p));
+  }
+  async function cardFetch(m) {
+    const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 15000);
+    try {
+      const method = String(m.method || 'GET').toUpperCase();
+      const r = await fetch(m.url, { method, headers: m.headers || {}, body: m.body != null && method !== 'GET' && method !== 'HEAD' ? m.body : undefined,
+        signal: ac.signal, cache: 'no-store', credentials: 'omit' });
+      const type = r.headers.get('content-type') || '';
+      if (m.kind === 'image') {
+        if (!r.ok) return { ok: false, err: '取图片失败：HTTP ' + r.status };
+        const b = await r.blob();
+        if (b.size > (8 << 20)) return { ok: false, err: '图片太大（超过 8 MB）' };
+        return { ok: true, status: r.status, type, data: await toDataUrl(b) };
+      }
+      const text = await r.text();
+      if (text.length > (2 << 20)) return { ok: false, err: '返回的内容太大（超过 2 MB）' };
+      return { ok: true, status: r.status, type, text };
+    } catch (e) {
+      return { ok: false, err: e.name === 'AbortError' ? '联网超时（15 秒）' : '联网失败：' + e.message };
+    } finally { clearTimeout(tm); }
   }
 })();

@@ -67,6 +67,11 @@ D.ApplicationWindow {
         { v: "overlay", t: "壁纸叠加", d: "天气叠在选好的壁纸上：天空半透明，云、日月、雨雪照常" },
         { v: "minimal", t: "极简模式", d: "平时只显示壁纸和卡片，几乎不占 CPU；拿到第一份天气、转雨、下雪时整屏播一段动画" }
     ]
+    readonly property var quoteModes: [
+        { v: "off", t: "不显示" }, { v: "lock", t: "只在锁屏上" }, { v: "both", t: "桌面和锁屏" }
+    ]
+    readonly property var posTargets: [{ v: "card", t: "天气卡片" }, { v: "quote", t: "每日一句" }]
+    readonly property int quoteH: 96   // 预览图里每日一句的高度：实际随句子长短变（两三行大约 82–108）
     readonly property int defFps: 24
     readonly property int defCloudFps: 6
     readonly property int maxCloudFps: 24
@@ -111,6 +116,11 @@ D.ApplicationWindow {
     property string cardPos: "tr"
     property int cardX: 32
     property int cardY: 32
+    property string quoteMode: "off"   // 每日一句（配置里是 quote）：off 不显示 / lock 只在锁屏上 / both 桌面和锁屏
+    property string quotePos: "bc"
+    property int quoteX: 0
+    property int quoteY: 32
+    property string posTarget: "card"  // 位置一栏调哪张卡片：card 天气卡片 / quote 每日一句（只是界面上的，不进配置）
     property var show: []
     property int refreshMin: 15
     property int fps: defFps
@@ -132,6 +142,12 @@ D.ApplicationWindow {
     readonly property bool dirty: savedSig !== "" && JSON.stringify(buildCfg()) !== savedSig
     readonly property string problem: checkProblem()
     readonly property var modeInfo: modes.find(m => m.v === mode) || modes[0]
+    // 位置一栏正在调的卡片：每日一句关着时只能是天气卡片，天气卡片关着时只能是每日一句
+    readonly property string tgt: quoteMode === "off" ? "card" : !panel ? "quote" : posTarget
+    readonly property string curPos: tgt === "quote" ? quotePos : cardPos
+    readonly property int curX: tgt === "quote" ? quoteX : cardX
+    readonly property int curY: tgt === "quote" ? quoteY : cardY
+    readonly property bool curShown: tgt === "quote" ? quoteMode !== "off" : panel
     // 现在的卡片内容是大 / 中 / 小哪一档，"" = 都不是（自定义）
     readonly property string cardSize: sizes.map(z => z.v).find(z => sizeKeys.every(k => (show.indexOf(k) >= 0) === (sizeSets[z].indexOf(k) >= 0))) || ""
     // 表单左边一列标签的宽度：两个字（城市、日期……）和四个字（刷新间隔……）各一种
@@ -190,6 +206,11 @@ D.ApplicationWindow {
         cardPos = /^[tb][lcr]$/.test(c.cardPos) ? c.cardPos : "tr"
         cardX = Math.round(num(c.cardX, 32, -4000, 4000))
         cardY = Math.round(num(c.cardY, 32, 0, 4000))
+        quoteMode = c.quote === "lock" || c.quote === "both" ? c.quote : "off"
+        quotePos = /^[tb][lcr]$/.test(c.quotePos) ? c.quotePos : "bc"
+        quoteX = Math.round(num(c.quoteX, quotePos[1] === "c" ? 0 : 32, -4000, 4000))
+        quoteY = Math.round(num(c.quoteY, 32, 0, 4000))
+        posTarget = "card"
         var want = keyList(Array.isArray(c.show) || typeof c.show === "string" ? c.show : defaultShow)
         var hide = keyList(c.hide)
         show = showKeys.filter(k => want.indexOf(k) >= 0 && hide.indexOf(k) < 0)
@@ -236,6 +257,10 @@ D.ApplicationWindow {
         c.cardPos = cardPos
         c.cardX = cardX
         c.cardY = cardY
+        c.quote = quoteMode
+        c.quotePos = quotePos
+        c.quoteX = quoteX
+        c.quoteY = quoteY
         c.show = show.join(",")
         delete c.hide          // 界面里勾的就是最终内容，写成完整的 show
         delete c.cardRight     // 旧版字段，换成了 cardPos / cardX / cardY
@@ -328,18 +353,58 @@ D.ApplicationWindow {
             h += 12 + 15
         return h + 14 + 1
     }
-    // 换到 pos 时的水平距离：居中时是离中线的偏移，靠边时是离边的距离，两种之间切换要重置
-    function xFor(pos) { return (cardPos[1] === "c") === (pos[1] === "c") ? cardX : pos[1] === "c" ? 0 : 32 }
-    function cardRect(W, H, pos) {
-        var cx = xFor(pos), h = cardHeight(), g = num(orig.ground, 0.0444, 0, 0.3)
-        var x = pos[1] === "l" ? cx : pos[1] === "r" ? W - cardW - cx : (W - cardW) / 2 + cx
-        var y = pos[0] === "b" ? H * (1 - g) - cardY - h : cardY
+    // 位置一栏正在调的卡片换到 pos 时的水平距离：居中时是离中线的偏移，靠边时是离边的距离，两种之间切换要重置
+    function xFor(pos) { return (curPos[1] === "c") === (pos[1] === "c") ? curX : pos[1] === "c" ? 0 : 32 }
+    // 卡片在屏幕上的位置（同 host.js）：pos 贴哪条边，ox / oy 离边多远，h 卡片高度
+    function rectAt(W, H, pos, ox, oy, h) {
+        var g = num(orig.ground, 0.0444, 0, 0.3)
+        var x = pos[1] === "l" ? ox : pos[1] === "r" ? W - cardW - ox : (W - cardW) / 2 + ox
+        var y = pos[0] === "b" ? H * (1 - g) - oy - h : oy
         return Qt.rect(Math.max(0, Math.min(x, W - cardW)), Math.max(0, Math.min(y, H - h)), cardW, h)
     }
-    function setCardPos(p) {
+    // 每日一句的位置，算法同 host.js 的 quoteCard：和天气卡片叠在一起时顺着贴的那条边挪到它后面（间隔 12），那边放不下就放到另一边。
+    // 只在锁屏上、锁屏上又不显示天气卡片时两张不会同时出现，不用让
+    function quoteRect(W, H, pos, ox) {
+        var r = rectAt(W, H, pos, ox, quoteY, quoteH)
+        if (!panel || (quoteMode === "lock" && !lockPanel))
+            return r
+        var a = rectAt(W, H, cardPos, cardX, cardY, cardHeight())
+        if (!(r.x < a.x + a.width && a.x < r.x + r.width && r.y < a.y + a.height && a.y < r.y + r.height))
+            return r
+        var bottom = H * (1 - num(orig.ground, 0.0444, 0, 0.3))
+        var below = a.y + a.height + 12, above = a.y - 12 - quoteH
+        var canBelow = below + quoteH <= bottom, canAbove = above >= 0
+        var y = pos[0] === "t" ? (canBelow || !canAbove ? below : above) : (canAbove || !canBelow ? above : below)
+        return Qt.rect(r.x, Math.max(0, Math.min(y, H - quoteH)), r.width, quoteH)
+    }
+    // 正在调的卡片挪到 pos 时在哪（预览图里悬停的虚影）
+    function targetRect(W, H, pos) {
+        return tgt === "quote" ? quoteRect(W, H, pos, xFor(pos)) : rectAt(W, H, pos, xFor(pos), cardY, cardHeight())
+    }
+    function setPos(p) {
         var x = xFor(p)
-        cardPos = p
-        cardX = x
+        if (tgt === "quote") {
+            quotePos = p
+            quoteX = x
+        } else {
+            cardPos = p
+            cardX = x
+        }
+    }
+    function setOffX(v) { if (tgt === "quote") quoteX = v; else cardX = v }
+    function setOffY(v) { if (tgt === "quote") quoteY = v; else cardY = v }
+    function setQuoteMode(v) {
+        if (v === quoteMode)
+            return
+        quoteMode = v
+        posTarget = v === "off" ? "card" : "quote"   // 打开每日一句时位置一栏直接换成调它
+    }
+    function posName(p) { return (positions.find(o => o.p === p) || positions[4]).t }
+    // 每日一句一栏的“调整位置”：位置一栏换成调每日一句，再把它滚到看得见的地方（窄窗口上下排时它在下面）
+    function editQuotePos() {
+        posTarget = "quote"
+        var f = sv.contentItem, y = posSec.mapToItem(f.contentItem, 0, 0).y - 12
+        f.contentY = Math.max(0, Math.min(y, f.contentHeight - f.height))
     }
 
     // 自动定位时看看 IP 定位到哪里（壁纸用的也是 ip-api.com）
@@ -833,11 +898,11 @@ D.ApplicationWindow {
         id: pb
         property string pos
         property string label
-        readonly property bool sel: win.cardPos === pos
+        readonly property bool sel: win.curPos === pos
         Layout.fillWidth: true
         Layout.preferredWidth: 100     // 三列一样宽
         highlighted: sel
-        onClicked: win.setCardPos(pos)
+        onClicked: win.setPos(pos)
         contentItem: Item {
             implicitWidth: pbRow.implicitWidth
             implicitHeight: pbRow.implicitHeight
@@ -1194,6 +1259,47 @@ D.ApplicationWindow {
                     }
                 }
 
+                // 每日一句：Windows 版的示例卡片 cards/quote.js，壁纸页面里跑它（host.js 当宿主）；位置在右栏“位置”里调
+                Section {
+                    title: "每日一句"
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            FormLabel { text: "显示" }
+                            Segmented {
+                                options: win.quoteModes
+                                current: win.quoteMode
+                                onPicked: v => win.setQuoteMode(v)
+                            }
+                        }
+                        Hint {
+                            Layout.leftMargin: win.formIndent
+                            text: "一张单独的小卡片，每天零点换一句，高度随句子长短变。句子来自一言（hitokoto.cn），连不上网时用内置的几句；"
+                                  + "想用自己的句子，把“每日一句.txt”放进 /etc/wwp/（一行一句，出处写在“ — ”后面）"
+                        }
+                        RowLayout {   // 位置在右栏“位置”里调：这里给个入口，点了切到每日一句并滚到那里
+                            Layout.fillWidth: true
+                            visible: win.quoteMode !== "off"
+                            spacing: 12
+                            FormLabel { text: "位置" }
+                            Label {
+                                text: win.posName(win.quotePos)
+                                      + (win.quotePos[1] === "c" ? (win.quoteX ? "，偏 " + win.quoteX : "") : "，离" + (win.quotePos[1] === "l" ? "左" : "右") + "边 " + win.quoteX)
+                                      + "，离" + (win.quotePos[0] === "b" ? "下" : "上") + "边 " + win.quoteY
+                                opacity: 0.8
+                            }
+                            Item { Layout.fillWidth: true }
+                            D.Button {
+                                text: "调整位置"
+                                onClicked: win.editQuotePos()
+                            }
+                        }
+                    }
+                }
+
                 // 其他：Windows 版在托盘菜单里的几项
                 Section {
                     title: "其他"
@@ -1280,14 +1386,23 @@ D.ApplicationWindow {
                 // 位置：上面预览图（按屏幕比例画出卡片的位置和大小，点六个区域之一把卡片挪过去，悬停时先画出虚影），
                 // 下面六个位置按钮和偏移（同 Windows 版）
                 Section {
+                    id: posSec
                     title: "位置"
+                    Segmented {   // 开了每日一句：调哪张卡片的位置
+                        visible: win.quoteMode !== "off" && win.panel
+                        options: win.posTargets
+                        current: win.tgt
+                        onPicked: v => win.posTarget = v
+                    }
                     Rounded {
                         id: screenBox
                         radius: 8
                         readonly property real k: width / win.screenW
-                        readonly property rect card: win.cardRect(win.screenW, win.screenH, win.cardPos)
+                        readonly property rect card: win.rectAt(win.screenW, win.screenH, win.cardPos, win.cardX, win.cardY, win.cardHeight())
+                        readonly property rect quote: win.quoteRect(win.screenW, win.screenH, win.quotePos, win.quoteX)
                         property string hoverPos: ""
-                        readonly property rect ghost: hoverPos !== "" ? win.cardRect(win.screenW, win.screenH, hoverPos) : Qt.rect(0, 0, 0, 0)
+                        property bool overOther: false   // 鼠标在另一张卡片上：点了是换成调它，不画挪位置的虚影
+                        readonly property rect ghost: hoverPos !== "" ? win.targetRect(win.screenW, win.screenH, hoverPos) : Qt.rect(0, 0, 0, 0)
                         Layout.alignment: Qt.AlignHCenter
                         Layout.preferredWidth: content.thumbW
                         Layout.preferredHeight: Math.round(content.thumbW * win.screenH / win.screenW)
@@ -1327,7 +1442,7 @@ D.ApplicationWindow {
                             color: "#ccf2f5fa"
                         }
                         Rectangle {   // 悬停位置的虚影
-                            visible: win.panel && screenBox.hoverPos !== "" && screenBox.hoverPos !== win.cardPos
+                            visible: win.curShown && !screenBox.overOther && screenBox.hoverPos !== "" && screenBox.hoverPos !== win.curPos
                             x: screenBox.ghost.x * screenBox.k
                             y: screenBox.ghost.y * screenBox.k
                             width: screenBox.ghost.width * screenBox.k
@@ -1337,7 +1452,8 @@ D.ApplicationWindow {
                             border.width: 1.5
                             border.color: "#b3ffffff"
                         }
-                        Rectangle {   // 卡片（只显示天气画面时淡一点）
+                        Rectangle {   // 天气卡片（只显示天气画面时淡一点；开着每日一句时就不画了），调的不是它时也淡一点
+                            visible: win.panel || win.quoteMode === "off"
                             x: screenBox.card.x * screenBox.k
                             y: screenBox.card.y * screenBox.k
                             width: screenBox.card.width * screenBox.k
@@ -1345,10 +1461,37 @@ D.ApplicationWindow {
                             radius: 14 * screenBox.k
                             color: "#66ffffff"
                             border.color: "#e6ffffff"
-                            opacity: win.panel ? 1 : 0.35
+                            opacity: !win.panel ? 0.35 : win.tgt === "card" ? 1 : 0.5
                             Behavior on x { enabled: win.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                             Behavior on y { enabled: win.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                             Behavior on height { enabled: win.ready; NumberAnimation { duration: 150 } }
+                        }
+                        Rectangle {   // 每日一句：里面两道横线当文字
+                            visible: win.quoteMode !== "off"
+                            x: screenBox.quote.x * screenBox.k
+                            y: screenBox.quote.y * screenBox.k
+                            width: screenBox.quote.width * screenBox.k
+                            height: screenBox.quote.height * screenBox.k
+                            radius: 14 * screenBox.k
+                            color: "#66ffffff"
+                            border.color: "#e6ffffff"
+                            opacity: win.tgt === "quote" ? 1 : 0.5
+                            Behavior on x { enabled: win.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                            Behavior on y { enabled: win.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                            Column {
+                                anchors.centerIn: parent
+                                spacing: Math.max(2, parent.height * 0.14)
+                                Repeater {
+                                    model: [0.78, 0.5]
+                                    delegate: Rectangle {
+                                        required property real modelData
+                                        width: screenBox.quote.width * screenBox.k * modelData
+                                        height: Math.max(1.5, screenBox.quote.height * screenBox.k * 0.1)
+                                        radius: height / 2
+                                        color: "#ccffffff"
+                                    }
+                                }
+                            }
                         }
                         Repeater {   // 六个点击区：三列两行
                             model: win.positions
@@ -1358,7 +1501,7 @@ D.ApplicationWindow {
                                 y: modelData.p[0] === "t" ? 0 : screenBox.height / 2
                                 width: screenBox.width / 3
                                 height: screenBox.height / 2
-                                enabled: win.panel
+                                enabled: win.curShown
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onContainsMouseChanged: {
@@ -1367,14 +1510,27 @@ D.ApplicationWindow {
                                     else if (screenBox.hoverPos === modelData.p)
                                         screenBox.hoverPos = ""
                                 }
-                                onClicked: win.setCardPos(modelData.p)
+                                onClicked: win.setPos(modelData.p)
                             }
+                        }
+                        MouseArea {   // 点另一张卡片（淡的那张）：换成调它
+                            readonly property rect r: win.tgt === "quote" ? screenBox.card : screenBox.quote
+                            visible: win.quoteMode !== "off" && win.panel
+                            x: r.x * screenBox.k
+                            y: r.y * screenBox.k
+                            width: r.width * screenBox.k
+                            height: r.height * screenBox.k
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onContainsMouseChanged: screenBox.overOther = containsMouse
+                            onVisibleChanged: if (!visible) screenBox.overOther = false
+                            onClicked: win.posTarget = win.tgt === "quote" ? "card" : "quote"
                         }
                     }
                     ColumnLayout {
                         Layout.fillWidth: true
-                        enabled: win.panel
-                        opacity: win.panel ? 1 : 0.45
+                        enabled: win.curShown
+                        opacity: win.curShown ? 1 : 0.45
                         spacing: 12
                         GridLayout {
                             Layout.fillWidth: true
@@ -1398,16 +1554,16 @@ D.ApplicationWindow {
                                 Layout.preferredWidth: 100
                                 spacing: 4
                                 Label {
-                                    text: (win.cardPos[1] === "l" ? "离左边" : win.cardPos[1] === "r" ? "离右边" : "离中线（正数往右）") + " · 像素"
+                                    text: (win.curPos[1] === "l" ? "离左边" : win.curPos[1] === "r" ? "离右边" : "离中线（正数往右）") + " · 像素"
                                     opacity: 0.7
                                     font: D.DTK.fontManager.t9
                                 }
                                 SpinBox {
                                     Layout.fillWidth: true
-                                    from: win.cardPos[1] === "c" ? -2000 : 0; to: 2000; stepSize: 4
+                                    from: win.curPos[1] === "c" ? -2000 : 0; to: 2000; stepSize: 4
                                     editable: true
-                                    value: win.cardX
-                                    onValueModified: win.cardX = value
+                                    value: win.curX
+                                    onValueModified: win.setOffX(value)
                                 }
                             }
                             ColumnLayout {
@@ -1415,7 +1571,7 @@ D.ApplicationWindow {
                                 Layout.preferredWidth: 100
                                 spacing: 4
                                 Label {
-                                    text: (win.cardPos[0] === "b" ? "离下边（任务栏上方）" : "离上边") + " · 像素"
+                                    text: (win.curPos[0] === "b" ? "离下边（任务栏上方）" : "离上边") + " · 像素"
                                     opacity: 0.7
                                     font: D.DTK.fontManager.t9
                                 }
@@ -1423,12 +1579,18 @@ D.ApplicationWindow {
                                     Layout.fillWidth: true
                                     from: 0; to: 2000; stepSize: 4
                                     editable: true
-                                    value: win.cardY
-                                    onValueModified: win.cardY = value
+                                    value: win.curY
+                                    onValueModified: win.setOffY(value)
                                 }
                             }
                         }
-                        Hint { text: "点预览图里的六块区域或上面的按钮换位置。" + (win.lockPanel ? "锁屏上卡片的位置和大小与桌面一样。" : "") }
+                        Hint {
+                            text: (win.quoteMode !== "off" && win.panel
+                                   ? "现在调的是" + (win.tgt === "quote" ? "每日一句" : "天气卡片") + "（在最上面切换，或点预览图里淡的那张卡片）。" : "")
+                                  + "点预览图里的六块区域或上面的按钮换位置。"
+                                  + (win.tgt === "quote" && win.panel ? "和天气卡片碰上时排到它后面。" : "")
+                                  + (win.tgt === "quote" || win.lockPanel ? "锁屏上卡片的位置和大小与桌面一样。" : "")
+                        }
                     }
                 }
 
@@ -1535,17 +1697,18 @@ D.ApplicationWindow {
                         checked: win.festive
                         onToggled: on => win.festive = on
                     }
+                    // 只管天气卡片，每日一句由它自己那一栏管：开着每日一句时文字说清楚
                     CheckRow {
-                        text: "只显示天气画面，不显示卡片"
-                        desc: "桌面和锁屏上都不画天气卡片，上面的位置和卡片内容不起作用"
+                        text: win.quoteMode === "off" ? "只显示天气画面，不显示卡片" : "不显示天气卡片"
+                        desc: "桌面和锁屏上都不画天气卡片，它的位置和卡片内容不起作用" + (win.quoteMode === "off" ? "" : "；每日一句照常显示")
                         checked: !win.panel
                         onToggled: on => win.panel = !on
                     }
                     CheckRow {
                         enabled: win.panel
                         opacity: win.panel ? 1 : 0.45
-                        text: "锁屏上只显示天气，不显示卡片"
-                        desc: "锁屏时卡片淡出，回到桌面再显示"
+                        text: win.quoteMode === "off" ? "锁屏上只显示天气，不显示卡片" : "锁屏上不显示天气卡片"
+                        desc: "锁屏时天气卡片淡出，回到桌面再显示"
                         checked: !win.lockPanel
                         onToggled: on => win.lockPanel = !on
                     }
