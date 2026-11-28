@@ -41,6 +41,14 @@ WebEngineView {
     }
 
     Component.onCompleted: {
+        // 简繁对照表（window.wwpZh），host.js 反查地名时用；设置窗口的搜城市也编进了同一份
+        var z = WebEngine.script()
+        z.name = "wwp-zh"
+        z.sourceUrl = wallpaper.packageUrl + "zh.js"
+        z.injectionPoint = WebEngineScript.DocumentCreation
+        z.worldId = WebEngineScript.MainWorld
+        z.runsOnSubFrames = false
+        userScripts.insert(z)
         var s = WebEngine.script()
         s.name = "wwp-host"
         s.sourceUrl = wallpaper.packageUrl + "host.js"

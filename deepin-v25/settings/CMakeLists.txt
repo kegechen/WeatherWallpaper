@@ -8,11 +8,17 @@ qt_add_executable(wwp-settings
     backend.cpp
 )
 
+# 简繁对照表 zh.js 放在网页版壁纸包里（host.js 反查地名也用它），编进来放在模块根目录，geo.js 按 "zh.js" 导入
+set(ZH_JS "${CMAKE_CURRENT_SOURCE_DIR}/../packages/weather-web/zh.js")
+set_source_files_properties("${ZH_JS}" PROPERTIES QT_RESOURCE_ALIAS zh.js)
+
 qt_add_qml_module(wwp-settings
     URI WwpSettings
     VERSION 1.0
     QML_FILES
     Main.qml
+    geo.js
+    "${ZH_JS}"
     RESOURCES
     wwp-settings.png
 )

@@ -5,6 +5,7 @@ import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
 import org.deepin.dtk 1.0 as D
 import org.deepin.dtk.style 1.0 as DS
+import "geo.js" as Geo
 
 // 天气壁纸设置：读 /etc/wwp/weather.json 填进界面，"应用"时整份写回（配置里界面没有的字段原样保留）。
 // 壁纸页面（host.js）每 2 秒看一次配置文件，写进去几秒内就生效，不用切换壁纸。字段含义见 deepin-v25/README.md。
@@ -132,6 +133,8 @@ D.ApplicationWindow {
     property string ipPlace: ""
     property string ipCoord: ""
     property bool searching: false
+    property string searchQuery: ""    // 正在搜的词
+    property var searchJob: null       // 正在搜的那一次（geo.js 的 search 返回的 { expire, cancel }）
     property string searchMsg: ""
     property var cityResults: []       // 城市搜索结果 { name, detail, lat, lon }（不用 ListModel：deepin 默认没装 QtQml.Models）
     property var wallState: ({ ok: false })
@@ -217,6 +220,7 @@ D.ApplicationWindow {
         refreshMin = Math.round(num(c.refresh, 15, 5, 180))
         fps = Math.round(num(c.fps, defFps, 5, 60))
         cloudFps = Math.round(num(c.cloudFps, defCloudFps, 1, maxCloudFps))
+        stopSearch()
         cityResults = []
         searchMsg = ""
         savedSig = JSON.stringify(buildCfg())
@@ -310,6 +314,7 @@ D.ApplicationWindow {
         revMsg = ""
         revBusy = false
         revSeq++
+        stopSearch()
         cityResults = []
         searchMsg = ""
         locMode = m
@@ -432,37 +437,40 @@ D.ApplicationWindow {
         x.send()
     }
 
-    // 城市搜索：Open-Meteo 地名库（壁纸只填城市名时查的也是它），选中后连经纬度一起存，不会查歧义
+    // 城市搜索：Photon（OpenStreetMap）+ Open-Meteo（GeoNames）两个地名库一起查、合并排序，见 geo.js（同 Windows 版 WeatherService.SearchCity）。
+    // 选中后连经纬度一起存，不会查歧义。搜着的时候改了词再搜：前一次作废（同 Windows 版卡片设置）
     function searchCity() {
         var q = cityField.text.trim()
-        if (q === "" || searching)
+        if (q === "" || (searching && q === searchQuery))
             return
+        stopSearch()
         searching = true
+        searchQuery = q
         searchMsg = ""
         cityResults = []
-        var x = new XMLHttpRequest()
-        x.onreadystatechange = function () {
-            if (x.readyState !== XMLHttpRequest.DONE)
+        var job = Geo.search(q, function (err, list) {
+            if (job !== searchJob)
                 return
+            searchJob = null
+            searchTimer.stop()
             searching = false
-            try {
-                if (x.status !== 200)
-                    throw new Error(x.status ? "HTTP " + x.status : "网络不通")
-                var r = JSON.parse(x.responseText).results || []
-                cityResults = r.map(it => ({
-                    name: it.name,
-                    detail: [it.admin2, it.admin1, it.country].filter((s, j, a) => s && s !== it.name && a.indexOf(s) === j).join(" · "),
-                    lat: it.latitude,
-                    lon: it.longitude
-                }))
-                if (r.length === 0)
-                    searchMsg = "地名库里没有“" + q + "”，换个写法（如“武汉”、外国城市用英文名），或者改用“输入经纬度”"
-            } catch (e) {
-                searchMsg = "搜索失败：" + e.message
+            if (err !== "") {
+                searchMsg = "搜索失败：" + err
+                return
             }
-        }
-        x.open("GET", "https://geocoding-api.open-meteo.com/v1/search?count=8&language=zh&format=json&name=" + encodeURIComponent(q))
-        x.send()
+            cityResults = list
+            if (list.length === 0)
+                searchMsg = "没有找到“" + q + "”，换个写法试试：中文、拼音或英文都行，外国城市用英文名更容易搜到（如 Seoul）；还是没有就改用“输入经纬度”"
+        })
+        searchJob = job
+        searchTimer.restart()
+    }
+    function stopSearch() {
+        if (searchJob)
+            searchJob.cancel()
+        searchJob = null
+        searchTimer.stop()
+        searching = false
     }
     function pickCity(r) {
         cityName = r.name
@@ -470,9 +478,11 @@ D.ApplicationWindow {
         lonText = r.lon.toFixed(4)
         cityResults = []
         searchMsg = ""
+        cityField.text = ""   // 选好了清掉搜索词（同 Windows 版），选中的城市显示在下面一行
     }
 
-    // 输入经纬度：停手 0.7 秒后按经纬度反查地名（BigDataCloud，壁纸按 IP 定位时反查用的也是它，写法同 host.js 的 reverseName）
+    // 输入经纬度：停手 0.7 秒后按经纬度反查地名（BigDataCloud，壁纸按 IP 定位时反查用的也是它）。
+    // 名字的拼法同 Windows 版 WeatherService.LookupName（geo.js 的 placeName：转成简体）
     function coordEdited() {
         revSeq++
         revBusy = false
@@ -495,8 +505,7 @@ D.ApplicationWindow {
                 if (x.status !== 200)
                     throw new Error(x.status ? "HTTP " + x.status : "网络不通")
                 var d = JSON.parse(x.responseText)
-                var city = d.city || d.principalSubdivision || "", local = d.locality || ""
-                var name = local && local !== city ? city + " · " + local : city || d.countryName || ""
+                var name = Geo.placeName(d) || Geo.zh.simplified(d.countryName || "")   // 海上等没有城市的地方：至少给个国家名
                 if (name === "") {
                     revMsg = "这个位置反查不到地名，显示名可以自己填；不填的话卡片上显示经纬度"
                     return
@@ -530,6 +539,12 @@ D.ApplicationWindow {
         id: revTimer
         interval: 700
         onTriggered: win.reverseLookup()
+    }
+    // 搜城市最多等 8 秒（QML 的 XMLHttpRequest 没有超时）：回来了一个库就用它的，都没回来按超时报错
+    Timer {
+        id: searchTimer
+        interval: 8000
+        onTriggered: if (win.searchJob) win.searchJob.expire()
     }
 
     Connections {
@@ -1037,8 +1052,9 @@ D.ApplicationWindow {
                                 onAccepted: win.searchCity()
                             }
                             Button {
-                                text: win.searching ? "搜索中…" : "搜索"
-                                enabled: !win.searching && cityField.text.trim() !== ""
+                                readonly property string q: cityField.text.trim()
+                                text: win.searching && q === win.searchQuery ? "搜索中…" : "搜索"
+                                enabled: q !== "" && !(win.searching && q === win.searchQuery)   // 搜着的时候改了词还能再搜
                                 onClicked: win.searchCity()
                             }
                         }
@@ -1085,6 +1101,16 @@ D.ApplicationWindow {
                                         }
                                         onClicked: win.pickCity(res.modelData)
                                     }
+                                }
+                                // OpenStreetMap 的数据要求署名（同 Windows 版搜索结果的最后一行）
+                                Label {
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 12
+                                    Layout.topMargin: 2
+                                    Layout.bottomMargin: 4
+                                    text: "地名数据：© OpenStreetMap 贡献者、GeoNames"
+                                    opacity: 0.45
+                                    font: D.DTK.fontManager.t9
                                 }
                             }
                         }

@@ -385,11 +385,14 @@
     } finally { clearTimeout(tm); }
   }
 
+  // 同 WeatherService.LookupName：它的中文名简繁混着给（"武汉市 · 江岸區"），转成简体（zh.js，main.qml 先注入的）；
+  // 没有城市名时只用区县，别拼成" · 江岸区"
+  const zhS = s => window.wwpZh ? window.wwpZh.simplified(s || '') : s || '';
   async function reverseName(lat, lon) {
     try {
       const d = await getJson('https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' + lat + '&longitude=' + lon + '&localityLanguage=zh', 10000);
-      const city = d.city || d.principalSubdivision || '', locality = d.locality || '';
-      return locality && locality !== city ? city + ' · ' + locality : city;
+      const city = zhS(d.city) || zhS(d.principalSubdivision), locality = zhS(d.locality);
+      return locality && locality !== city ? (city ? city + ' · ' + locality : locality) : city;
     } catch (e) { log('反查地名失败：' + e.message); return ''; }
   }
 

@@ -28,9 +28,10 @@
 | `tools/wwp-reload.sh` | 开发用：换上新编的 factory（SIGHUP 原地重启，不占 treeland 的重启额度），再把壁纸切走又切回 |
 | `tools/wwp-unset.sh` | 卸载前把已登录用户正在用的天气壁纸换回系统默认壁纸（装成 `/usr/local/libexec/wwp-unset`） |
 | `tools/wwp-watch.sh` + `.service` | 用户服务：treeland 不再拉起壁纸进程时弹通知（装成 `/usr/local/libexec/wwp-watch`），见下文“壁纸停住时的提醒” |
+| `tools/gen-zh.ps1` | 在 Windows 上从系统的 `LCMapStringEx` 导出简繁逐字对照表，生成 `packages/weather-web/zh.js` |
 | `packages/<名字>/` | 壁纸包：`manifest.json` + QML 场景 |
-| `packages/weather-web/` | 网页版：`main.qml`（`WebEngineView`）+ `host.js`（宿主）+ `web.src`（指向仓库顶层的 `web/`） |
-| `settings/` | 设置窗口 `wwp-settings`（Qt Quick，Chameleon/DTK 风格）+ 提权助手 `wwp-config` + polkit 策略 + .desktop + 图标 |
+| `packages/weather-web/` | 网页版：`main.qml`（`WebEngineView`）+ `host.js`（宿主）+ `zh.js`（简繁转换，设置窗口也编进去用）+ `web.src`（指向仓库顶层的 `web/`） |
+| `settings/` | 设置窗口 `wwp-settings`（Qt Quick，Chameleon/DTK 风格，搜城市在 `geo.js`）+ 提权助手 `wwp-config` + polkit 策略 + .desktop + 图标 |
 | `deb/` | 打 deb 安装包的脚本、默认配置、版本号，见下 |
 | `experiments/webtest/` | 实验：普通窗口里跑 `WebEngineView`，看 WebGL 渲染器、测各天气场景的 CPU |
 | `install.sh` | 编译 / 安装 / 登记到控制中心 / 卸载（开发机自用） |
@@ -108,7 +109,8 @@ QML 场景的动画一律由 `wallpaper.time` 驱动，不要用 QML 自带的 A
 
 Windows 版里 C# 宿主做的事（定位、取天气、发布局和底图、暂停恢复），这里由 `host.js` 在网页里做：
 `main.qml` 用 `WebEngineScript` 在文档创建时注入它，它提供 `window.chrome.webview`（`postMessage` / `message` 事件），
-所以 `web/` 一行不用改。天气接口和参数同 `WeatherService.cs`；定位没配就走 ip-api.com，再用 BigDataCloud 反查地名。
+所以 `web/` 一行不用改。天气接口和参数同 `WeatherService.cs`；定位没配就走 ip-api.com，再用 BigDataCloud 反查地名
+（同 `WeatherService.LookupName` 转成简体，简繁对照表 `zh.js` 由 `main.qml` 在 `host.js` 之前注入）。
 factory 按路径一个壁纸一个页面：桌面和锁屏用同一个壁纸包时只有一个页面；用不同的天气壁纸包时有两个页面，
 它们共用 localStorage，一个取到天气另一个直接用。
 
@@ -222,6 +224,9 @@ Windows 版自定义卡片里的示例“每日一句”（`web/cards/quote.js`�
 - **基本信息**：城市是分段按钮“自动定位 / 搜索城市 / 输入经纬度”。自动定位显示按 IP 定位到哪里；搜索城市是搜索框 + 结果列表，
   选中后显示当前城市和经纬度；输入经纬度是纬度、经度一行（可以直接粘贴“30.59, 114.31”这类坐标），填好后自动反查地名，
   下面的名称默认跟着地名走，手动改过就不再覆盖。
+  搜城市照搬 Windows 版 `WeatherService.SearchCity`（`settings/geo.js`，两边一起改）：Photon（OpenStreetMap，国内区县、乡镇、景区）
+  和 Open-Meteo（GeoNames，外国城市的中文名）一起查，Open-Meteo 简繁各查一次、两字词再带“市”查、带“市区县”后缀没结果去掉再查；
+  按名字对得上 → 行政级别 → 人口排序，同一地点只留一条，名字统一成简体，最多 8 条，最多等 8 秒。
 - **卡片内容**：“大卡片 / 中卡片 / 小卡片”一键切换（只管逐小时、未来几天、底部一行），下面按 日期 / 天气 / 指标 / 预报 / 底部
   分组逐项勾选；勾选正好是某一档时那档亮起，标题右边是卡片大小（“自定义 · 336 × 311”）。
 - **每日一句**：分段按钮“不显示 / 只在锁屏上 / 桌面和锁屏”（`quote`），下面一行说明（句子从哪来、`/etc/wwp/每日一句.txt`）；
